@@ -113,7 +113,7 @@ class BuildStateTests(unittest.TestCase):
         for key in ("now", "up_next", "queued", "position", "duration", "paused",
                     "auto", "volume", "backend", "idle", "idle_note", "why", "request",
                     "queries", "engine_note", "cache_note", "foot", "log", "search",
-                    "loved", "vibe", "dj"):
+                    "loved", "vibe", "dj_line"):
             self.assertIn(key, s, key)
 
     def test_json_encodes_it(self):
@@ -710,16 +710,16 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(web.mask("AIzaSyS3cr3tKey123").startswith("AIz"))
         self.assertEqual(web.mask("short"), "·····")
         self.assertNotIn("S3cr3tKey", json.dumps({"m": web.mask("AIzaSyS3cr3tKey123")}))
-        # the DJ chat lives model is reported so the page can say which one is on
-        self.assertIn("live_model", view)
+
+        # the DJ chat is gone, so the settings panel no longer reports a live model
+        self.assertNotIn("live_model", view)
 
         with mock.patch("web.config.save_llm_config") as save:
             code, payload = web.save_settings({"model": ["gemini-3.6-flash"],
-                                               "live": ["gemini-live-test"],
                                                "key": ["  spaced  "]})
         self.assertEqual(code, 200)
         self.assertEqual(save.call_args.kwargs["LLM_MODEL"], "gemini-3.6-flash")
-        self.assertEqual(save.call_args.kwargs["LIVE_MODEL"], "gemini-live-test")
+        self.assertNotIn("LIVE_MODEL", save.call_args.kwargs)
         self.assertEqual(save.call_args.kwargs["LLM_API_KEY"], "spaced", "trimmed")
         self.assertNotIn("spaced", json.dumps(payload))
         self.assertEqual(payload["note"], "saved")
@@ -932,43 +932,47 @@ class ActionTests(unittest.TestCase):
             self.assertIn(verb, web.ACTIONS, verb)
 
 
-class ChatEndpointTests(unittest.TestCase):
-    """POST /api/chat: one message in, one DJ reply out, tools already applied."""
+class DJLineTests(unittest.TestCase):
+    """The local Spotify-DJ announcer: a read-only line, no model, no websocket."""
 
     def setUp(self):
-        self.ctx = web.Context(fake_dj(), volume=42)
+        import agent
+        self.agent = agent
+        self.dj = fake_dj()
+        self.ctx = web.Context(self.dj, volume=42)
 
-    def test_an_empty_message_is_400(self):
-        code, payload = web.chat_endpoint(self.ctx, {"q": ["   "]})
-        self.assertEqual(code, 400)
-        self.assertIn("type something", payload["error"])
+    def test_a_playing_track_gives_why_and_whats_next(self):
+        line = web.dj_line(self.ctx)
+        self.assertIn("Now playing", line)
+        self.assertIn("Up next:", line)
+        self.assertIn("why", line.lower())
+        # it is built from the real facts (the request), not a model reply
+        self.assertIn("90s trip hop", line)
 
-    def test_no_key_is_503_with_a_hint(self):
-        with mock.patch.object(web.agent_mod, "api_key", return_value=""):
-            code, payload = web.chat_endpoint(self.ctx, {"q": ["hi"]})
-        self.assertEqual(code, 503)
-        self.assertIn("key", payload["error"].lower())
+    def test_nothing_playing_says_so_without_crashing(self):
+        self.dj.current = None
+        self.dj.info = {}
+        line = web.dj_line(self.ctx)
+        self.assertIn("Nothing playing", line)
 
-    def test_the_reply_rides_back_and_state_is_attached(self):
-        class FakeAgent:
-            def chat(self, text):
-                return "Here's a sad lofi mix for you."
+    def test_narrate_never_raises_and_always_returns_text(self):
+        # even an empty snapshot is a sentence, not a traceback
+        self.assertIsInstance(self.agent.narrate({}), str)
+        self.assertIsInstance(self.agent.narrate({"now": "A - B", "why": "you asked for x",
+                                                  "next": "C - D"}), str)
 
-        with mock.patch.object(web, "get_agent", return_value=FakeAgent()):
-            code, payload = web.chat_endpoint(self.ctx, {"q": ["sad lofi"]})
-        self.assertEqual(code, 200)
-        self.assertEqual(payload["reply"], "Here's a sad lofi mix for you.")
-        self.assertIn("dj", payload)   # the skin uses this to say which model is on
+    def test_snapshot_names_the_set_and_the_picks(self):
+        self.dj.info["vibe"] = "lofi tuesday night"
+        self.dj.current["mixed"] = True          # a pick from the user's likes
+        snap = self.agent.dj_snapshot(self.ctx)
+        self.assertEqual(snap["vibe"], "lofi tuesday night")
+        self.assertIn("from your likes", snap["why"])
 
-    def test_a_turn_failure_is_500_not_a_crash(self):
-        class BadAgent:
-            def chat(self, text):
-                raise RuntimeError("the socket fell over")
-
-        with mock.patch.object(web, "get_agent", return_value=BadAgent()):
-            code, payload = web.chat_endpoint(self.ctx, {"q": ["hi"]})
-        self.assertEqual(code, 500)
-        self.assertIn("socket fell over", payload["error"])
+    def test_removing_the_chat_took_the_endpoint_with_it(self):
+        # /api/chat no longer exists, so a posting skin cannot reach an agent
+        self.assertNotIn("/api/chat", web.ROUTES)
+        self.assertFalse(hasattr(web, "chat_endpoint"))
+        self.assertFalse(hasattr(web, "get_agent"))
 
 
 class QueueRowActionTests(unittest.TestCase):

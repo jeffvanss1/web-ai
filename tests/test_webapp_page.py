@@ -155,16 +155,22 @@ class PageShapeTests(unittest.TestCase):
             self.assertIn("</svg>", svg, name)
             self.assertNotIn("@@", svg, name)
 
-    def test_the_ai_dj_chat_panel_is_present_and_posts_text(self):
+    def test_the_dj_is_an_always_on_announcer_not_a_chat_box(self):
         body = self.html.split("<body>", 1)[1]
-        for ident in ("chat-open", "chat", "chat-log", "chat-in", "chat-send", "chat-sub"):
-            self.assertIn(f'id="{ident}"', body, f"the chat is missing {ident}")
-        # messages land as text, never as HTML from the server (the DJ reply could
-        # contain markup-shaped text)
-        self.assertIn('"msg " + cls', self.js)
-        self.assertNotIn("chat-log\").innerHTML", self.js)
-        # the send path is the /api/chat round-trip
-        self.assertIn("post(\"/api/chat\", {q})", self.js)
+        # the announcer card lives in the Now Playing pane and has no input to type in
+        self.assertIn('id="djline"', body, "the DJ announcer card is missing")
+        self.assertIn('id="djtext"', body, "the DJ announcement text is missing")
+        # the chat box, the Talk button and the live-model setting are all gone
+        for gone in ("chat-open", "chat-log", "chat-in", "chat-send", "chat-sub",
+                     "in-live", "id=\"chat\""):
+            self.assertNotIn(f'id="{gone}"', body, f"the chat surface {gone} is still here")
+        self.assertNotIn("Talk", body, "the Talk button is still here")
+        # the announcer is filled from the server's dj_line, never typed into and
+        # never sent to /api/chat
+        self.assertIn("dj_line", self.js)
+        self.assertNotIn("/api/chat", self.js, "no chat endpoint may be reached")
+        self.assertNotIn("chatBubble", self.js)
+        self.assertNotIn("chatSend", self.js)
 
     def test_every_icon_the_markup_asks_for_exists(self):
         # `svg("play")`, ICONS.play, ICONS["play"], the icon a menu item asks for,

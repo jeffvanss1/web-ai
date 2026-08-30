@@ -1,2 +1,1 @@
 yt-dlp>=2024.10.7   # the audio source; keep it updated, YouTube breaks old versions
-websocket-client>=1.7   # the AI DJ chat (Gemini Live API) uses a stateful WSS

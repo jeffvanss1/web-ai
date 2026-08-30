@@ -1,14 +1,14 @@
-"""Tests for the AI DJ agent (the Gemini Live API text chat + tool loop).
+"""Tests for the Spotify-DJ announcer (the local, offline narrator).
 
-These run the protocol without a network: the Live connection is a fake object
-that returns scripted server messages, so we assert the *ours* side of the
-handshake (setup -> clientContent -> serverContent / toolCall -> toolResponse)
-and the DJ tool dispatch, not Google's servers.
+The old AI DJ chat (Gemini Live API over a WebSocket) is gone. This module now
+builds a short, always-on line from what the mixer actually did - the request,
+the vibe, a from-your-likes pick, the station seed and the planner's reason -
+with no model, no key and no network. These tests run it directly, so a dropped
+connection is impossible by construction.
 """
 from __future__ import annotations
 
 import unittest
-from unittest import mock
 
 import tests  # noqa: F401  (sys.path bootstrap)
 
@@ -16,224 +16,118 @@ import agent
 import config
 
 
-class _Conn:
-    """A scripted WebSocket stand-in: returns its queue of messages, records sends."""
-
-    def __init__(self, messages):
-        self.messages = list(messages)
-        self.sent = []
-
-    def send(self, msg):
-        self.sent.append(msg)
-
-    def recv(self):
-        if not self.messages:
-            raise AssertionError("ran out of scripted server messages")
-        return self.messages.pop(0)
-
-    def close(self):
+def _dj():
+    """A minimal DJ stand-in that carries the facts the narrator reads."""
+    class Q:
+        def __init__(self, rows):
+            self.rows = rows
+        def upcoming(self, n):
+            return self.rows[:n]
+    class State:
         pass
 
+    dj = State()
+    dj.request = "sad lofi"
+    dj.station = "Boards of Canada"
+    dj.info = {"engine": "gemini", "why": "dark ambient, fits the set",
+               "vibe": "lofi tuesday night", "queries": ["sad lofi"]}
+    dj.current = {"id": "v1", "title": "Royal Albert", "artist": "Oneohtrix",
+                  "mixed": False}
+    dj.queue = Q([{"id": "v2", "title": "Reach for the Dead", "artist": "Boards"}])
+    return dj
 
-class UrlSetupTests(unittest.TestCase):
-    def test_ws_url_is_a_wss_endpoint_with_a_the_key(self):
-        url = agent.live_ws_url("abc123")
-        self.assertTrue(url.startswith("wss://"))
-        self.assertIn("/ws/google.ai.generativelanguage.v1beta.GenerativeService."
-                      "BidiGenerateContent", url)
-        self.assertIn("key=abc123", url)
 
-    def test_ws_url_refuses_a_missing_key(self):
-        with self.assertRaises(agent.LiveUnavailable):
-            agent.live_ws_url("")
-
-    def test_setup_names_a_live_model_and_text_modality(self):
-        setup = agent.build_setup("gemini-live", "You are a DJ.",
-                                  agent.tool_declarations())
-        body = setup["setup"]
-        self.assertEqual(body["model"], "models/gemini-live")
-        self.assertEqual(body["generationConfig"]["responseModalities"], ["TEXT"])
-        self.assertIn("You are a DJ.", body["systemInstruction"]["parts"][0]["text"])
-        names = [t["name"] for t in body["tools"][0]["functionDeclarations"]]
-        self.assertIn("play", names)
-        self.assertIn("skip", names)
+class _Ctx:
+    def __init__(self, dj):
+        self.dj = dj
 
 
 class SnapshotTests(unittest.TestCase):
     def test_snapshot_names_the_set(self):
-        dj = _dj()
-        ctx = _ctx(dj)
-        snap = agent.dj_snapshot(ctx)
-        self.assertEqual(snap["now"], "Radiohead - Everything In Its Right Place")
+        snap = agent.dj_snapshot(_Ctx(_dj()))
         self.assertEqual(snap["vibe"], "lofi tuesday night")
-        self.assertEqual(snap["queued"], 3)
-        self.assertIn("asked for", snap["why"])     # the reason it is playing
+        self.assertEqual(snap["station"], "Boards of Canada")
+        self.assertIn("Oneohtrix", snap["now"])
+        self.assertIn("Boards", snap["next"])
 
-    def test_prompt_carries_the_persona_and_the_set_and_the_why(self):
-        snap = agent.dj_snapshot(_ctx(_dj()))
-        prompt = agent.build_system_prompt(snap)
-        self.assertIn("DJ inside Spotube DJ", prompt)
-        self.assertIn("Radiohead", prompt)
-        self.assertIn("lofi tuesday night", prompt)
-        self.assertIn("play (a song/artist/mood)", prompt)
-        # the DJ is told both the reason and to explain why when asked
-        self.assertIn("Why this is playing", prompt)
-        self.assertIn("When asked WHY a song is playing", prompt)
-
-    def test_the_why_names_a_mixed_pick_and_the_planner_reason(self):
+    def test_why_mixes_the_request_and_the_planner_reason(self):
         dj = _dj()
-        dj.current = {"artist": "Boards of Canada", "title": "lofi beat", "mixed": True}
-        dj.info = {"why": "90s trip hop, dark", "vibe": "lofi tuesday night"}
-        why = agent.dj_snapshot(_ctx(dj))["why"]
-        self.assertIn("one of your picks", why)
-        self.assertIn("90s trip hop", why)
+        snap = agent.dj_snapshot(_Ctx(dj))
+        self.assertIn("sad lofi", snap["why"])
+        self.assertIn("dark ambient", snap["why"])
 
-
-class RunTurnTests(unittest.TestCase):
-    def test_a_text_turn_returns_the_assembled_reply(self):
-        conn = _Conn([
-            {"setupComplete": {}},
-            {"serverContent": {"modelTurn": {"parts": [{"text": "Hey, "}]}}},
-            {"serverContent": {"modelTurn": {"parts": [{"text": "that's a great one."}]}}},
-            {"serverContent": {"turnComplete": True}},
-        ])
-        got = []
-        reply = agent.run_turn(conn,
-                               setup=agent.build_setup("m", "p", agent.tool_declarations()),
-                               history=[{"role": "user", "text": "old"}],
-                               user_text="play a song",
-                               executor=lambda n, a: {"note": "ok"}, on_text=got.append)
-        self.assertEqual(reply, "Hey, that's a great one.")
-        self.assertEqual(got, ["Hey, ", "that's a great one."])
-        # setup first, then a clientContent turn
-        self.assertIn("setup", conn.sent[0])
-        self.assertTrue(any("clientContent" in s for s in conn.sent))
-
-    def test_a_tool_call_is_executed_and_the_turn_continues(self):
-        conn = _Conn([
-            {"setupComplete": {}},
-            {"serverContent": {"modelTurn": {"parts": [{"text": "I queued "}]}}},
-            {"toolCall": {"functionCalls": [
-                {"name": "play", "id": "c1", "args": {"query": "radiohead"}}]}},
-            {"serverContent": {"modelTurn": {"parts": [{"text": "a Radiohead mix."}]}}},
-            {"serverContent": {"turnComplete": True}},
-        ])
-        calls = []
-        reply = agent.run_turn(conn,
-                               setup=agent.build_setup("m", "p", agent.tool_declarations()),
-                               history=[], user_text="play radiohead",
-                               executor=lambda n, a: (calls.append((n, a)) or {"note": "ok"}))
-        self.assertEqual(reply, "I queued a Radiohead mix.")
-        self.assertEqual(calls, [("play", {"query": "radiohead"})])
-        # the tool result was sent back to resume generation
-        tool = [s for s in conn.sent if "toolResponse" in s]
-        self.assertTrue(tool)
-        self.assertEqual(tool[0]["toolResponse"]["functionResponses"][0]["name"], "play")
-
-
-class AgentChatTests(unittest.TestCase):
-    def _agent(self, messages):
+    def test_a_liked_pick_is_named_as_such(self):
         dj = _dj()
-        ctx = _ctx(dj)
-        a = agent.DJAgent(ctx, connect=lambda url, timeout: _Conn(messages))
-        # leave history as-is; the agent owns it
-        return a
+        dj.current["mixed"] = True
+        snap = agent.dj_snapshot(_Ctx(dj))
+        self.assertIn("from your likes", snap["why"])
 
-    def test_chat_needs_a_key(self):
-        a = self._agent([{"setupComplete": {}}, {"serverContent": {"turnComplete": True}}])
-        with mock.patch.object(agent, "api_key", return_value=""):
-            with self.assertRaises(agent.LiveUnavailable):
-                a.chat("hi")
+    def test_station_is_mentioned_when_there_is_one(self):
+        dj = _dj()
+        snap = agent.dj_snapshot(_Ctx(dj))
+        self.assertIn("Boards of Canada", snap["why"])
 
-    def test_chat_returns_the_reply_and_keeps_history(self):
-        a = self._agent([
-            {"setupComplete": {}},
-            {"serverContent": {"modelTurn": {"parts": [{"text": "Hello!"}]}}},
-            {"serverContent": {"turnComplete": True}},
-        ])
-        with mock.patch.object(agent, "api_key", return_value="k"):
-            reply = a.chat("hello there")
-        self.assertEqual(reply, "Hello!")
-        roles = [m["role"] for m in a.history]
-        self.assertEqual(roles, ["user", "model"])
-
-    def test_an_empty_message_is_a_noop(self):
-        a = self._agent([])
-        with mock.patch.object(agent, "api_key", return_value="k"):
-            self.assertEqual(a.chat("   "), "")
-
-
-class ExecuteToolTests(unittest.TestCase):
-    def test_play_starts_a_job(self):
-        ctx = _ctx(_dj())
-        with mock.patch.object(ctx, "start_job") as sj:
-            out = agent.execute_tool(ctx, "play", {"query": "sad lofi"})
-        sj.assert_called_once()
-        self.assertIn("mix", out.get("note", ""))
-
-    def test_volume_clamps(self):
-        ctx = _ctx(_dj())
-        self.assertEqual(agent.execute_tool(ctx, "volume", {"level": 150})["note"],
-                         "volume 100%")
-        self.assertEqual(agent.execute_tool(ctx, "volume", {"level": "x"})["note"],
-                         "volume needs a number 0-100")
-
-    def test_like_when_nothing_playing(self):
+    def test_nothing_playing_is_a_blank_now(self):
         dj = _dj()
         dj.current = None
-        out = agent.execute_tool(_ctx(dj), "like", {})
-        self.assertIn("nothing playing", out["note"])
+        snap = agent.dj_snapshot(_Ctx(dj))
+        self.assertIn("nothing playing", snap["now"].lower())
+        self.assertIn("Reach for the Dead", snap["next"])
 
-    def test_dislike_records_a_verdict_and_moves_on(self):
-        # the tool goes through `taste.record_dislike`, so the import must be live
+    def test_snapshot_is_json_safe(self):
+        import json
+        json.dumps(agent.dj_snapshot(_Ctx(_dj())))
+
+
+class NarrateTests(unittest.TestCase):
+    def test_a_full_snapshot_reads_like_the_dj(self):
+        line = agent.narrate(agent.dj_snapshot(_Ctx(_dj())))
+        self.assertIn("Now playing", line)
+        self.assertIn("Why:", line)
+        self.assertIn("lofi tuesday night", line)
+        self.assertIn("Up next:", line)
+
+    def test_nothing_playing_tells_you_what_to_do(self):
         dj = _dj()
-        ctx = _ctx(dj)
-        with mock.patch("agent.taste.record_dislike") as record, \
-             mock.patch.object(dj, "skip", return_value={"title": "next"}):
-            out = agent.execute_tool(ctx, "dislike", {})
-        record.assert_called_once()
-        self.assertIn("won't play that again", out["note"])
+        dj.current = None
+        dj.info = {}
+        snap = agent.dj_snapshot(_Ctx(dj))
+        line = agent.narrate(snap)
+        self.assertIn("Nothing playing", line)
+        self.assertIn("tell me a song or a mood", line)
+
+    def test_empty_snapshot_still_returns_text(self):
+        self.assertIsInstance(agent.narrate({}), str)
+        self.assertIsInstance(agent.narrate({"now": "", "why": "", "next": ""}), str)
+
+    def test_no_up_next_omits_the_phrase_not_a_hint(self):
+        dj = _dj()
+        dj.queue = type("Q", (), {"upcoming": lambda self, n: []})()
+        line = agent.narrate(agent.dj_snapshot(_Ctx(dj)))
+        self.assertNotIn("Up next:", line)
+
+    def test_a_failed_snapshot_never_raises(self):
+        class Bad:
+            pass
+        bad = Bad()
+        with self.assertRaises(Exception):
+            agent.dj_snapshot(_Ctx(bad))       # missing .dj facts *does* raise
+        self.assertIsInstance(agent.narrate({}), str)
 
 
-def _dj():
-    class _Queue:
-        def upcoming(self, n):
-            return [{"artist": "Boards of Canada", "title": "lofi beat", "duration": 200}] * 3
+class OfflineByConstructionTests(unittest.TestCase):
+    """The narrator must not reach a network, a model or a websocket."""
 
-    class _DJ:
-        def __init__(self):
-            self.current = {"artist": "Radiohead", "title": "Everything In Its Right Place"}
-            self.info = {"vibe": "lofi tuesday night"}
-            self.request = "chill lofi"
-            self.station = ""
-            self.paused = False
-            self.queue = _Queue()
+    def test_no_websocket_dependency_is_imported(self):
+        import sys
+        self.assertNotIn("websocket", [m for m in sys.modules if m.startswith("websocket")])
 
-        def start(self, q): return None
-        def taste_mix(self): return None
-        def skip(self): return {"title": "x"}
-        def like(self): return None
-        def unlike(self): return None
-        def is_liked(self, t): return False
-        def pause(self): return None
-        def resume(self): return None
-        def volume(self, pct): return None
+    def test_module_has_no_live_classes(self):
+        self.assertFalse(hasattr(agent, "DJAgent"))
+        self.assertFalse(hasattr(agent, "LiveConnection"))
+        self.assertFalse(hasattr(agent, "run_turn"))
+        self.assertFalse(hasattr(agent, "build_system_prompt"))
 
-    return _DJ()
-
-
-def _ctx(dj):
-    class _Ctx:
-        def __init__(self, d):
-            self.dj = d
-            self.volume = 70
-
-        def start_job(self, target):
-            target()
-            return True
-
-    return _Ctx(dj)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_agent_imports_without_a_key(self):
+        # config must never require LLM_API_KEY just to import the announcer
+        self.assertTrue(callable(agent.narrate))

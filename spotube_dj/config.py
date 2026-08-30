@@ -39,15 +39,10 @@ GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta"
 # honours whatever model the API itself suggests, so this list ageing over is
 # survivable rather than fatal.
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
-# The real-time "DJ chat" uses the Gemini Live API (a stateful WebSocket), which
-# needs a *live*-capable model, not the text planner model above. It is a
-# separate setting so tuning the planner never silently breaks the DJ chat.
-GEMINI_DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview"
 
 LLM_BASE_URL = os.environ.get("SPOTUBE_DJ_BASE_URL", "")
 LLM_API_KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("SPOTUBE_DJ_API_KEY", ""))
 LLM_MODEL = os.environ.get("SPOTUBE_DJ_MODEL", "")
-LIVE_MODEL = os.environ.get("SPOTUBE_DJ_LIVE_MODEL", "")
 def _env_timeout() -> float:
     # a typo in the env var must not make the whole package unimportable
     raw = os.environ.get("SPOTUBE_DJ_LLM_TIMEOUT", "").strip()
@@ -61,7 +56,7 @@ LLM_TIMEOUT = _env_timeout()
 MAX_RECENT_HISTORY = 800
 
 
-LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT", "LIVE_MODEL")
+LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT")
 
 
 def ensure_dirs() -> None:
@@ -191,8 +186,6 @@ def load_llm_config() -> dict:
         out["LLM_BASE_URL"] = os.environ["SPOTUBE_DJ_BASE_URL"]
     if os.environ.get("SPOTUBE_DJ_MODEL"):
         out["LLM_MODEL"] = os.environ["SPOTUBE_DJ_MODEL"]
-    if os.environ.get("SPOTUBE_DJ_LIVE_MODEL"):
-        out["LIVE_MODEL"] = os.environ["SPOTUBE_DJ_LIVE_MODEL"]
     return out
 
 
