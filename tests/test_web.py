@@ -994,15 +994,17 @@ class OpenPageTests(unittest.TestCase):
             self.assertTrue(self.wait())
         self.assertEqual(self.ctx.page["title"], "Fake", "the newer page wins")
 
-    def test_open_album_falls_back_to_artist_songs_when_no_album(self):
+    def test_open_album_falls_back_to_artist_page_when_no_album(self):
         with mock.patch("web.start_page") as sp, \
              mock.patch("web.prov.yt_search", return_value=[]):
             code, payload = web.run_action(self.ctx, "open_album",
                                            {"album": [""], "artist": ["Portishead"]})
         self.assertEqual(code, 200)
-        self.assertIn("songs by Portishead", payload["note"])
+        self.assertIn("Portishead - albums and songs", payload["note"])
         sp.assert_called_once()
         self.assertEqual(sp.call_args[0][1], "artist", "falls back to an artist page")
+        self.assertEqual(sp.call_args[0][4], "discography",
+                         "the artist page is a discography, not a songs list")
 
     def test_open_artist_delegates_to_start_page(self):
         with mock.patch("web.start_page") as sp, \
@@ -1010,8 +1012,24 @@ class OpenPageTests(unittest.TestCase):
             code, payload = web.run_action(self.ctx, "open_artist",
                                            {"artist": ["Nirvana"]})
         self.assertEqual(code, 200)
-        self.assertIn("showing songs by Nirvana", payload["note"])
+        self.assertIn("Nirvana - albums and songs", payload["note"])
         sp.assert_called_once()
+        self.assertEqual(sp.call_args[0][4], "discography")
+
+    def test_start_page_prefers_the_browse_discography_over_a_song_search(self):
+        # a deep artist page is a discography (browse), not a songs search; the
+        # browse path wins and the search fallback is never asked
+        disc = [{"id": "", "title": "Dummy", "artist": "Portishead",
+                 "release_year": 1994, "browse_id": "B1", "note": "1994 · album",
+                 "kind": "album"}]
+        with mock.patch("web.prov.page_rows", return_value=[web.row_view(x) for x in disc]) as pr:
+            web.start_page(self.ctx, "artist", "Portishead songs", "Portishead",
+                           "discography")
+            self.assertTrue(self.wait())
+        pr.assert_called_once_with("artist", "Portishead songs", "Portishead",
+                                   "discography")
+        self.assertEqual(self.ctx.page["rows"][0]["kind"], "album")
+        self.assertEqual(self.ctx.page["rows"][0]["release_year"], 1994)
 
     def test_build_state_exposes_the_page(self):
         self.ctx.page = {"kind": "album", "title": "Dummy",

@@ -932,19 +932,31 @@ function rowNode(t, i, opts){
   more.addEventListener("click", (e) => { e.stopPropagation(); menu(more, trackMenu(t, opts)); });
   acts.appendChild(more);
   r.appendChild(acts);
-  const fab = el("button", "fab"); fab.appendChild(svg("play"));
-  fab.title = "Play now";
-  fab.addEventListener("click", (e) => { e.stopPropagation(); playOnce(t.id || ""); });
-  r.appendChild(fab);
-  // "the queue UI bug when click": a click on an Up Next row used to do nothing
-  // (only a double-click played it), so a row looked clickable but was not. A single
-  // click on a queued row now plays it - the action buttons above stop the event.
-  // `playOnce` also squashes the second click of a double-tap, so it never stacks two
-  // play_row calls (that was the "plays twice" bug: one click, then the dblclick that
-  // follows it, both firing).
-  r.addEventListener("click", () => { if (opts.queued) playOnce(t.id || ""); });
-  r.addEventListener("dblclick", () => { if (!opts.queued) playOnce(t.id || ""); });
-  if (opts.current) r.classList.add("playing");
+  // a discography row is an *album*, not a playable song: the row opens the album
+  // tracklist on a click, and it has no play button
+  if (t.kind === "album") {
+    const openAlbum = (e) => {
+      e.stopPropagation();
+      act("open_album", {album: t.album || t.title || "", artist: t.artist || ""});
+    };
+    r.addEventListener("click", openAlbum);
+    r.addEventListener("dblclick", openAlbum);
+    r.classList.add("albumrow");
+  } else {
+    const fab = el("button", "fab"); fab.appendChild(svg("play"));
+    fab.title = "Play now";
+    fab.addEventListener("click", (e) => { e.stopPropagation(); playOnce(t.id || ""); });
+    r.appendChild(fab);
+    // "the queue UI bug when click": a click on an Up Next row used to do nothing
+    // (only a double-click played it), so a row looked clickable but was not. A single
+    // click on a queued row now plays it - the action buttons above stop the event.
+    // `playOnce` also squashes the second click of a double-tap, so it never stacks two
+    // play_row calls (that was the "plays twice" bug: one click, then the dblclick that
+    // follows it, both firing).
+    r.addEventListener("click", () => { if (opts.queued) playOnce(t.id || ""); });
+    r.addEventListener("dblclick", () => { if (!opts.queued) playOnce(t.id || ""); });
+    if (opts.current) r.classList.add("playing");
+  }
   return r;
 }
 

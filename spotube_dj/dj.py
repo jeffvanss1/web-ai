@@ -701,6 +701,7 @@ class DJ:
     def start(self, request: str, seed_refs: list[str] | None = None,
               count: int = 20, extra_queries: list[str] | None = None,
               on_progress=None) -> dict:
+        prev = self.request
         self.request = request
         self.seed_refs = seed_refs
         config.touch_last_request(request)
@@ -713,6 +714,14 @@ class DJ:
         if not tracks:
             self._note("no candidates found - try a different phrasing")
             return {"ok": False, "info": info, "tracks": []}
+        # a new request is its own vibe: drop the previous request's queued rows so
+        # the next thing heard is *this* search's set, not a blend of the last one
+        # ("search 'sad lofi' then 'high energy' should be two different mixes").
+        # The audible track keeps playing (clear_ahead only clears past the cursor),
+        # and we only clear once we know there are new rows, so a search that finds
+        # nothing never wipes a queue someone was still enjoying.
+        if prev and prev != request:
+            self.queue.clear_ahead()
         self.queue.extend(tracks)
         self._note(f"{info['engine']}: {info['why'] or 'queued'}")
         self._note(f"queries: {', '.join(info['queries'][:6])}")
@@ -774,6 +783,11 @@ class DJ:
                        "more songs, or type a mood to widen the net")
             return {"ok": False, "reason": "nothing new found", "tracks": [],
                     "info": info}
+        # a fresh "make a mix" is its own set, not a blend of whatever a previous
+        # request left queued - same rule as start(), so switching vibe is one press.
+        # This deliberately does NOT re-run a typed request: mix is "from my likes",
+        # it is not a refinement of the last search.
+        self.queue.clear_ahead()
         self.queue.extend(_spread(fresh))
         # a count belongs in the log: "mixing from your likes" on its own reads like
         # a promise the app never closed, and this is the line both skins show

@@ -65,8 +65,16 @@ def row_view(t: dict, *, note: str = "", liked: bool | None = None) -> dict:
         "cached": bool(t.get("cached") or t.get("from_cache")),
         "art": "",                       # the 40px list slot, filled by the lane
         "art_card": "",                  # and the 190px grid slot, same thread
-        "note": note,
+        # a page row may carry its own badge (a discography entry's year, an album
+        # track's record name); an explicit `note` from the caller wins, else use it
+        "note": note or (str(t.get("note") or "") if isinstance(t.get("note"), str)
+                         else ""),
     }
+    # page rows are not always a playable song: a discography entry is an *album*
+    # that opens on a click, so its kind / browse id / record facts travel with it
+    for extra in ("kind", "album", "browse_id", "release_year"):
+        if t.get(extra) is not None:
+            out[extra] = t[extra]
     if liked is not None:
         out["liked"] = bool(liked)
     return out
@@ -1075,11 +1083,10 @@ def action_open_album(ctx, fields: dict) -> str:
     album = _clean_name((fields.get("album") or [""])[0])
     artist = _clean_name((fields.get("artist") or [""])[0])
     if not album:
-        # no album metadata yet: treat it as a search for the current track's artist
+        # no album metadata yet: treat it as a page for the current track's artist
         if artist:
-            start_page(ctx, "artist", f"{artist} songs", artist,
-                       "songs by this artist")
-            return f"showing songs by {artist}"
+            start_page(ctx, "artist", f"{artist} songs", artist, "discography")
+            return f"showing {artist} - albums and songs"
         return "no album or artist to show for the current track"
     title = album
     sub = artist or "album"
@@ -1098,8 +1105,10 @@ def action_open_artist(ctx, fields: dict) -> str:
     artist = _clean_name((fields.get("artist") or [""])[0])
     if not artist:
         return "no artist to show"
-    start_page(ctx, "artist", f"{artist} songs", artist, "songs by this artist")
-    return f"showing songs by {artist}"
+    # query carries "<artist> songs" for the search fallback; the bare name goes in
+    # `title` so page_rows can drive the browse discography by the artist alone
+    start_page(ctx, "artist", f"{artist} songs", artist, "discography")
+    return f"showing {artist} - albums and songs"
 
 
 def action_test_brain(ctx, fields: dict) -> str:
@@ -1254,7 +1263,10 @@ def start_page(ctx, kind: str, query: str, title: str, sub: str = "") -> None:
 
     def job():
         try:
-            rows = prov.yt_search(query, limit=20)
+            # a page is a hand into the browse endpoint when that answers (an album
+            # tracklist, an artist's discography) and the same trusted search when it
+            # doesn't - so "deep" never costs a dead page when browse has nothing
+            rows = prov.page_rows(kind, query, title, sub)
         except Exception as e:
             rows, note = [], (f"lookup failed: {e.__class__.__name__}"
                               + (f": {e}" if str(e) else ""))
