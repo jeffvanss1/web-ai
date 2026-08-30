@@ -677,17 +677,17 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
     voice = voice_name() or _LIVE_FALLBACK_VOICE
 
     def setup_for(v: str) -> dict:
-        # The api/live reference is authoritative: `responseModalities` and
-        # `speechConfig` both sit **inside** `generationConfig` on the setup
-        # message. (A quickstart snippet puts responseModalities at the top of
-        # setup, but the real server rejects that with 1007.) `outputAudioTranscription`
-        # is part of the worked config for this model. No systemInstruction: the line
-        # is already written as text and we only want it voiced as-is.
+        # The raw-wire BidiGenerateContentSetup schema (ai.google.dev/api/live) is
+        # authoritative: `model` is `models/{model}`; `responseModalities` and
+        # `speechConfig` live **inside** `generationConfig` (NOT at the top level,
+        # which the server 1007-rejects). We do not touch outputAudioTranscription -
+        # it is a *top-level* setup field, and we don't need output text anyway.
+        # No systemInstruction: the line is already written as text and we only want
+        # it voiced as-is.
         return {
             "model": "models/" + model,
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
-                "outputAudioTranscription": {},
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
                     "voiceName": v}}},
             },
