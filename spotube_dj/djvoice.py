@@ -5,10 +5,12 @@ The on-screen announcer (agent.narrate) is visual. This module makes the same
 "why this song / what's next" line actually *speak* on each new track, over the
 music, like Spotify's DJ. It is not a plain robotic read:
 
-  1. **Gemini** writes the line and voices it. A Gemini model is asked (via the
-     speech-generation API, model `gemini-3.1-flash-tts-preview`) to say the
-     facts in a warm, playful DJ voice - so every track gets its own phrasing.
-     The voice is **Despina** (warm, smooth) by default, changeable by voice name.
+  1. **Gemini** writes the line and voices it. By default it uses the Gemini
+     **Live** native-audio model (`gemini-3.1-flash-live-preview`) over the Live
+     API WebSocket, so the DJ speaks in a warm, playful voice - every track gets
+     its own phrasing. The voice is **Despina** (warm, smooth) by default,
+     changeable by voice name. If the configured model is a `*-tts-preview`
+     model, it instead uses the synchronous `generateContent` speech endpoint.
   2. **espeak / espeak-ng** is the offline fallback (robotic, but no key/network).
   3. If there is no key and no espeak, it stays silent - the vocal line is a
      nicety, never a crash.
@@ -21,11 +23,15 @@ gracefully in a sandbox with no network or audio.
 from __future__ import annotations
 
 import base64
+import json
 import os
+import socket
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.parse
 import wave
 from pathlib import Path
 
@@ -57,9 +63,26 @@ def voice_name() -> str:
 
 
 def tts_model() -> str:
-    """The speech-generation model (a gemini-*-tts-preview)."""
+    """The speech-generation model (gemini-*-live-preview or gemini-*-tts-preview)."""
     return (os.environ.get("SPOTUBE_DJ_TTS_MODEL") or config.GEMINI_DEFAULT_TTS_MODEL
-            or "gemini-3.1-flash-tts-preview")
+            or "gemini-3.1-flash-live-preview")
+
+
+def _is_live_model(model: str) -> bool:
+    """Is `model` a Live native-audio model (spoken over the Live API WebSocket)?"""
+    m = str(model or "").lower()
+    return "-live" in m or m.endswith("live-preview") or m.endswith("live")
+
+
+def _live_url() -> str:
+    """The BidiGenerateContent WebSocket URL for the Live API (key in the query)."""
+    base = (config.LLM_BASE_URL or "").rstrip("/")
+    if not base or "generativelanguage" not in base:
+        base = config.GEMINI_DEFAULT_URL
+    host = base.replace("https://", "").replace("http://", "").split("/")[0]
+    key = urllib.parse.quote(config.LLM_API_KEY)
+    return (f"wss://{host}/ws/google.ai.generativelanguage.v1beta."
+            f"GenerativeService.BidiGenerateContent?key={key}")
 
 
 def engines() -> list[str]:
@@ -288,6 +311,183 @@ def _gemini_synth(text: str, path: Path) -> bool:
         return False
 
 
+# --- a tiny dependency-free WebSocket (RFC 6455) client, only for the Live API.
+# The project deliberately stays single-dependency (yt-dlp), and websocket-client
+# cannot be pip-installed everywhere, so this implements just enough of the client
+# for one text -> audio turn: connect, upgrade, send a masked text frame, read the
+# server's JSON frames. It is not a general websocket library.
+def _ws_read_exact(sock, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError("websocket closed")
+        buf += chunk
+    return buf
+
+
+def _ws_send_frame(sock, opcode: int, payload: bytes, mask: bool = True) -> None:
+    """Send a single frame on the socket (client->server frames MUST be masked)."""
+    length = len(payload)
+    head = bytearray([0x80 | (opcode & 0x0F)])
+    if length < 126:
+        head.append((0x80 if mask else 0) | length)
+    elif length < 65536:
+        head.append((0x80 if mask else 0) | 126)
+        head += length.to_bytes(2, "big")
+    else:
+        head.append((0x80 if mask else 0) | 127)
+        head += length.to_bytes(8, "big")
+    key = os.urandom(4) if mask else b""
+    if mask:
+        head += key
+    body = bytes(b ^ key[i % 4] for i, b in enumerate(payload)) if mask else payload
+    sock.sendall(bytes(head) + body)
+
+
+def _ws_read_frame(sock) -> tuple[int, bytes]:
+    """Read one server frame; returns (opcode, payload). Server frames are unmasked."""
+    b1, b2 = _ws_read_exact(sock, 2)
+    opcode = b1 & 0x0F
+    masked = bool(b2 & 0x80)
+    length = b2 & 0x7F
+    if length == 126:
+        length = int.from_bytes(_ws_read_exact(sock, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(_ws_read_exact(sock, 8), "big")
+    key = _ws_read_exact(sock, 4) if masked else b""
+    payload = _ws_read_exact(sock, length)
+    if masked:
+        payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
+def _ws_connect(url: str, key: str, timeout: float = 30.0) -> socket.socket:
+    """Open + handshake a wss:// connection; returns the wrapped socket."""
+    u = urllib.parse.urlparse(url)
+    host, port = u.hostname, (u.port or (443 if u.scheme == "wss" else 80))
+    path = (u.path or "/") + (("?" + u.query) if u.query else "")
+    ctx = ssl.create_default_context()
+    raw = socket.create_connection((host, port), timeout=timeout)
+    sock = ctx.wrap_socket(raw, server_hostname=host)
+    sock.settimeout(timeout)
+    nonce = base64.b64encode(os.urandom(16)).decode()
+    req = (f"GET {path} HTTP/1.1\r\n"
+           f"Host: {host}\r\n"
+           f"Upgrade: websocket\r\n"
+           f"Connection: Upgrade\r\n"
+           f"Sec-WebSocket-Key: {nonce}\r\n"
+           f"Sec-WebSocket-Version: 13\r\n"
+           f"x-goog-api-key: {key}\r\n\r\n")
+    sock.sendall(req.encode())
+    head = b""
+    while b"\r\n\r\n" not in head:
+        c = sock.recv(1)
+        if not c:
+            raise EOFError("no websocket handshake")
+        head += c
+    status = head.decode("latin1").split("\r\n", 1)[0]
+    if " 101 " not in status:
+        raise OSError(f"websocket handshake refused: {status}")
+    return sock
+
+
+def _gemini_live_synth(text: str, path: Path) -> bool:
+    """Ask the Gemini Live native-audio model to speak `text` over the WebSocket.
+
+    This is the path for `*-live-*` models (default `gemini-3.1-flash-live-preview`),
+    which only speak over the Live API's BidiGenerateContent socket - the
+    synchronous generateContent TTS endpoint is a different family and returns
+    nothing for them (which is why the old default model silently fell back).
+    The server replies with PCM; we wrap it as a WAV. Returns False on any failure
+    so the caller can try the TTS endpoint / espeak / silence.
+    """
+    if not config.LLM_API_KEY:
+        return False
+    model = tts_model()
+    if not _is_live_model(model):
+        return False
+    sock = None
+    try:
+        sock = _ws_connect(_live_url(), config.LLM_API_KEY)
+        _ws_send_frame(sock, 1, json.dumps({
+            "setup": {"model": "models/" + model,
+                      "generationConfig": {
+                          "responseModalities": ["AUDIO"],
+                          "speechConfig": {"voiceConfig": {
+                              "prebuiltVoiceConfig": {"voiceName": voice_name()}}}}}}).encode())
+        # wait for the handshake to settle before sending content
+        while True:
+            opcode, data = _ws_read_frame(sock)
+            if opcode == 8:                                   # close
+                sock.close()
+                return False
+            if opcode == 1:
+                msg = json.loads(data)
+                if "setupComplete" in msg:
+                    break
+                if "goAway" in msg:
+                    sock.close()
+                    return False
+        # Gemini 3.1 Live wants real-time text via realtimeInput, not clientContent
+        _ws_send_frame(sock, 1, json.dumps({"realtimeInput": {"text": text}}).encode())
+        audio = b""                       # whatever the server sent (PCM or a container)
+        compressed = False                # True when the server says it is ogg/opus/mp3/webm
+        rate = 24000
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            opcode, data = _ws_read_frame(sock)
+            if opcode == 8:
+                break
+            if opcode == 9:                                   # ping -> pong
+                _ws_send_frame(sock, 10, data)
+                continue
+            if opcode == 10:                                  # pong
+                continue
+            if opcode == 2:                                   # raw audio bytes
+                audio += data
+                continue
+            if opcode == 1:
+                msg = json.loads(data)
+                sc = msg.get("serverContent") or {}
+                for part in ((sc.get("modelTurn") or {}).get("parts") or []):
+                    inline = part.get("inlineData") or {}
+                    b64 = inline.get("data")
+                    if not b64:
+                        continue
+                    mime = str(inline.get("mimeType") or "")
+                    if any(x in mime for x in ("ogg", "opus", "mpeg", "mp3", "webm")):
+                        compressed = True
+                    elif "rate=" in mime:
+                        try:
+                            rate = int(mime.split("rate=")[1].split(";")[0])
+                        except (ValueError, IndexError):
+                            rate = 24000
+                    audio += base64.b64decode(b64)
+                if sc.get("turnComplete"):
+                    break
+        try:
+            sock.close()
+        except Exception:
+            pass
+        if not audio:
+            return False
+        if compressed:
+            # a container (ogg/opus/mp3) is written as-is; mpv sniffs the content
+            # and does not care that the temp name happens to end in .wav
+            path.write_bytes(audio)
+            return path.exists() and path.stat().st_size > 0
+        _pcm_to_wav(audio, rate, path)
+        return path.exists() and path.stat().st_size > 0
+    except Exception:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+        return False
+
+
 def _pcm_to_wav(pcm: bytes, rate: int, path: Path) -> None:
     """Wrap raw signed-16-bit mono PCM in a WAV container (mpv plays WAV natively)."""
     with wave.open(str(path), "wb") as wf:
@@ -317,7 +517,17 @@ def _synth(text: str) -> str | None:
     clip = Path(tempfile.mkstemp(suffix=".wav")[1])
     ok = False
     if engine == "gemini":
-        ok = _gemini_synth(text, clip)
+        # a Live native-audio model (-live-) speaks over the WebSocket, a TTS
+        # model (-tts-) over generateContent. Try the one the model prefers first,
+        # then the other, so either works; espeak is the offline stamp.
+        if _is_live_model(tts_model()):
+            ok = _gemini_live_synth(text, clip)
+            if not ok:
+                ok = _gemini_synth(text, clip)
+        else:
+            ok = _gemini_synth(text, clip)
+            if not ok:
+                ok = _gemini_live_synth(text, clip)
         if not ok and (bins.find("espeak-ng") or bins.find("espeak")):
             ok = _espeak_synth(text, clip)      # offline fallback after a Gemini miss
     elif engine == "espeak":

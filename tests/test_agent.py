@@ -315,3 +315,109 @@ class SpeechTests(unittest.TestCase):
         self.assertIn("voice", s)
         self.assertIn("voice_note", s)
         self.assertIn("Despina", s["voice_note"])
+
+    def test_live_model_defaults_to_the_live_native_audio_model(self):
+        import djvoice
+        # the default model speaks over the Live API WebSocket (not generateContent)
+        self.assertEqual(djvoice.tts_model(), "gemini-3.1-flash-live-preview")
+        self.assertTrue(djvoice._is_live_model(djvoice.tts_model()))
+        self.assertFalse(djvoice._is_live_model("gemini-3.1-flash-tts-preview"))
+        self.assertTrue(djvoice._is_live_model("gemini-2.5-flash-live-preview"))
+        self.assertIn("BidiGenerateContent", djvoice._live_url())
+
+    def test_live_synth_writes_a_wav_from_the_websocket_audio(self):
+        import djvoice
+        import base64, json, wave as wave_mod, tempfile
+        from pathlib import Path
+        pcm = b"\x00\x00\x01\x00" * 100
+        b64 = base64.b64encode(pcm).decode()
+        frames = [
+            (1, b'{"setupComplete":{}}'),
+            (1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
+                 '"mimeType":"audio/L16;codec=pcm;rate=24000"}}]}}}' % b64).encode()),
+            (1, b'{"serverContent":{"turnComplete":true}}'),
+        ]
+        sent = []
+        class FakeSock:
+            def close(self):
+                pass
+        def fake_send(sock, opcode, payload, mask=True):
+            sent.append(json.loads(payload))
+        fake_iter = iter(frames)
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(djvoice, "tts_model",
+                                   return_value="gemini-3.1-flash-live-preview"):
+                with mock.patch.object(djvoice, "_ws_connect", return_value=FakeSock()):
+                    with mock.patch.object(djvoice, "_ws_read_frame",
+                                           side_effect=lambda *a: next(fake_iter)):
+                        with mock.patch.object(djvoice, "_ws_send_frame",
+                                               side_effect=fake_send):
+                            out = Path(tempfile.mkstemp(suffix=".wav")[1])
+                            self.assertTrue(djvoice._gemini_live_synth("hello", out))
+                            with wave_mod.open(str(out), "rb") as wf:
+                                self.assertEqual(wf.getframerate(), 24000)
+                                self.assertEqual(wf.getsampwidth(), 2)
+                                self.assertEqual(wf.getnchannels(), 1)
+                            out.unlink(missing_ok=True)
+        # first frame is the Live setup with the voice; second is the text input
+        self.assertEqual(sent[0]["setup"]["model"], "models/gemini-3.1-flash-live-preview")
+        self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
+                         ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
+        self.assertEqual(sent[1]["realtimeInput"]["text"], "hello")
+
+    def test_live_synth_writes_a_container_as_is(self):
+        # the Live model may return ogg/opus rather than PCM; those bytes are
+        # written untouched (mpv sniffs the container, not the .wav temp name)
+        import djvoice
+        import base64, tempfile
+        from pathlib import Path
+        ogg_header = b"OggS" + b"\x00" * 100
+        b64 = base64.b64encode(ogg_header).decode()
+        frames = [
+            (1, b'{"setupComplete":{}}'),
+            (1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
+                 '"mimeType":"audio/ogg;codecs=opus"}}]}}}' % b64).encode()),
+            (1, b'{"serverContent":{"turnComplete":true}}'),
+        ]
+        fake_iter = iter(frames)
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(djvoice, "tts_model",
+                                   return_value="gemini-3.1-flash-live-preview"):
+                with mock.patch.object(djvoice, "_ws_connect",
+                                       return_value=type("S", (), {"close": lambda s: None})()):
+                    with mock.patch.object(djvoice, "_ws_read_frame",
+                                           side_effect=lambda *a: next(fake_iter)):
+                        with mock.patch.object(djvoice, "_ws_send_frame"):
+                            out = Path(tempfile.mkstemp(suffix=".wav")[1])
+                            self.assertTrue(djvoice._gemini_live_synth("hello", out))
+                            self.assertEqual(out.read_bytes()[:4], b"OggS")
+                            out.unlink(missing_ok=True)
+
+    def test_live_synth_is_skipped_for_a_tts_model(self):
+        import djvoice
+        from pathlib import Path
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(djvoice, "tts_model",
+                                   return_value="gemini-3.1-flash-tts-preview"):
+                with mock.patch.object(djvoice, "_ws_connect") as wc:
+                    self.assertFalse(djvoice._gemini_live_synth("hi", Path("/tmp/x.wav")))
+        wc.assert_not_called()
+
+    def test_websocket_frames_round_trip(self):
+        # the RFC 6455 framing the Live client uses: masked client text, unmasked
+        # server payload, ping opcode - all decoded by the same reader
+        import djvoice
+        import socket
+        a, b = socket.socketpair()
+        try:
+            msg = '{"setup":{"model":"m"}}'
+            djvoice._ws_send_frame(a, 1, msg.encode(), mask=True)
+            op, payload = djvoice._ws_read_frame(b)
+            self.assertEqual((op, payload.decode()), (1, msg))
+            b.sendall(bytes([0x82, 0x05]) + b"HELLO")
+            self.assertEqual(djvoice._ws_read_frame(a), (2, b"HELLO"))
+            b.sendall(bytes([0x89, 0x00]))
+            self.assertEqual(djvoice._ws_read_frame(a)[0], 9)
+        finally:
+            a.close()
+            b.close()
