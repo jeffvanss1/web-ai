@@ -291,6 +291,11 @@ def build_state(ctx) -> dict:
         note = "cached" if t.get("cached") else ("from your likes" if t.get("mixed") else "")
         rows.append(row_view(t, note=note))
     now = row_view(np, liked=dj.is_liked(np)) if np else {}   # {} = nothing playing
+    if now:
+        # album / release-year are fetched once per track on a background lane and
+        # merged in here, so the Credits block can name the record without ever
+        # holding the state socket open
+        now = {**now, **ctx.meta_for(np)}
     idle = str(st.get("idle") or "")
     why = {"finished": "the queue ran out - press Play or type a mood to keep going",
            "no stream would start": ("this song is still playing; the next few streams "
@@ -438,6 +443,8 @@ class Context:
         except Exception:
             pass
         self._hrefs: dict[str, dict[str, str]] = {}    # id -> {size: artwork href}
+        self._meta: dict[str, dict] = {}               # id -> {album, release_year, ...}
+        self._meta_inflight: set[str] = set()          # ids being fetched right now
         self._subs: list[queue.Queue] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -485,6 +492,38 @@ class Context:
         if isinstance(have, str):        # anything written before sizes existed
             return {"row": have}
         return have if isinstance(have, dict) else {}
+
+    def meta_for(self, track) -> dict:
+        """
+        The album / release-year facts for one track, or {} before they land.
+
+        Called from build_state every tick, so it has to be a dict lookup. The first
+        time an id is seen a background thread fetches it once (yt-dlp on the video's
+        own metadata, ~1 s at most) and caches it; a slow or missing answer is a blank
+        line in Credits, never a stalled /api/state. This deliberately never blocks the
+        state socket, the same rule the artwork lane follows.
+        """
+        vid = str((track or {}).get("id") or "") if isinstance(track, dict) else ""
+        if not vid:
+            return {}
+        with self._lock:
+            if vid in self._meta:
+                return dict(self._meta[vid])
+            if vid not in self._meta_inflight:
+                self._meta_inflight.add(vid)
+                threading.Thread(target=self._fetch_meta, args=(vid,),
+                                 daemon=True).start()
+        return {}
+
+    def _fetch_meta(self, vid) -> None:
+        """One best-effort album/release-year lookup, cached under the id."""
+        try:
+            meta = prov.yt_track_meta(vid)
+        except Exception:
+            meta = {}
+        with self._lock:
+            self._meta[vid] = meta
+            self._meta_inflight.discard(vid)
 
     def request_art(self, tracks, size: str = "row", limit: int = 14) -> int:
         """
@@ -883,8 +922,8 @@ def action_open(ctx, fields: dict) -> str:
     not resume a player the user paused on purpose.
     """
     t = ctx.dj.current or {}
-    url = t.get("url") or (f"https://music.youtube.com/watch?v={t.get('id')}"
-                           if t.get("id") else "")
+    url = (fields.get("url") or [""])[0] or t.get("url") or \
+        (f"https://music.youtube.com/watch?v={t.get('id')}" if t.get("id") else "")
     if not url:
         return "nothing playing to open"
     return "" if player_mod.open_externally(url) else \

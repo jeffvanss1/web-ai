@@ -421,6 +421,82 @@ def yt_stream_url(video_id: str, fmt: str = "bestaudio[ext=m4a]/bestaudio/best")
     return url[0] if url else None
 
 
+# a release year is the one line "album" adds to the credits. It is fetched
+# best-effort on its own lane, never in the search path, so a slow or empty
+# answer costs the panel a blank line and never a row.
+def _release_year(d: dict) -> int | None:
+    for key in ("release_year", "release_date", "upload_date", "year"):
+        v = d.get(key)
+        if isinstance(v, int) and 1900 <= v <= 2099:
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            # yt-dlp dates arrive as "19940822", "1994-08-22" or "1994"; take the
+            # leading 4 digits so the year is read out of all three cleanly
+            m = re.match(r"\s*(\d{4})", s)
+            if m:
+                y = int(m.group(1))
+                if 1900 <= y <= 2099:
+                    return y
+            # otherwise a "Aug 22, 1994" style string: a 4-digit year on its own
+            m = re.search(r"(?<!\d)(19|20)\d{2}(?!\d)", s)
+            if m:
+                return int(m.group(0))
+    return None
+
+
+def yt_track_meta(video_id: str) -> dict:
+    """
+    Best-effort album + release-year for one video, from yt-dlp's own metadata.
+
+    A full (not `--flat-playlist`) yt-dlp query on a music video returns `album`,
+    `release_date`/`release_year`, `track` and `artist`; the flat search path that
+    fills the queue does not. This only runs once per track and is guarded so a
+    missing album, a rate limit or no yt-dlp is a blank line, never a failure.
+    Returns {} when nothing useful came back.
+    """
+    if not video_id:
+        return {}
+    out = _run(_YTDLP + ["--dump-json", "--no-warnings", "--no-playlist",
+                         "--skip-download",
+                         f"https://music.youtube.com/watch?v={video_id}"],
+               timeout=25)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        album = d.get("album") or ""
+        if isinstance(album, dict):            # some providers nest it
+            album = album.get("name") or album.get("title") or ""
+        year = _release_year(d)
+        meta = {}
+        if album:
+            meta["album"] = str(album)
+        year = _release_year(d)
+        if year:
+            meta["release_year"] = year
+        artist = d.get("artist") or d.get("creator") or d.get("uploader") or ""
+        if artist:
+            meta["artist"] = str(artist)
+        track = d.get("track") or d.get("title") or ""
+        if track:
+            meta["track"] = str(track)
+        # a reliable "album page" URL is rarely exposed, but a Music search for
+        # "<album> <artist>" almost always lands on it - good enough for a
+        # "See album" handoff that is one click, never a dead link
+        if album:
+            q = urllib.parse.quote(f"{album} {artist}".strip())
+            meta["album_url"] = f"https://music.youtube.com/search?q={q}"
+        return meta
+    return {}
+
+
 def is_playlist_ref(ref: str) -> bool:
     """True for URLs / URIs / bare 22-char ids; False for plain seed words."""
     return Spotify().playlist_id(ref) is not None

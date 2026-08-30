@@ -602,7 +602,7 @@ BODY = """
  <aside class="detail panel" id="detail">
   <div class="bg" id="bg-side"></div><div class="bg bg2" id="bg-side2"></div>
   <div class="dhead">
-   <b>Now playing</b>
+   <b>Now playing · Discover</b>
    <button class="iconbtn" id="detail-close" title="Hide">@@close@@</button>
   </div>
   <div class="dbody">
@@ -614,6 +614,7 @@ BODY = """
    <div class="acts">
     <button class="btn ghost" data-action="radio" id="np-station">@@mix@@<span>Station</span></button>
     <button class="btn ghost" data-action="open" id="np-open">@@open@@<span>Spotube</span></button>
+    <button class="btn ghost" id="np-album" title="Open this album in YouTube Music">@@devices@@<span>See album</span></button>
     <button class="btn ghost" data-action="stop" id="np-stop">@@stop@@<span>Stop</span></button>
    </div>
    <div class="sect"><h3>Why this song</h3><div class="why" id="np-why">
@@ -1191,6 +1192,8 @@ function drawDetail(s){
   const dl = $("credits");
   const pairs = [["played by", "YouTube Music"],
                  ["channel", np.channel || ""],
+                 ["album", np.album || ""],
+                 ["released", np.release_year || ""],
                  ["found by", np.found || ""],
                  ["length", np.dur || (s.duration ? fmt(s.duration) : "")],
                  ["audio", np.cached ? "on this disk (cache)" : "streamed"]];
@@ -1230,6 +1233,11 @@ function drawDetail(s){
     });
   });
   ["np-station", "np-open", "np-stop"].forEach((id) => { $(id).disabled = !np.title; });
+  const alb = $("np-album");
+  if (alb) {
+    alb.hidden = !(np.title && np.album_url);
+    alb.disabled = !np.title;
+  }
   const love = $("b-love");
   love.innerHTML = ""; love.appendChild(svg(np.liked ? "heart" : "heart_o"));
   love.classList.toggle("on", !!np.liked);
@@ -1451,6 +1459,10 @@ $("lib-sort").addEventListener("click", () => {
   drawLibrary(S.state);
 });
 $("detail-close").addEventListener("click", () => $("app").classList.remove("wide"));
+$("np-album").addEventListener("click", () => {
+  const np = (S.state || {}).now || {};
+  if (np.album_url) act("open", {url: np.album_url});
+});
 $("open-settings").addEventListener("click", () => setView("library"));
 $("engine").addEventListener("click", () => setView("library"));
 $("nav-back").addEventListener("click", () => {

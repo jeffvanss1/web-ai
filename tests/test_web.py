@@ -160,6 +160,57 @@ class BuildStateTests(unittest.TestCase):
         self.assertIsInstance(web.build_state(self.ctx)["loved"], list)
 
 
+class MetaLookupTests(unittest.TestCase):
+    """
+    The "released" / "album" lines in Credits come from a one-per-track lookup that
+    runs on its own thread - /api/state must never be held open by it (same rule as
+    artwork), and it must be fetched once per id, not once per 700 ms tick.
+    """
+
+    def setUp(self):
+        self.dj = fake_dj()
+        self.ctx = web.Context(self.dj)
+
+    def test_build_state_merges_album_and_release_year_into_now(self):
+        with mock.patch("web.prov.yt_track_meta",
+                        return_value={"album": "Dummy", "release_year": 1994,
+                                      "artist": "Portishead", "album_url": "https://a"}):
+            self.ctx._meta["vid0"] = {"album": "Dummy", "release_year": 1994,
+                                      "artist": "Portishead", "album_url": "https://a"}
+        s = web.build_state(self.ctx)
+        self.assertEqual(s["now"]["album"], "Dummy")
+        self.assertEqual(s["now"]["release_year"], 1994)
+        self.assertEqual(s["now"]["album_url"], "https://a")
+
+    def test_meta_for_fetches_once_and_caches(self):
+        # simulate a slow provider so the first call returns {} (fetch in flight)
+        with mock.patch("web.prov.yt_track_meta",
+                        side_effect=lambda v: {"album": "Dummy", "release_year": 1994}):
+            # first call: no cache yet, kernel a background fetch, answer {} now
+            self.assertEqual(self.ctx.meta_for({"id": "vid0"}), {})
+            import time
+            time.sleep(0.3)                       # let the background fetch finish
+            got = self.ctx.meta_for({"id": "vid0"})
+            self.assertEqual(got.get("album"), "Dummy")
+            self.assertEqual(got.get("release_year"), 1994)
+            self.assertIn("vid0", self.ctx._meta, "the result is cached by id")
+
+    def test_meta_for_does_not_fetch_the_same_id_twice(self):
+        with mock.patch("web.prov.yt_track_meta",
+                        side_effect=lambda v: {"album": "A"}) as m:
+            self.ctx.meta_for({"id": "vid0"})
+            self.ctx.meta_for({"id": "vid0"})       # in flight, must not refetch
+            self.ctx.meta_for({"id": "vid0"})
+            self.assertEqual(m.call_count, 1, "one lookup per id, not per tick")
+
+    def test_open_accepts_an_explicit_url_for_the_album(self):
+        with mock.patch("web.player_mod.open_externally", return_value=True) as oe:
+            code, payload = web.run_action(
+                self.ctx, "open", {"url": ["https://music.youtube.com/search?q=x"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(oe.call_args[0][0], "https://music.youtube.com/search?q=x")
+
+
 class ArtStampingTests(unittest.TestCase):
     def setUp(self):
         self.dj = fake_dj()

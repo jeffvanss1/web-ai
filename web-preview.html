@@ -479,7 +479,7 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
  <aside class="detail panel" id="detail">
   <div class="bg" id="bg-side"></div><div class="bg bg2" id="bg-side2"></div>
   <div class="dhead">
-   <b>Now playing</b>
+   <b>Now playing · Discover</b>
    <button class="iconbtn" id="detail-close" title="Hide"><svg viewBox="0 0 24 24"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg></button>
   </div>
   <div class="dbody">
@@ -491,6 +491,7 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
    <div class="acts">
     <button class="btn ghost" data-action="radio" id="np-station"><svg viewBox="0 0 24 24"><path d="M4 5h2v14H4zM18 5h2v14h-2zM9.5 7l5 5-5 5z"/></svg><span>Station</span></button>
     <button class="btn ghost" data-action="open" id="np-open"><svg viewBox="0 0 24 24"><path d="M12 3v2h5.6L10 12.6 11.4 14 19 6.4V12h2V3zM5 5v14h14v-4h-2v2H7V7h2V5z"/></svg><span>Spotube</span></button>
+    <button class="btn ghost" id="np-album" title="Open this album in YouTube Music"><svg viewBox="0 0 24 24"><path d="M3 5h12v8H3zm2 2v4h8V7zm10 2h6v9h-6zm2 1.6v5.8h2.8V8.6z"/></svg><span>See album</span></button>
     <button class="btn ghost" data-action="stop" id="np-stop"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Stop</span></button>
    </div>
    <div class="sect"><h3>Why this song</h3><div class="why" id="np-why">
@@ -1068,6 +1069,8 @@ function drawDetail(s){
   const dl = $("credits");
   const pairs = [["played by", "YouTube Music"],
                  ["channel", np.channel || ""],
+                 ["album", np.album || ""],
+                 ["released", np.release_year || ""],
                  ["found by", np.found || ""],
                  ["length", np.dur || (s.duration ? fmt(s.duration) : "")],
                  ["audio", np.cached ? "on this disk (cache)" : "streamed"]];
@@ -1107,6 +1110,11 @@ function drawDetail(s){
     });
   });
   ["np-station", "np-open", "np-stop"].forEach((id) => { $(id).disabled = !np.title; });
+  const alb = $("np-album");
+  if (alb) {
+    alb.hidden = !(np.title && np.album_url);
+    alb.disabled = !np.title;
+  }
   const love = $("b-love");
   love.innerHTML = ""; love.appendChild(svg(np.liked ? "heart" : "heart_o"));
   love.classList.toggle("on", !!np.liked);
@@ -1328,6 +1336,10 @@ $("lib-sort").addEventListener("click", () => {
   drawLibrary(S.state);
 });
 $("detail-close").addEventListener("click", () => $("app").classList.remove("wide"));
+$("np-album").addEventListener("click", () => {
+  const np = (S.state || {}).now || {};
+  if (np.album_url) act("open", {url: np.album_url});
+});
 $("open-settings").addEventListener("click", () => setView("library"));
 $("engine").addEventListener("click", () => setView("library"));
 $("nav-back").addEventListener("click", () => {

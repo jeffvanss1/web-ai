@@ -643,6 +643,29 @@ class RelevanceTests(_TmpHome):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_track_meta_extracts_album_and_release_year(self):
+        raw = json.dumps({"id": "v", "title": "Roads", "album": "Dummy",
+                          "artist": "Portishead", "release_date": "19940822"})
+        with mock.patch.object(prov, "_run", return_value=raw):
+            m = prov.yt_track_meta("v")
+        self.assertEqual(m.get("album"), "Dummy")
+        self.assertEqual(m.get("release_year"), 1994, "pulled out of the date string")
+        self.assertIn("album_url", m)
+        self.assertIn("music.youtube.com", m["album_url"])
+
+    def test_track_meta_is_blank_on_no_output_or_bad_video(self):
+        with mock.patch.object(prov, "_run", return_value=""):
+            self.assertEqual(prov.yt_track_meta("v"), {})
+        with mock.patch.object(prov, "_run", return_value="not json\n"):
+            self.assertEqual(prov.yt_track_meta("v"), {})
+
+    def test_track_meta_ignores_lines_that_are_not_json(self):
+        raw = "noise line\n" + json.dumps({"id": "v", "album": "A", "release_year": 1999})
+        with mock.patch.object(prov, "_run", return_value=raw):
+            m = prov.yt_track_meta("v")
+        self.assertEqual(m.get("album"), "A")
+        self.assertEqual(m.get("release_year"), 1999)
+
     def test_playlist_id_parsing(self):
         sp = prov.Spotify()
         for ref in ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
