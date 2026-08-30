@@ -145,46 +145,37 @@ def _ytm_thumb(row: dict, vid: str) -> str:
     """
     The row's own artwork, biggest offered size, else a URL derived from the id.
 
-    InnerTube puts the sizes under `musicThumbnailRenderer.thumbnail.thumbnails`
-    and older responses spelled it `sources`; reading only the second one meant
-    every row from the music search arrived art-less, and the panel drew a
-    coloured initial for anything that had no MusicBrainz release to look up.
-    A `Song` row's thumbnail is the album cover, which is the better picture for
-    a now-playing card anyway, so it wins over the derived video frame.
+    InnerTube spells the sizes under `musicThumbnailRenderer.thumbnail.thumbnails`,
+    `videoThumbnailRenderer`, a bare `{url,width,height}` object, or the older
+    `sources` list, and the art itself can live on `i.ytimg.com` or Google's
+    `lh3.googleusercontent.com` / `ggpht.com`. Reading only one shape on one host
+    meant every row that arrived via the browse endpoint (an album tracklist, a
+    discography entry) came back art-less, and the panel drew a coloured initial
+    for anything that had no MusicBrainz release to look up. A `Song` row's
+    thumbnail is the album cover, which is the better picture for a now-playing
+    card anyway, so it wins over the derived video frame.
     """
-    node = ((row.get("thumbnail") or {}).get("musicThumbnailRenderer") or {})
-    node = node.get("thumbnail") or {}
-    cands = [c for c in (list(node.get("thumbnails") or [])
-                         + list(node.get("sources") or []))
-             if isinstance(c, dict) and str(c.get("url") or "").startswith("http")]
+    cands = _ytm_image_candidates(row.get("thumbnail") or {})
 
-    def area(c):
-        try:
-            return int(c.get("width") or 0) * int(c.get("height") or 0)
-        except (TypeError, ValueError):
-            return 0
-    # The search rows offer 60 and 120 px tiles, which for a `Song` is the
+    # the search rows offer 60 and 120 px tiles, which for a `Song` is the
     # *artist avatar* (three different songs, one identical URL) - too small and
     # the wrong picture. Only take the row's own art when it is big enough to be
     # the cover, which is what the Album rows carry at 544 px.
     def clean(url: str) -> str:
         # YouTube's own URLs come signed (`?sqp=..&rs=..`) and a signed URL is one
         # that can expire; the thumbnail cache keeps the filename, not the fetch,
-        # so strip it back to the plain form for the same picture.
-        base = str(url or "").split("?", 1)[0]
-        if "ytimg.com/vi/" in base and base.endswith((".jpg", ".png", ".webp")):
-            return base
-        return base
+        # so strip it back to the plain form for the same picture. The same rule
+        # drops a `=s544` size suffix off a Google lh3 URL (its default is large).
+        return str(url or "").split("?", 1)[0]
 
-    best = max(cands, key=area) if cands else None
-    if best is not None and (area(best) >= 160 * 160 or not (
-            best.get("width") or best.get("height"))):
+    best = max(cands, key=lambda c: c[0]) if cands else None
+    if best is not None and (best[0] >= 160 * 160 or best[0] == 0):
         # an advertised size under 160 px is the artist avatar, not the cover:
         # three different songs came back with one identical 120 px URL
-        return clean(best["url"])
+        return clean(best[1])
     if vid and vid.replace("-", "").replace("_", "").isalnum():
         return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-    return clean(best["url"]) if best else ""
+    return clean(best[1]) if best else ""
 
 
 def _ytm_artist(row: dict, title: str) -> str:
@@ -609,15 +600,31 @@ def _ytm_card_info(row: dict) -> tuple[str, str, str]:
     return title.strip(), subtitle.strip(), bid
 
 
+def _img_ok(u) -> bool:
+    """
+    True for an image URL the page can actually be handed over as a row's art.
+
+    We only ever call this on URLs found *inside* an InnerTube thumbnail subtree
+    (thumbnails / sources / a thumbnail renderer), so an http URL there is an image.
+    Reading only one host was the bug: YouTube Music serves album and artist art
+    from `lh3.googleusercontent.com` / `ggpht.com` as well as `i.ytimg.com`, and a
+    card built purely from the Google CDN came back with a coloured initial even
+    though the art was present.
+    """
+    return isinstance(u, str) and u.startswith("http")
+
+
 def _ytm_image_candidates(node: dict) -> list[tuple[int, str]]:
     """
     Every (area, url) in an InnerTube thumbnail subtree.
 
     `musicTwoRowItemRenderer.thumbnail` has been spelled `musicThumbnailRenderer`,
     `videoThumbnailRenderer`, a single `{url,width,height}` object, or the older
-    `sources` list across the years. Reading one shape is exactly why a discography
-    entry or an album row came back with no cover - the art was there, in a branch
-    the parser was not looking at.
+    `sources` list across the years, and the art itself can live on `i.ytimg.com` or
+    on Google's `lh3.googleusercontent.com` / `ggpht.com`. Reading one shape on one
+    host is exactly why a discography entry, an album row or a track that arrives via
+    the browse page came back with no cover - the art was there, in a branch the
+    parser was not looking at.
     """
     out: list[tuple[int, str]] = []
     if not isinstance(node, dict):
@@ -628,14 +635,14 @@ def _ytm_image_candidates(node: dict) -> list[tuple[int, str]]:
         except (TypeError, ValueError):
             return 0
     url = node.get("url")
-    if isinstance(url, str) and url.startswith("http") and "ytimg" in url:
+    if _img_ok(url):
         out.append((area(node), url))
     for key in ("thumbnails", "sources"):
         for c in node.get(key) or []:
             if not isinstance(c, dict):
                 continue
             u = c.get("url")
-            if isinstance(u, str) and u.startswith("http") and "ytimg" in u:
+            if _img_ok(u):
                 out.append((area(c), u))
             out += _ytm_image_candidates(c)
     for key in ("thumbnail", "musicThumbnailRenderer", "videoThumbnailRenderer",

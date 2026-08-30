@@ -1372,6 +1372,28 @@ class YtmSearchTests(unittest.TestCase):
         row.update(inner(60, 544))
         self.assertEqual(prov._ytm_thumb(row, "abc123"), "https://x/544.jpg")
 
+    def test_thumb_reads_google_art_under_any_renderer(self):
+        # album and artist art comes off Google's CDN (`lh3.googleusercontent.com`,
+        # `ggpht.com`) and under `videoThumbnailRenderer` as well as the music one;
+        # reading only i.ytimg.com / `musicThumbnailRenderer` left these rows art-less
+        row = {"playlistItemData": {"videoId": "abc123"},
+               "thumbnail": {"videoThumbnailRenderer":
+                   {"thumbnail": {"thumbnails": [
+                       {"url": "https://lh3.googleusercontent.com/cover=w544",
+                        "width": 544, "height": 544}]}}}}
+        self.assertEqual(
+            prov._ytm_thumb(row, "abc123"),
+            "https://lh3.googleusercontent.com/cover=w544",
+            "a Google CDN cover under a video renderer must become the row's art")
+        # ...and so must an album card: the discography/album row carries the cover
+        card = {"thumbnail": {"musicTwoRowItemRenderer": {
+            "thumbnail": {"videoThumbnailRenderer": {"thumbnails": [
+                {"url": "https://yt3.ggpht.com/album/s544?x=1",
+                 "width": 480, "height": 480}]}}}}}
+        self.assertEqual(prov._ytm_card_thumb(card),
+                         "https://yt3.ggpht.com/album/s544",
+                         "an album card built from ggpht art lost its cover")
+
     def test_the_artist_survives_a_row_that_only_says_song(self):
         # InnerTube sometimes puts "Song \u2022 5:02" in the visible column with
         # the name only in the play button's accessibility label, and an artist

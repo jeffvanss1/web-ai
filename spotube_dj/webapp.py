@@ -784,15 +784,31 @@ function hueOf(seed){
 }
 function art(node, track, px, field){
   const tint = paint(node, seedOf(track), px);
+  track = track || {};
   // `field` lets one row carry two pictures: `art` for the 40px lists and
-  // `art_card` for the 190px grid tile, each at the size it is drawn at
-  const url = track && (field && track[field] ? track[field] : track.art);
-  if (url) {
-    const img = el("img"); img.src = url; img.alt = ""; img.loading = "lazy";
-    img.onerror = () => img.remove();
-    node.appendChild(img);
-  }
+  // `art_card` for the 190px grid tile, each at the size it is drawn at. But a row
+  // can carry its picture in only one of those slots, or only as the raw InnerTube
+  // `thumbnail`, so fall through them all - a queue row that only has `art_card`,
+  // or an album/discography row that arrived with `thumbnail`, must still be dressed
+  // rather than drawn as a tinted initial. Any real picture wins over the initial.
+  const url = (field && track[field]) || track.art || track.art_card || track.thumbnail;
+  if (url) cover(node, url, track.id || "");
   return tint;
+}
+/* one <img> per slot, with a fallback a bare `img.src=` never had: a blank tile is
+   most often a `maxresdefault` the upload never rendered. Retry the same video's
+   `hqdefault` (which is always served) before falling back to the coloured initial,
+   so a row is never silently empty when a smaller, still-real frame exists. */
+function cover(node, url, vid, tried){
+  const m = /\/vi\/([^/]+)/.exec(url) || (vid ? [undefined, String(vid)] : null);
+  const hq = m ? "https://i.ytimg.com/vi/" + m[1] + "/hqdefault.jpg" : "";
+  const finalUrl = (m && /maxresdefault/.test(url) && hq !== url && !tried) ? hq : url;
+  const img = el("img"); img.src = finalUrl; img.alt = ""; img.loading = "lazy";
+  img.onerror = () => {
+    img.remove();
+    if (!tried && hq && hq !== finalUrl) cover(node, hq, vid, true);
+  };
+  node.appendChild(img);
 }
 /* the blurred backdrop: the cover, blown up and out of focus, behind the content.
    Two layers: the base holds the outgoing cover and the float holds the incoming
@@ -1259,30 +1275,23 @@ function drawDetail(s){
   art($("np-art"), np, 70);
   backdrop(np, !!np.title);
   setText($("np-why"), s.idle_note || "type a mood above, or pick something on the left");
-  // credits are stable while a track plays; only the position moves, and that line
-  // is left out of the signature so the list is not rebuilt (and re-scrolled) twice
-  // a second for a number the progress bar already shows
+  // credits are the *record's* facts and stay stable while a track plays. The
+  // transport bar already carries the progress, the length and the cache state, so
+  // repeating those here just eats the panel: what sits beside the cover should say
+  // what the record is, not how far into it a person has got. No "source: mpv", no
+  // length, no audio/cache line, no ticking position row.
   const dl = $("credits");
   const pairs = [["played by", "YouTube Music"],
                  ["channel", np.channel || ""],
                  ["album", np.album || ""],
                  ["released", np.release_year || ""],
-                 ["found by", np.found || ""],
-                 ["length", np.dur || (s.duration ? fmt(s.duration) : "")],
-                 ["audio", np.cached ? "on this disk (cache)" : "streamed"]];
-  // no "source: mpv" and no cache counters in this panel: what sits beside the cover
-  // should say what the record is, and the transport bar already carries the cache pill
+                 ["found by", np.found || ""]];
   redraw(dl, sigOf([pairs, !!np.title]), (b) => {
     pairs.forEach(([k, v]) => {
       if (!v && v !== 0) return;
       b.appendChild(el("dt", null, k)); b.appendChild(el("dd", null, String(v)));
     });
-    if (!np.title) return;
-    b.appendChild(el("dt", null, "position"));
-    const pos = el("dd", null, ""); pos.id = "np-pos"; b.appendChild(pos);
   });
-  const pos = $("np-pos");
-  if (pos) setText(pos, s.position ? fmt(s.position) + " / " + fmt(s.duration) : "");
   const loved = (s.library || {}).loved || [];
   const same = np.artist ? loved.filter((l) => l.artist &&
     String(l.artist).toLowerCase().indexOf(String(np.artist).toLowerCase().split(" ")[0]) >= 0) : [];

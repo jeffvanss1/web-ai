@@ -36,6 +36,82 @@ def _script(html: str) -> str:
     return m.group(1)
 
 
+# A naive `re.sub` of string literals does not survive this page: the SVG paths in
+# ICONS carry escaped quotes, and a stray apostrophe in a path can make a
+# single-quote regex swallow a whole function body, so a balanced script reads as
+# unbalanced. Tokenize instead of regex: drop string literals (double, single and
+# template), line and block comments, and regex literals, so the count below only
+# ever sees real code, exactly the way `node --check` does.
+_CODE_OPERAND = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$)]}")
+
+
+def _strip_non_code(js: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(js)
+    last = ""
+    while i < n:
+        c = js[i]
+        if c in ('"', "'"):
+            q = c
+            i += 1
+            while i < n and js[i] != q:
+                i += 2 if js[i] == "\\" else 1
+            i += 1
+            out.append('""' if c == '"' else "''")
+            last = '"'
+        elif c == "`":
+            i += 1
+            while i < n and js[i] != "`":
+                i += 2 if js[i] == "\\" else 1
+            i += 1
+            out.append("``")
+            last = "`"
+        elif c == "/" and i + 1 < n and js[i + 1] == "/":
+            i += 2
+            while i < n and js[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and js[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (js[i] == "*" and js[i + 1] == "/"):
+                i += 1
+            i += 2
+        elif c == "/" and i + 1 < n and last not in _CODE_OPERAND:
+            # a division operator could follow an operand; a regex literal cannot
+            i += 1
+            in_class = False
+            closed = False
+            while i < n:
+                c2 = js[i]
+                if c2 == "\\":
+                    i += 2
+                    continue
+                if c2 == "[":
+                    in_class = True
+                elif c2 == "]":
+                    in_class = False
+                elif c2 == "/" and not in_class:
+                    i += 1
+                    closed = True
+                    break
+                i += 1
+            if not closed:
+                i -= 1
+                out.append("/")
+                last = "/"
+                continue
+            while i < n and js[i] in "gimsuy":
+                i += 1
+            out.append("/ /")
+            last = '"'
+        else:
+            out.append(c)
+            if not c.isspace():
+                last = c
+            i += 1
+    return "".join(out)
+
+
 class PageShapeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -116,6 +192,27 @@ class PageShapeTests(unittest.TestCase):
         self.assertGreaterEqual(float(m.group(1)), 8,
                                 f"the tint animation cycles every {m.group(1)}s "
                                 "- far too fast to feel ambient")
+
+    def test_credits_carry_only_the_record_facts(self):
+        # the transport bar already shows progress, length and cache state, so the
+        # Credits block should name the record, not re-print those three
+        self.assertIn('"released", np.release_year', self.js,
+                      "Credits lost the release year")
+        for banned in ('["length"', '["audio"', 'el("dt", null, "position")'):
+            self.assertNotIn(banned, self.js,
+                             f"Credits still re-presents the transport: {banned}")
+
+    def test_a_row_with_only_a_thumbnail_still_gets_a_cover(self):
+        # `art` used to read `track.art` alone, so a queue row that only carried
+        # `art_card`, or an album/discography row that only carried the raw
+        # `thumbnail`, was drawn as a tinted initial even though the art was there
+        js = self.js
+        self.assertIn("track.art_card", js, "art() never falls back to the card picture")
+        self.assertIn("track.thumbnail", js, "art() never falls back to the raw thumbnail")
+        self.assertIn("function cover(", js,
+                      "there is no onerror retry for a blank thumbnail")
+        self.assertIn("hqdefault.jpg", js,
+                      "the fallback never tries the reliably-served frame")
 
     def test_the_cache_pill_is_never_squeezed_into_an_ellipsis(self):
         # it said "0 stored, 0 d…" because flex let the icons beside it take the
@@ -264,10 +361,10 @@ class JsSyntaxTests(unittest.TestCase):
 
     def test_balanced_braces_and_parens(self):
         js = _script(webapp.page())
-        # crude but effective against a dropped brace, and strings never hold one
-        stripped = re.sub(r'"(?:[^"\\]|\\.)*"', '""', js)
-        stripped = re.sub(r"'(?:[^'\\]|\\.)*'", "''", stripped)
-        stripped = re.sub(r"//[^\n]*", "", stripped)
+        # strings, comments and regex literals could each hold a brace, so strip
+        # them with a tokenizer and count only the code that remains. This is the
+        # same set of braces `node --check` balances.
+        stripped = _strip_non_code(js)
         for open_c, close_c in (("{", "}"), ("(", ")"), ("[", "]")):
             self.assertEqual(stripped.count(open_c), stripped.count(close_c),
                              f"unbalanced {open_c}{close_c} in the script")

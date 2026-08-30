@@ -826,23 +826,24 @@ def action_play_row(ctx, fields: dict) -> str:
     if not t:
         return "that row is gone"
     q = ctx.dj.queue
+    # "what if i chose a song? the songs next to it build around it" - a plain pick
+    # of a song anchors the queue: the upcoming rows are replaced by a tight build
+    # around this exact song (radio/similar-to), not left as whatever mix the song
+    # happened to sit in. The anchor is set *before* the track is started, so even
+    # the refill `next()` triggers reads this song and keeps the queue on its vibe,
+    # and it stays set if a build is already running - the set is then built off the
+    # socket's thread.
+    label = f"{t.get('artist') or t.get('channel') or ''} - {t.get('title')}".strip(" -")
+    ctx.dj.station = label
+    ctx.dj.station_seed = {"title": t.get("title", ""),
+                           "artist": t.get("artist") or t.get("channel", ""),
+                           "url": t.get("url", "")}
     # A queued row clicked again used to be copied on top of itself: the original
     # stayed ahead of the cursor, so the same song came up twice in a row. Drop it
     # from wherever it sits first, then put the one copy at the head and play it.
     q.remove_id(tid)
     q.insert_at(q.pos, dict(t))
     ctx.dj.next(force=True)
-    # "what if i chose a song? the songs next to it build around it" - a plain pick
-    # of a song anchors the queue: the upcoming rows are replaced by a tight build
-    # around this exact song (radio/similar-to), not left as whatever mix the song
-    # happened to sit in. The anchor is set *now* (so the station-aware refill keeps
-    # coming back to it even if a build is already running), then the set is built
-    # off the socket's thread.
-    label = f"{t.get('artist') or t.get('channel') or ''} - {t.get('title')}".strip(" -")
-    ctx.dj.station = label
-    ctx.dj.station_seed = {"title": t.get("title", ""),
-                           "artist": t.get("artist") or t.get("channel", ""),
-                           "url": t.get("url", "")}
     def job():
         try:
             ctx.dj.radio_from(dict(t), count=20, replace=True)
