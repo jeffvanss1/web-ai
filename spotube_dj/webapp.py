@@ -927,14 +927,19 @@ function rowNode(t, i, opts){
     dis.addEventListener("click", (e) => { e.stopPropagation(); act("dislike", {id: t.id || ""}); });
     acts.appendChild(dis);
   }
-  const more = el("button", "iconbtn more");
-  more.appendChild(svg("dots")); more.title = "More";
-  more.addEventListener("click", (e) => { e.stopPropagation(); menu(more, trackMenu(t, opts)); });
-  acts.appendChild(more);
+  const isAlbum = t.kind === "album";
+  // a discography entry is not a playable song, so the track menu (play/queue/love)
+  // does not apply to it; the row itself opens the album
+  if (!isAlbum) {
+    const more = el("button", "iconbtn more");
+    more.appendChild(svg("dots")); more.title = "More";
+    more.addEventListener("click", (e) => { e.stopPropagation(); menu(more, trackMenu(t, opts)); });
+    acts.appendChild(more);
+  }
   r.appendChild(acts);
-  // a discography row is an *album*, not a playable song: the row opens the album
-  // tracklist on a click, and it has no play button
-  if (t.kind === "album") {
+  // a discography row is an *album*: the row opens the album tracklist on a click,
+  // and it has no play button
+  if (isAlbum) {
     const openAlbum = (e) => {
       e.stopPropagation();
       act("open_album", {album: t.album || t.title || "", artist: t.artist || ""});
