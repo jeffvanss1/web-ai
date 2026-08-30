@@ -615,28 +615,27 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
         return False
     voice = voice_name() or _LIVE_DEFAULT_SAFE_VOICE
     safe = voice.lower() if voice.lower() in _LIVE_SAFE_VOICES else _LIVE_DEFAULT_SAFE_VOICE
-    # The Google get-started-websocket example for this model puts responseModalities
-    # at the top of setup and adds systemInstruction; the api/live reference puts
-    # speechConfig under generationConfig. We try a couple of the documented shapes,
-    # in order, each on a fresh connection, so a rejected config can't stop the DJ.
-    base = {"model": "models/" + model, "responseModalities": ["AUDIO"],
-            "systemInstruction": {"parts": [{"text": _DJ_SYSTEM_INSTRUCTION}]}}
+    # The api/live reference is authoritative here: `responseModalities` and
+    # `speechConfig` both go **inside** `generationConfig` on the setup message.
+    # (The quickstart snippet that puts responseModalities at the top of setup is
+    # wrong - the real server rejects it with 1007 "Unknown name
+    # "responseModalities" at 'setup'".) We do not set systemInstruction: the line
+    # is already written by Gemini for its text, and we only want it voiced as-is.
     variants = []
-    # 1. modality top-level, voice under generationConfig (api/live reference).
-    v1 = dict(base)
-    v1["generationConfig"] = {"speechConfig": {"voiceConfig": {
+    voice_cfg = {"speechConfig": {"voiceConfig": {
         "prebuiltVoiceConfig": {"voiceName": voice}}}}
-    variants.append(("voice under generationConfig (%s)" % voice, v1))
-    # 2. same, but a Live-safe voice, in case the configured voice isn't accepted Live.
+    v1 = {"model": "models/" + model,
+          "generationConfig": {"responseModalities": ["AUDIO"], **voice_cfg}}
+    variants.append(("configured voice (%s)" % voice, v1))
+    # The Live API's prebuilt voice roster is narrower than the full TTS list; if
+    # the configured voice isn't on it the server closes during setup, so retry on
+    # a fresh connection with a Live-safe voice.
     if safe != voice.lower():
-        v2 = dict(base)
-        v2["generationConfig"] = {"speechConfig": {"voiceConfig": {
+        safe_cfg = {"speechConfig": {"voiceConfig": {
             "prebuiltVoiceConfig": {"voiceName": safe}}}}
-        variants.append(("voice under generationConfig, safe voice (%s)" % safe, v2))
-    # 3. quickstart-style: voice at the top of setup (no generationConfig wrapper).
-    v3 = dict(base)
-    v3["speechConfig"] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
-    variants.append(("voice at top of setup (%s)" % voice, v3))
+        v2 = {"model": "models/" + model,
+              "generationConfig": {"responseModalities": ["AUDIO"], **safe_cfg}}
+        variants.append(("safe voice (%s)" % safe, v2))
 
     for label, setup in variants:
         sock = None

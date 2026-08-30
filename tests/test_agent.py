@@ -366,12 +366,14 @@ class SpeechTests(unittest.TestCase):
                                 self.assertEqual(wf.getnchannels(), 1)
                             out.unlink(missing_ok=True)
         # first frame is the Live setup with the voice; second is the text input.
-        # The api/live reference puts speechConfig under generationConfig while
-        # responseModalities sits at the top of setup (quickstart style).
+        # The api/live reference is authoritative: responseModalities and
+        # speechConfig both sit inside generationConfig on the setup message.
         self.assertEqual(sent[0]["setup"]["model"], "models/gemini-3.1-flash-live-preview")
-        self.assertEqual(sent[0]["setup"]["responseModalities"], ["AUDIO"])
+        self.assertEqual(sent[0]["setup"]["generationConfig"]["responseModalities"],
+                         ["AUDIO"])
         self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
                          ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
+        self.assertNotIn("responseModalities", sent[0]["setup"])   # not top-level
         self.assertEqual(sent[1]["realtimeInput"]["text"], "hello")
 
     def test_live_synth_falls_back_to_a_safe_voice_when_one_is_rejected(self):
