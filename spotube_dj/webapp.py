@@ -38,6 +38,11 @@ ICONS = {
     "heart_o": ('<svg viewBox="0 0 24 24"><path d="M12 18.9 5 12.2a3.6 3.6 0 0 1 5.1-5.1l1.9 '
                 '1.8 1.9-1.8A3.6 3.6 0 0 1 19 12.2z" fill="none" stroke="currentColor" '
                 'stroke-width="1.7"/></svg>'),
+    "thumb_down": ('<svg viewBox="0 0 24 24"><path d="M6.5 4H5a2 2 0 0 0-1.4.6A2 2 0 0 0 3 '
+                   '6v5a2 2 0 0 0 2 2h2.3l-1 3.9A1.7 1.7 0 0 0 8 18.7a1.7 1.7 0 0 0 '
+                   '1.6-1.3l1-3.4h4.3a2.1 2.1 0 0 0 2-2.7L15.3 5.6A2 2 0 0 0 13.4 4H6.5z'
+                   'M5 6h1.6L9 12.7 8 16l-1.2-.9 1.1-4.1H5V6zm11 9.5v-1.7h1.5V6h1.6v7.8z" '
+                   'fill="none" stroke="currentColor" stroke-width="1.6"/></svg>'),
     "queue": ('<svg viewBox="0 0 24 24"><path d="M4 6h11v2H4zM4 11h11v2H4zM4 16h7v2H4zM18 '
               '10v6.2a2.6 2.6 0 1 1-1.6-2.4V10z"/></svg>'),
     "shuffle": ('<svg viewBox="0 0 24 24"><path d="M3 6h4.5l9 12H21v-2h-3l-2.6-3.5 1.5-2H21V8'
@@ -118,10 +123,11 @@ CSS = """
 :root{--bg:@@BG@@;--panel:@@PANEL@@;--card:@@CARD@@;--edge:@@EDGE@@;--hover:@@HOVER@@;
 --input:@@INPUT@@;--text:@@TEXT@@;--muted:@@MUTED@@;--faint:@@FAINT@@;--accent:@@ACCENT@@;
 --accent-dk:@@ACCENT_DK@@;--playing:@@PLAYING@@;--error:@@ERROR@@;--heart:@@HEART@@;
---tiles:@@TILES@@;--tint:#1f1f1f;--r:8px}
+--tiles:@@TILES@@;--tint:#1db954;--tint2:#169c46;--glass:rgba(255,255,255,.05);
+--r:14px;--rax:22px}
 *{box-sizing:border-box}
 html,body{height:100%}
-body{margin:0;background:#000;color:var(--text);overflow:hidden;
+body{margin:0;background:var(--bg);color:var(--text);overflow:hidden;
 font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Cantarell","DejaVu Sans",sans-serif;
 display:grid;grid-template-rows:1fr 72px;padding:8px;gap:8px}
 button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
@@ -134,22 +140,42 @@ background-clip:padding-box;border-radius:8px}
 ::-webkit-scrollbar-thumb:hover{background:#7a7a7a;background-clip:padding-box}
 ::-webkit-scrollbar-track{background:transparent}
 
-.app{display:grid;grid-template-columns:300px minmax(0,1fr) 340px;gap:8px;min-height:0}
-.panel{background:var(--bg);border-radius:var(--r);min-height:0;position:relative;
-isolation:isolate;overflow:hidden}
+.app{display:grid;grid-template-columns:300px minmax(0,1fr) 360px;gap:10px;min-height:0;
+position:relative}
+/* a liquid-glass card: a translucent shell with a soft edge and an inner highlight,
+   so the blurred cover behind it reads as frosted glass rather than a flat box */
+.panel{background:linear-gradient(165deg,rgba(34,34,40,.78),rgba(16,16,20,.92));
+border:1px solid rgba(255,255,255,.055);border-radius:var(--r);min-height:0;
+position:relative;isolation:isolate;overflow:hidden;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 24px 70px rgba(0,0,0,.55);
+backdrop-filter:blur(30px) saturate(1.35)}
 
 /* ---- the blurred cover: the one thing a terminal skin could never do ---- */
-.bg{position:absolute;inset:-12% -8%;z-index:-2;background-size:cover;
-background-position:center top;filter:blur(64px) saturate(1.6);opacity:.62;
-transform:scale(1.06);transition:opacity .45s ease}
+/* two layers so a track change is a crossfade, not a cut: the base keeps the
+   outgoing cover while the float carries the incoming one and they trade opacity */
+.bg{position:absolute;inset:-14% -10%;z-index:-2;background-size:cover;
+background-position:center top;filter:blur(72px) saturate(1.9);opacity:.66;
+transform:scale(1.08);transition:opacity .5s ease}
+/* the float layer is a second copy of the same box: identical size and blur, so
+   the crossfade below never changes the look, only which cover wins. It sits
+   above the base (later in the DOM at the same z-index) and is hidden until a
+   track changes, at which point it fades in with the new cover over the old one. */
+.bg2{position:absolute;inset:-14% -10%;z-index:-2;background-size:cover;
+background-position:center top;filter:blur(72px) saturate(1.9);opacity:0;
+transform:scale(1.08);transition:opacity .45s ease}
+.bg::after,.bg2::after{content:"";position:absolute;inset:0;
+background:radial-gradient(120% 90% at 30% 20%,var(--tint) 0%,transparent 55%),
+radial-gradient(110% 80% at 80% 85%,var(--tint2) 0%,transparent 55%);
+mix-blend-mode:screen;opacity:.5}
 /* with no cover yet the wash is the two palette colours that tile would have used,
    so the page is never the flat grey it looked before a thumbnail landed */
-.bg.flat{background-image:none!important;opacity:.42}
+.bg.flat,.bg2.flat{background-image:none!important;opacity:.4}
 .scrim{position:absolute;inset:0;z-index:-1;
-background:linear-gradient(180deg,rgba(0,0,0,.28),rgba(18,18,18,.82) 42%,var(--bg) 78%)}
+background:linear-gradient(180deg,rgba(0,0,0,.26),rgba(18,18,18,.8) 42%,rgba(14,14,16,.96) 78%)}
 
 /* ---- left: your library ---- */
-.side{background:var(--bg);display:flex;flex-direction:column;min-height:0}
+.side{background:linear-gradient(165deg,rgba(28,28,34,.9),rgba(14,14,16,.96));
+display:flex;flex-direction:column;min-height:0}
 .side-head{display:flex;align-items:center;justify-content:space-between;padding:14px 14px 6px}
 .side-head .lt{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15.5px}
 .side-head .lt svg{width:22px;height:22px;color:var(--muted)}
@@ -207,9 +233,7 @@ display:block;z-index:1}
    purpose: an absolutely positioned backdrop inside a scroll container is sized
    against the *content* (3 000 px on a long queue), so the cover was cropped to a
    slice and scrolled off, which is why the blur looked absent below the fold. */
-#uph{display:flex;align-items:baseline;gap:10px}
-#uph #clearq{margin-left:auto;width:28px;height:28px;opacity:.7}
-#uph #clearq:hover{opacity:1}
+#uph{display:flex;align-items:baseline;gap:6px}
 .main{display:flex;flex-direction:column;min-height:0}
 .scroller{overflow-y:auto;padding:0 0 22px;flex:1;min-height:0;display:flex;
 flex-direction:column}
@@ -274,10 +298,11 @@ background:var(--input);box-shadow:0 8px 24px rgba(0,0,0,.5)}
 text-overflow:ellipsis;white-space:nowrap}
 .card .a{color:var(--muted);font-size:12.5px;margin-top:3px;overflow:hidden;
 text-overflow:ellipsis;white-space:nowrap}
-.fab{width:44px;height:44px;border-radius:50%;background:var(--accent);color:#000;
-display:grid;place-items:center;box-shadow:0 6px 16px rgba(0,0,0,.55)}
+.fab{width:44px;height:44px;border-radius:50%;background:var(--tint);color:#fff;
+display:grid;place-items:center;box-shadow:0 8px 22px rgba(0,0,0,.5);
+transition:background .5s ease,transform .16s ease,box-shadow .16s ease}
 .fab svg{width:20px;height:20px}
-.fab:hover{transform:scale(1.06);background:#1fdf64}
+.fab:hover{transform:scale(1.06);background:var(--tint2);box-shadow:0 10px 26px rgba(0,0,0,.55)}
 .fab:active{transform:scale(.98)}
 .card .fab,.row .fab{position:absolute;right:14px;bottom:64px;opacity:0;
 transform:translateY(8px);transition:opacity .16s ease,transform .16s ease}
@@ -287,8 +312,8 @@ transform:translateY(8px);transition:opacity .16s ease,transform .16s ease}
 .row:hover .fab{opacity:1;transform:translateY(50%) scale(1)}
 
 .rows{display:flex;flex-direction:column}
-.row{display:grid;grid-template-columns:22px 40px minmax(0,1.6fr) minmax(0,1fr) 52px 28px;
-gap:14px;align-items:center;padding:6px 10px;border-radius:6px;position:relative}
+.row{display:grid;grid-template-columns:22px 40px minmax(0,1.6fr) minmax(0,1fr) 52px auto;
+gap:14px;align-items:center;padding:6px 10px;border-radius:10px;position:relative}
 .row:hover{background:rgba(255,255,255,.08)}
 .row .n{color:var(--muted);font-size:13.5px;text-align:right;font-variant-numeric:tabular-nums}
 .row .tile{width:40px;height:40px;font-size:14px}
@@ -296,14 +321,22 @@ gap:14px;align-items:center;padding:6px 10px;border-radius:6px;position:relative
 .row .ar{color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;
 white-space:nowrap;display:flex;align-items:center;gap:7px}
 .row .du{color:var(--muted);font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
-.row .more{opacity:0}
-.row:hover .more,.row:focus-within .more{opacity:1}
-.row.playing .ti{color:var(--accent)}
-.row.playing .n{color:var(--accent)}
+/* the trailing action cluster (dislike, remove, more) slides in on hover, the
+   same place a listener expects controls on a queue row in the apps they know */
+.rowacts{display:flex;align-items:center;gap:2px;opacity:0;justify-content:flex-end;
+transition:opacity .14s ease}
+.row:hover .rowacts,.row:focus-within .rowacts{opacity:1}
+.rowacts .iconbtn{width:26px;height:26px;border-radius:8px}
+.rowacts .iconbtn svg{width:14px;height:14px}
+.rowacts .grow{flex:0 0 12px}
+.row .more{width:26px;height:26px}
+.row.playing .ti{color:var(--tint)}
+.row.playing .n{color:var(--tint)}
 .eq{display:none;gap:2px;align-items:flex-end;height:13px;width:14px}
 .row.playing .eq{display:flex}
 .row.playing .n span{display:none}
-.eq i{width:3px;background:var(--accent);height:4px;animation:eq .9s ease-in-out infinite}
+.eq i{width:3px;background:var(--tint);height:4px;animation:eq .9s ease-in-out infinite;
+border-radius:1px;transition:background .5s ease}
 .eq i:nth-child(2){animation-delay:.18s}
 .eq i:nth-child(3){animation-delay:.36s}
 @keyframes eq{0%,100%{height:4px}30%{height:13px}60%{height:7px}}
@@ -338,6 +371,24 @@ line-height:1.55;color:#e8e8e8}
 .mini .m{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:10px;align-items:center;
 padding:5px 6px;border-radius:6px;font-size:13px}
 .mini .m:hover{background:var(--hover)}
+/* the queue section that now lives in the right panel: a header with the track
+   count on the left and the clear button on the right, above the row list */
+.qh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.qh h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.14em;
+color:var(--muted);font-weight:700}
+.qh .sub{color:var(--faint);font-size:12px;font-weight:400;letter-spacing:0;
+text-transform:none;margin-left:2px}
+.qh .iconbtn{margin-left:auto;width:26px;height:26px}
+.qh .iconbtn svg{width:14px;height:14px}
+#queue-sect .rows{display:flex;flex-direction:column;gap:1px}
+/* the queue sits in a 360px panel, so its rows drop the row number and use the
+   room for the song and a single actions column - the same shape Spotify's queue
+   uses, where the title is the thing a person scans for */
+#upnext .row{grid-template-columns:40px minmax(0,1.6fr) minmax(0,1fr) 40px auto;gap:10px}
+#upnext .row .n{display:none}
+#upnext .row .du{color:var(--muted);font-size:12px;text-align:right}
+#upnext .row .fab{right:44px}
+#upnext .row .rowacts .iconbtn{width:24px;height:24px}
 .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .btn{display:inline-flex;align-items:center;gap:8px;background:var(--hover);
 border-radius:999px;padding:9px 16px;font-weight:700;font-size:13px}
@@ -364,9 +415,9 @@ white-space:nowrap}
 white-space:nowrap}
 .center{display:flex;flex-direction:column;align-items:center;gap:6px}
 .ctrls{display:flex;align-items:center;gap:16px}
-.ctrls .iconbtn.on{color:var(--accent);position:relative}
+.ctrls .iconbtn.on{color:var(--tint);position:relative}
 .ctrls .iconbtn.on::after{content:"";position:absolute;bottom:-1px;left:50%;
-transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--accent)}
+transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--tint)}
 .play{width:36px;height:36px;border-radius:50%;background:#fff;color:#000;display:grid;
 place-items:center}
 .play svg{width:17px;height:17px}
@@ -376,8 +427,9 @@ place-items:center}
 .seekbar{flex:1;height:14px;display:flex;align-items:center;cursor:pointer;position:relative}
 .seekbar .t{height:4px;width:100%;background:rgba(255,255,255,.22);border-radius:2px;
 overflow:hidden}
-.seekbar .f{height:100%;width:0;background:#fff;border-radius:2px}
-.seekbar:hover .f,.seekbar.kb .f{background:var(--accent)}
+.seekbar .f{height:100%;width:0;background:linear-gradient(90deg,var(--tint),var(--tint2));
+border-radius:2px;transition:background .5s ease}
+.seekbar:hover .f,.seekbar.kb .f{background:linear-gradient(90deg,var(--tint),#fff)}
 .seekbar .k{position:absolute;top:50%;width:12px;height:12px;border-radius:50%;background:#fff;
 transform:translate(-50%,-50%) scale(0);transition:transform .12s;pointer-events:none}
 .seekbar:hover .k{transform:translate(-50%,-50%) scale(1)}
@@ -428,12 +480,12 @@ opacity:.85;flex:none}
 body.busy .btn.prim{opacity:.55}
 [hidden]{display:none !important}
 @media (max-width:1300px){.app{grid-template-columns:280px minmax(0,1fr)}
-.detail{display:none}.app.wide{grid-template-columns:280px minmax(0,1fr) 320px}
+.detail{display:none}.app.wide{grid-template-columns:280px minmax(0,1fr) 360px}
 .app.wide .detail{display:flex}}
 @media (max-width:1000px){.app{grid-template-columns:minmax(0,1fr)}.side{display:none}
 .app.nav .side{display:flex;position:absolute;inset:8px auto 80px 8px;width:300px;z-index:20;
 box-shadow:0 18px 60px rgba(0,0,0,.8)}.cards{grid-template-columns:repeat(auto-fill,
-minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px 28px}
+minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
 .row .ar{display:none}.right .vol input{width:60px}}
 @media (max-width:760px){.center{gap:2px}.player{grid-template-columns:1fr auto}
 .right .iconbtn:nth-child(-n+2){display:none}.quick{grid-template-columns:1fr}}
@@ -456,7 +508,8 @@ BODY = """
  </aside>
 
  <main class="main panel" id="main">
-  <div class="bg" id="bg-main"></div><div class="scrim"></div>
+  <div class="bg" id="bg-main"></div><div class="bg bg2" id="bg-main2"></div>
+  <div class="scrim"></div>
   <div class="scroller" id="scroller">
   <div class="top">
    <div class="navb">
@@ -484,10 +537,6 @@ BODY = """
     <div class="quick" id="quick"></div>
     <h2 id="mixh">Made for you<span class="sub" id="mixs"></span></h2>
     <div class="cards" id="cards"></div>
-    <h2 id="uph">Up next<span class="sub" id="upc"></span><button class="iconbtn"
-     id="clearq" data-action="clear_queue" title="Clear the queue (the song keeps playing)">@@close@@</button></h2>
-    <div class="rows" id="upnext"></div>
-    <div class="acts" id="empty-acts"></div>
    </section>
    <section id="view-search" hidden>
     <h2 id="search-h">Search<span class="sub" id="search-s"></span></h2>
@@ -539,7 +588,7 @@ BODY = """
  </main>
 
  <aside class="detail panel" id="detail">
-  <div class="bg" id="bg-side"></div>
+  <div class="bg" id="bg-side"></div><div class="bg bg2" id="bg-side2"></div>
   <div class="dhead">
    <b>Now playing</b>
    <button class="iconbtn" id="detail-close" title="Hide">@@close@@</button>
@@ -559,6 +608,13 @@ BODY = """
     type a mood above, or pick something on the left</div></div>
    <div class="sect"><h3>Credits</h3><dl class="kv" id="credits"></dl></div>
    <div class="sect"><h3 id="simh">In your likes</h3><div class="mini" id="simil"></div></div>
+   <div class="sect" id="queue-sect">
+    <div class="qh"><h3 id="uph">Queue<span class="sub" id="upc"></span></h3>
+     <button class="iconbtn" id="clearq" data-action="clear_queue"
+      title="Clear the queue (the song keeps playing)">@@close@@</button></div>
+    <div class="rows" id="upnext"></div>
+    <div class="acts" id="empty-acts"></div>
+   </div>
   </div>
  </aside>
 </div>
@@ -695,7 +751,11 @@ function art(node, track, px, field){
   }
   return tint;
 }
-/* the blurred backdrop: the cover, blown up and out of focus, behind the content */
+/* the blurred backdrop: the cover, blown up and out of focus, behind the content.
+   Two layers: the base holds the outgoing cover and the float holds the incoming
+   one, so a track change is a 500 ms crossfade instead of a cut. `--tint` is also
+   what the equaliser bars, the play buttons and the progress bar read, so the
+   "playing" colour follows the artwork. */
 function backdrop(track, playing){
   const url = track && track.art ? track.art : "";
   const t = playing ? (track.id || track.title || "dj") : "dj";
@@ -704,15 +764,58 @@ function backdrop(track, playing){
   const pal = getComputedStyle(document.documentElement).getPropertyValue("--tiles").split(",");
   const other = pal[(h >> 5) % pal.length];
   const tint = playing ? pal[h % pal.length] : "#1f1f1f";
+  const tint2 = playing ? pal[((h >> 3) >>> 0) % pal.length] : "#1f1f1f";
   document.documentElement.style.setProperty("--tint", tint);
+  document.documentElement.style.setProperty("--tint2", tint2);
+  /* the wash underneath a still-loading (or unavailable) cover is the two palette
+     colours the tile would have used, so the page is never "nothing" */
+  const art = url
+    ? "linear-gradient(160deg," + tint + "00," + other + "00),url(" + JSON.stringify(url) + ")"
+    : "linear-gradient(160deg," + tint + "," + other + ")";
   ["bg-main", "bg-side"].forEach((id) => {
     const n = $(id); if (!n) return;
-    n.classList.toggle("flat", !url);
-    // the colour underneath is what shows while an href is still downloading, or
-    // when the image host is unreachable: the wash is never "nothing"
-    n.style.backgroundImage = url
-      ? "linear-gradient(160deg," + tint + "00," + other + "00)," + "url(" + JSON.stringify(url) + ")"
-      : "linear-gradient(160deg," + tint + "," + other + ")";
+    const f = $(id + "2");
+    // one guard for the whole function: `drawDetail` runs on every 700 ms tick, so
+    // without this a still-playing track restarts the crossfade each tick and looks
+    // like it is stuttering. Only act when the picture (or its tint) moves.
+    if (n._art === art) return;
+    n._art = art;
+    if (!f) {
+      // a panel with no float layer just takes the picture directly
+      n.classList.toggle("flat", !url);
+      n.style.backgroundImage = art;
+      return;
+    }
+    if (!n._set) {
+      // first paint: nothing to crossfade from, set the base and hide the float
+      n._set = true;
+      n.classList.toggle("flat", !url);
+      n.style.backgroundImage = art;
+      f.style.opacity = "0";
+      return;
+    }
+    if (!url) {
+      // lost the cover: drop back to the flat two-colour wash, no float needed
+      clearTimeout(f._t);
+      n.classList.add("flat");
+      n.style.backgroundImage = art;
+      f.style.opacity = "0";
+      return;
+    }
+    // real crossfade: the base keeps the outgoing cover, the float fades in with the
+    // incoming one on top, then the base adopts it and the float clears. A track
+    // change reads as one cover melting into the next instead of a hard cut between
+    // two different album colours.
+    f.classList.remove("flat");
+    f.style.backgroundImage = art;
+    void f.offsetWidth;
+    f.style.opacity = ".66";
+    clearTimeout(f._t);
+    f._t = setTimeout(() => {
+      n.classList.remove("flat");
+      n.style.backgroundImage = f.style.backgroundImage;
+      f.style.opacity = "0";
+    }, 470);
   });
 }
 
@@ -745,15 +848,21 @@ $("scroller").addEventListener("scroll", () => {
 });
 
 /* ---------- rows and cards ---------- */
-function trackMenu(t){
-  return [
+function trackMenu(t, opts){
+  opts = opts || {};
+  const items = [
     {label:"Play now", icon:"play", fn:() => act("play_row", {id: t.id || ""})},
     {label:"Queue next", icon:"queue", fn:() => act("queue_next", {id: t.id || ""})},
     {label:"Love this", icon:"heart_o", fn:() => act("love_row", {id: t.id || ""})},
-    {label:"Start a station", icon:"mix", fn:() => act("radio", {id: t.id || ""})},
-    "-",
-    {label:"Stop", icon:"stop", bad:true, fn:() => act("stop")},
   ];
+  if (opts.queued) {
+    items.push({label:"Remove from queue", icon:"close", fn:() => act("remove_queue", {id: t.id || ""})});
+  }
+  items.push({label:"Not for me (dislike)", icon:"thumb_down", fn:() => act("dislike", {id: t.id || ""})});
+  items.push({label:"Start a station", icon:"mix", fn:() => act("radio", {id: t.id || ""})});
+  items.push("-");
+  items.push({label:"Stop", icon:"stop", bad:true, fn:() => act("stop")});
+  return items;
 }
 function rowNode(t, i, opts){
   opts = opts || {};
@@ -769,17 +878,50 @@ function rowNode(t, i, opts){
   if (t.note) ar.appendChild(el("span", "badge", t.note));
   r.appendChild(ar);
   r.appendChild(el("div", "du", t.dur || (opts.ts || "")));
+  // the trailing cluster: for a queued row a Remove and a "not for me" sit next to
+  // the kebab, so a row in the Up Next panel can be acted on without a click on the
+  // ⋮ first - both feed the taste model and both stopPropagation so they do not
+  // also fire the row own play-on-click.
+  const acts = el("div", "rowacts");
+  if (opts.queued) {
+    const rem = el("button", "iconbtn");
+    rem.appendChild(svg("close")); rem.title = "Remove from queue";
+    rem.addEventListener("click", (e) => { e.stopPropagation(); act("remove_queue", {id: t.id || ""}); });
+    acts.appendChild(rem);
+    const dis = el("button", "iconbtn");
+    dis.appendChild(svg("thumb_down")); dis.title = "Not for me - never suggest this again";
+    dis.addEventListener("click", (e) => { e.stopPropagation(); act("dislike", {id: t.id || ""}); });
+    acts.appendChild(dis);
+  }
   const more = el("button", "iconbtn more");
   more.appendChild(svg("dots")); more.title = "More";
-  more.addEventListener("click", (e) => { e.stopPropagation(); menu(more, trackMenu(t)); });
-  r.appendChild(more);
+  more.addEventListener("click", (e) => { e.stopPropagation(); menu(more, trackMenu(t, opts)); });
+  acts.appendChild(more);
+  r.appendChild(acts);
   const fab = el("button", "fab"); fab.appendChild(svg("play"));
   fab.title = "Play now";
-  fab.addEventListener("click", (e) => { e.stopPropagation(); act("play_row", {id: t.id || ""}); });
+  fab.addEventListener("click", (e) => { e.stopPropagation(); playOnce(t.id || ""); });
   r.appendChild(fab);
-  r.addEventListener("dblclick", () => act("play_row", {id: t.id || ""}));
+  // "the queue UI bug when click": a click on an Up Next row used to do nothing
+  // (only a double-click played it), so a row looked clickable but was not. A single
+  // click on a queued row now plays it - the action buttons above stop the event.
+  // `playOnce` also squashes the second click of a double-tap, so it never stacks two
+  // play_row calls (that was the "plays twice" bug: one click, then the dblclick that
+  // follows it, both firing).
+  r.addEventListener("click", () => { if (opts.queued) playOnce(t.id || ""); });
+  r.addEventListener("dblclick", () => { if (!opts.queued) playOnce(t.id || ""); });
   if (opts.current) r.classList.add("playing");
   return r;
+}
+
+/* one play per row per gesture: a double-click fires click, click, dblclick, and
+   each of those used to restart the song. Lock out the row's id for a beat so a
+   quick pair of presses is one play, not two. */
+function playOnce(id){
+  const now = Date.now();
+  if (playOnce._id === id && now - (playOnce._t || 0) < 320) return;
+  playOnce._id = id; playOnce._t = now;
+  act("play_row", {id: id || ""});
 }
 function cardNode(t, i){
   const c = el("div", "card");
@@ -790,9 +932,9 @@ function cardNode(t, i){
   c.appendChild(el("div", "a", t.artist || t.channel || "unknown artist"));
   const fab = el("button", "fab"); fab.appendChild(svg("play"));
   fab.title = "Play now";
-  fab.addEventListener("click", () => act("play_row", {id: t.id || ""}));
+  fab.addEventListener("click", () => playOnce(t.id || ""));
   c.appendChild(fab);
-  c.addEventListener("dblclick", () => act("play_row", {id: t.id || ""}));
+  c.addEventListener("dblclick", () => playOnce(t.id || ""));
   if (t.id && S.state && S.state.now && t.id === S.state.now.id) c.classList.add("on");
   return c;
 }
@@ -1011,7 +1153,8 @@ function drawUpNext(s){
   $("uph").hidden = false;
   const cq = $("clearq"); if (cq) cq.hidden = !(s.queued || rows.length);
   redraw(box, sigOf([rows, playing, S.filter]), (b) =>
-    rows.forEach((t, i) => b.appendChild(rowNode(t, i, {current: playing && t.id === playing}))));
+    rows.forEach((t, i) => b.appendChild(rowNode(t, i,
+      {current: playing && t.id === playing, queued: true}))));
 }
 function drawDetail(s){
   const np = s.now || {};
@@ -1266,7 +1409,9 @@ function draw(s){
   region("drawLog", () => drawLog(s));
   region("drawEmptyActs", () => drawEmptyActs(s));
   region("upnext-visibility", () => {
-    $("upnext").hidden = S.filter === "artists" || S.filter === "moods";
+    // the queue is its own right-side panel now; the sidebar chips only filter what
+    // the queue *holds* (drawUpNext), so it is never hidden by them
+    const n = $("upnext"); if (n) n.hidden = false;
   });
   if (S.broken) { S.broken = ""; const p = $("jobpill"); if (p) p.classList.remove("warn"); }
 }
@@ -1319,9 +1464,11 @@ $("b-more").addEventListener("click", (e) => {
   menu($("b-more"), items);
 });
 $("b-queue").addEventListener("click", () => {
-  // the queue lives in the middle column, so this scrolls to it rather than opening
-  // a second list that would drift out of sync with the first
-  setView("home");
+  // the queue now lives in the right Now Playing panel, like the apps this layout
+  // is borrowed from. On a window narrow enough that the panel is tucked away, this
+  // first reveals it; then it brings the Queue heading into view. There is no
+  // second list to drift out of sync - one queue, one home.
+  if (window.matchMedia("(max-width:1300px)").matches) $("app").classList.add("wide");
   const n = $("uph");
   if (n && n.scrollIntoView) n.scrollIntoView({behavior:"smooth", block:"start"});
 });

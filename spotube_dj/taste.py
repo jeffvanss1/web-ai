@@ -216,6 +216,30 @@ def record_skip(track: dict, reason: str = "skip") -> None:
     save_state(state)
 
 
+def record_dislike(track: dict) -> None:
+    """
+    The explicit "never again" verdict, stronger than a skip.
+
+    A skip is often just "I've heard this"; a ♥->👎 press is a statement about the
+    artist and the sound, so it costs more than either skip rung and it is written
+    into `skipped` with reason "dislike" so the profile can see the difference
+    between "give this artist -2.4" and "this one track is over". `record_skip`
+    already handles the heard-most-of-it case; this is the button a listener
+    presses when they want the DJ to stop proposing that artist.
+    """
+    state = load_state()
+    _remember(state, "skipped", {
+        "title": norm(track.get("title", "")),
+        "artist": norm(track.get("artist", "")),
+        "ts": time.time(),
+        "reason": "dislike",
+    }, dedupe=False)
+    _bump(state["artists"], track.get("artist", ""), -2.4)
+    for tag in title_hints(track.get("title", "")):
+        _bump(state["genres"], tag, -1.2)
+    save_state(state)
+
+
 def preference_context(max_items: int = 8) -> str:
     """Short text block fed to the LLM so it writes better queries."""
     state = load_state()

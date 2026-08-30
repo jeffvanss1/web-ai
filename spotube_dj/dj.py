@@ -96,6 +96,27 @@ class Queue:
             del self.items[kept:]
             return n
 
+    def remove_id(self, vid: str) -> dict | None:
+        """
+        Drop one queued row by its video id; -> the row, or None if it is not there.
+
+        Only rows at or after the cursor are removable - that is what "still
+        queued" means. The row being heard was already popped out of `items`
+        (so `pos` is the next one to play), and the rows before the cursor are
+        history that a Remove button must not touch. This is what a per-row
+        "Remove from queue" button needs that `clear_ahead()` does not offer:
+        one row, not everything after the cursor.
+        """
+        vid = str(vid or "")
+        if not vid:
+            return None
+        with self._lock:
+            for i in range(self.pos, len(self.items)):
+                t = self.items[i]
+                if str(t.get("id") or "") == vid:
+                    return self.items.pop(i)
+        return None
+
 
 # Words that appear in a *request* but never in a legit track title - if a
 # search hit shares none of the real signal, it's an ad / off-topic upload.

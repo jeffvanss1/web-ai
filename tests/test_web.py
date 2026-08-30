@@ -767,6 +767,59 @@ class ActionTests(unittest.TestCase):
             self.assertIn(verb, web.ACTIONS, verb)
 
 
+class QueueRowActionTests(unittest.TestCase):
+    """The remove / dislike verbs the queue rows expose, and the play-one-twice fix."""
+
+    def setUp(self):
+        self.dj = fake_dj([track(i) for i in range(6)])
+        self.dj.auto = False
+        self.dj._topup = lambda **k: None          # a row action must not search
+        self.ctx = web.Context(self.dj)
+        import taste
+        taste.clear()
+        try:
+            taste.undo_file().unlink()
+        except OSError:
+            pass
+
+    def run_it(self, name, **fields):
+        form = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in fields.items())
+        return web.run_action(self.ctx, name, urllib.parse.parse_qs(form))
+
+    def test_remove_queue_drops_the_one_row_and_keeps_the_song(self):
+        code, payload = self.run_it("remove_queue", id="vid2")
+        self.assertEqual(code, 200)
+        self.assertNotIn("vid2", [t["id"] for t in self.dj.queue.items])
+        self.assertEqual(self.dj.current["title"], track(0)["title"],
+                         "the audible track is not touched by a row removal")
+        self.assertEqual(len(self.dj.queue), 4)
+
+    def test_remove_queue_says_when_the_row_left_already(self):
+        _code, payload = self.run_it("remove_queue", id="vid99")
+        self.assertIn("that row is gone", payload["note"])
+        self.assertEqual(len(self.dj.queue), 5)
+
+    def test_dislike_records_taste_and_removes_the_row(self):
+        code, payload = self.run_it("dislike", id="vid3")
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["note"], "won't suggest 'Track 3' again")
+        self.assertNotIn("vid3", [t["id"] for t in (self.dj.queue.items or [])])
+        import taste
+        state = taste.load_state()
+        self.assertIn("dislike", [s.get("reason") for s in state.get("skipped", [])])
+
+    def test_play_row_does_not_duplicate_a_queued_row(self):
+        # "the queue UI bug when click": clicking the same queued row used to copy it
+        # on top of itself, so it played twice in a row. remove_id first, then play.
+        web.run_action(self.ctx, "play_row", {"id": [""]})  # no-op guard path
+        # play the row that is currently next (vid1 is at the cursor in fake_dj)
+        _code, payload = self.run_it("play_row", id="vid1")
+        self.assertEqual(payload["note"], "playing Track 1")
+        self.assertEqual(
+            [t["id"] for t in self.dj.queue.upcoming(10)].count("vid1"), 0,
+            "the row that just played must not still be waiting in the queue")
+
+
 class SearchTests(unittest.TestCase):
     def setUp(self):
         self.ctx = web.Context(fake_dj())

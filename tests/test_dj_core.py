@@ -162,6 +162,17 @@ class TasteTests(_TmpHome):
         self.assertLess(late, 0)
         self.assertGreater(late, early, f"partial={late} should be milder than early={early}")
 
+    def test_dislike_is_stronger_than_any_skip_and_is_remembered(self):
+        # the 👎 on a queue row is a verdict, not a "done" skip: it must cost the
+        # artist more than even an early skip, and it has to be visible as a reason
+        taste.record_skip({"title": "p", "artist": "Skip Artist"}, "early-skip")
+        early = config.load_state()["artists"]["skip artist"]
+        taste.record_dislike({"title": "q", "artist": "Hated Artist"})
+        st = config.load_state()
+        self.assertEqual(st["artists"]["hated artist"], -2.4)
+        self.assertLess(st["artists"]["hated artist"], early)
+        self.assertIn("dislike", [s.get("reason") for s in st["skipped"]])
+
     def test_fingerprint_merges_the_same_song_from_two_channels(self):
         a = taste.fingerprint("Joji - SLOW DANCING IN THE DARK")
         b = taste.fingerprint("SLOW DANCING IN THE DARK (Official Video)")
@@ -371,6 +382,28 @@ class QueueTests(unittest.TestCase):
         q.extend([{"id": str(i)} for i in range(5)])
         q.pop()
         self.assertEqual([t["id"] for t in q.upcoming(2)], ["1", "2"])
+
+    def test_remove_id_drops_only_the_one_queued_row(self):
+        q = Queue()
+        q.extend([{"id": "a"}, {"id": "b"}, {"id": "c"}])
+        q.pop()                                   # "a" is now "history"
+        self.assertEqual(q.remove_id("b")["id"], "b")
+        self.assertEqual([t["id"] for t in q.items], ["a", "c"])
+        self.assertEqual(len(q), 1, "only the still-queued rows count")
+
+    def test_remove_id_will_not_touch_rows_already_popped(self):
+        q = Queue()
+        q.extend([{"id": "a"}, {"id": "b"}])
+        q.pop()                                   # the cursor now sits past "a"
+        self.assertIsNone(q.remove_id("a"), "a row behind the cursor is not queued")
+        self.assertEqual(len(q), 1)
+
+    def test_remove_id_returns_none_for_an_unknown_or_empty_id(self):
+        q = Queue()
+        q.extend([{"id": "a"}])
+        q.pop()
+        self.assertIsNone(q.remove_id("nope"))
+        self.assertIsNone(q.remove_id(""))
 
     def test_interleave_rotates_buckets_and_caps_artists(self):
         a1 = {"id": "a1", "artist": "Same", "title": "one", "score": 9}

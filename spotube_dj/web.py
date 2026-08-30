@@ -316,9 +316,16 @@ def build_state(ctx) -> dict:
     # and request_art is a dict probe per row, so calling it every tick is free.
     # card first: it is what the eye is on, and once a 256px file exists a 40px row
     # borrows it instead of downloading a second copy of the same picture
-    ctx.request_art(upcoming, "card", limit=12)
-    ctx.request_art(upcoming, "row", limit=14)
-    ctx.request_art(lib_loved + lib_recents, "card", limit=10)
+    # Warm every row a person can see, not just the first screenful. The old caps
+    # (12 card / 14 row) were the "covers don't show on every song" report: a 40
+    # track queue dressed the first screen, and the rows past the cap stayed as
+    # coloured initials for the whole session. The lane is still bounded by its
+    # own queue size and the seen-set, so this is "all of them in order", not
+    # "an unbounded burst".
+    ctx.request_art(upcoming, "card", limit=200)
+    ctx.request_art(upcoming, "row", limit=200)
+    ctx.request_art(lib_loved + lib_recents, "card", limit=60)
+    ctx.request_art(lib_loved + lib_recents, "row", limit=60)
     if np:
         ctx.request_art([np], "big", limit=1)
     return {
@@ -421,8 +428,9 @@ class Context:
         self.job = None                       # the thread building a mix
         self._job_lock = threading.Lock()     # who is allowed to start the next one
         self.art: queue.Queue = queue.Queue(maxsize=128)   # (track, size) pairs
-        self._seen_art: set[tuple[str, str]] = set()       # already drawn
+        self._seen_art: set[tuple[str, str]] = set()       # already drawn / gave up
         self._want_art: set[tuple[str, str]] = set()       # queued, not drawn yet
+        self._art_retry: dict[tuple[str, str], int] = {}   # (id, size) -> miss count
         try:
             # a cover that lands late still has to reach the page; this callback runs
             # on the covers thread and only touches the two dicts below
@@ -518,12 +526,20 @@ class Context:
         name = Path(text).name
         return "/art/" + name if ART_NAME.match(name) else ""
 
-    def _store_href(self, vid: str, path: str, size: str = "row") -> None:
+    def _store_href(self, vid: str, path: str, size: str = "row") -> bool:
+        """
+        Record one cached picture for a row, and say whether it stored.
+
+        Returns False when there was nothing to store (no path, not a safe name),
+        which is the signal `_art_loop` uses to know a fetch *failed* and should
+        be retried rather than remembered as "this row has no art".
+        """
         href = self._href_for(path)
         if not vid or not href:
-            return
+            return False
         with self._lock:
             self._hrefs.setdefault(str(vid), {})[size] = href
+        return True
 
     def _art_loop(self) -> None:
         # Two sources, in the order that makes the window look right: the Cover Art
@@ -541,17 +557,32 @@ class Context:
             self._want_art.discard((vid, size))
             if not vid or (vid, size) in self._seen_art:
                 continue
-            self._seen_art.add((vid, size))
             current = vid == str((self.dj.current or {}).get("id") or "")
             # the picture that can be shown *now* is fetched first: a frame off the
             # video CDN answers in ~15 ms, while the archive hop is MusicBrainz (paced
             # at one call per second, per its docs), a redirect, then the image - and
             # doing that first is what made a page of fresh tracks take minutes to
             # dress. The archive still wins when it lands, through the notifier below.
+            stored = False
             try:
-                self._store_href(vid, thumbs.get(t, size), size)
+                stored = self._store_href(vid, thumbs.get(t, size), size)
             except Exception:
-                pass                     # no art is a look, not a failure
+                stored = False          # no art is a look, not a failure
+            if stored:
+                # a real file landed: done with this slot, and clear the miss count
+                self._seen_art.add((vid, size))
+                self._art_retry.pop((vid, size), None)
+            else:
+                # no picture *yet* (CDN miss, ffmpeg absent, a row that just showed
+                # up). Retry a bounded number of times so a transient miss does not
+                # leave the row as a coloured initial forever, then give up so the
+                # tick does not keep re-asking for a cover that does not exist.
+                tries = self._art_retry.get((vid, size), 0) + 1
+                if tries >= 3:
+                    self._seen_art.add((vid, size))
+                    self._art_retry.pop((vid, size), None)
+                else:
+                    self._art_retry[(vid, size)] = tries
             try:
                 covers.remember_track(t)          # one album may dress its whole set
                 # the card slot is where a wrong cover shows most, so the archive is
@@ -712,10 +743,15 @@ def action_radio(ctx, fields: dict) -> str:
 
 
 def action_play_row(ctx, fields: dict) -> str:
-    t = _row_ids(ctx).get((fields.get("id") or [""])[0])
+    tid = str((fields.get("id") or [""])[0])
+    t = _row_ids(ctx).get(tid)
     if not t:
         return "that row is gone"
     q = ctx.dj.queue
+    # A queued row clicked again used to be copied on top of itself: the original
+    # stayed ahead of the cursor, so the same song came up twice in a row. Drop it
+    # from wherever it sits first, then put the one copy at the head and play it.
+    q.remove_id(tid)
     q.insert_at(q.pos, dict(t))
     ctx.dj.next(force=True)
     return f"playing {t.get('title')}"
@@ -737,6 +773,45 @@ def action_row_love(ctx, fields: dict) -> str:
     taste.record_like(t)
     ctx.dj.state = config.load_state()      # same reload DJ.like() does
     return "loved - it will pull the mix that way"
+
+
+def action_row_remove(ctx, fields: dict) -> str:
+    """
+    Remove one row from the queue, leaving the song that is playing alone.
+
+    The row a person clicks is in the queue by id; `remove_id` only drops things
+    at or after the cursor, so it can never delete the audible track or rewrite
+    history. The answer says what left the list, which is the one fact a Remove
+    button has to be honest about - a silent success looks like a dead button.
+    """
+    t = _row_ids(ctx).get((fields.get("id") or [""])[0])
+    if not t:
+        return "that row is gone"
+    removed = ctx.dj.queue.remove_id(str(t.get("id") or ""))
+    if not removed:
+        return "that row is no longer queued - the song here already left the list"
+    ctx.dj._note(f"removed from queue: {removed.get('title') or '?'}")
+    return f"removed '{removed.get('title') or '?'}' from the queue"
+
+
+def action_row_dislike(ctx, fields: dict) -> str:
+    """
+    The explicit "never again" on one row: teaches the taste model and removes it.
+
+    This is the complement of the heart. A dislike is a *verdict*, not just a
+    skip: it drops the row from the queue and the artist/title weight in the
+    profile, so the next mix leans away from that sound instead of re-proposing
+    it. The row is removed from the queue either way - a track you pressed 👎 on
+    should not sit in the list waiting to play.
+    """
+    t = _row_ids(ctx).get((fields.get("id") or [""])[0])
+    if not t:
+        return "that row is gone"
+    taste.record_dislike(t)
+    ctx.dj.state = config.load_state()      # same reload DJ.like() does
+    ctx.dj.queue.remove_id(str(t.get("id") or ""))
+    ctx.dj._note(f"disliked: {t.get('title') or '?'}")
+    return f"won't suggest '{t.get('title') or '?'}' again"
 
 
 def action_like(ctx, fields: dict) -> str:
@@ -985,6 +1060,8 @@ ACTIONS = {
     "play_row": action_play_row,
     "queue_next": action_queue_next,
     "love_row": action_row_love,
+    "remove_queue": action_row_remove,
+    "dislike": action_row_dislike,
     "open": action_open,
     "test_brain": action_test_brain,
     "clear_station": lambda c, f: _clear_station(c),
