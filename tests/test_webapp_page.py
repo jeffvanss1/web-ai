@@ -213,6 +213,8 @@ class PageShapeTests(unittest.TestCase):
                       "there is no onerror retry for a blank thumbnail")
         self.assertIn("hqdefault.jpg", js,
                       "the fallback never tries the reliably-served frame")
+        self.assertIn('img.loading = "eager"', js,
+                      "a small row tile must not wait for a scroll event that never comes")
 
     def test_the_cache_pill_is_never_squeezed_into_an_ellipsis(self):
         # it said "0 stored, 0 d…" because flex let the icons beside it take the

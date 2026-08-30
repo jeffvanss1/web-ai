@@ -69,6 +69,11 @@ def row_view(t: dict, *, note: str = "", liked: bool | None = None) -> dict:
         # when that lands, and to nothing smarter if the row has no url
         "art": thumb if thumb.startswith("http") else "",
         "art_card": thumb if thumb.startswith("http") else "",
+        # the raw innerTube thumbnail rides along too, so the page's art() has a
+        # last-resort URL even if some later pass blanked the two slots above: a
+        # queue row or an album-page row that only carried `thumbnail` must still
+        # be dressed rather than drawn as a tinted initial.
+        "thumbnail": thumb if thumb.startswith("http") else "",
         # a page row may carry its own badge (a discography entry's year, an album
         # track's record name); an explicit `note` from the caller wins, else use it
         "note": note or (str(t.get("note") or "") if isinstance(t.get("note"), str)

@@ -803,7 +803,11 @@ function cover(node, url, vid, tried){
   const m = /\/vi\/([^/]+)/.exec(url) || (vid ? [undefined, String(vid)] : null);
   const hq = m ? "https://i.ytimg.com/vi/" + m[1] + "/hqdefault.jpg" : "";
   const finalUrl = (m && /maxresdefault/.test(url) && hq !== url && !tried) ? hq : url;
-  const img = el("img"); img.src = finalUrl; img.alt = ""; img.loading = "lazy";
+  // a row tile is 40-70 px, so eager beats lazy here: `loading="lazy"` on a small
+  // absolute image inside a custom scroll container can sit unloaded (a browser
+  // has no scroll event to react to) and leave the tinted tile a cover should have
+  // covered. Eager pictures in an always-visible list cost nothing meaningful.
+  const img = el("img"); img.src = finalUrl; img.alt = ""; img.loading = "eager";
   img.onerror = () => {
     img.remove();
     if (!tried && hq && hq !== finalUrl) cover(node, hq, vid, true);

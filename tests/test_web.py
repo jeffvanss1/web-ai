@@ -83,6 +83,9 @@ class RowViewTests(unittest.TestCase):
                           "thumbnail": "https://i.ytimg.com/vi/x/hqdefault.jpg"})
         self.assertTrue(r["art"].startswith("http"))
         self.assertTrue(r["art_card"].startswith("http"))
+        # the raw thumbnail also rides along, so the page's art() has a last-resort
+        # URL if the two slots above ever get erased by a later pass
+        self.assertEqual(r["thumbnail"], "https://i.ytimg.com/vi/x/hqdefault.jpg")
 
     def test_a_page_row_carries_its_album_identity(self):
         # the front-end needs `kind`/`album`/`browse_id` to open a discography row on
