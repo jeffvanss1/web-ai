@@ -522,19 +522,13 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
     return audio, rate, compressed, False
 
 
-# The Live API's prebuiltVoiceConfig is a *smaller* roster than the full TTS voice
-# list. The Live/ADK docs call out Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus,
-# Zephyr; voices like Despina are only on the synchronous generateContent TTS
-# endpoint. We try the user's configured voice first and, if the server closes
-# during setup (i.e. it rejected the voice/config), retry on a fresh connection
-# with a Live-safe voice, so the DJ still speaks instead of silently falling back.
-_LIVE_SAFE_VOICES = ("puck", "charon", "kore", "fenrir", "aoede", "leda", "orus",
-                    "zephyr")
-_DJ_SYSTEM_INSTRUCTION = ("You are the Spotube DJ: a warm, quick-witted radio host. "
-                          "Keep every spoken line to one or two short, natural, "
-                          "upbeat sentences.")
-
-_LIVE_DEFAULT_SAFE_VOICE = "kore"
+# Every Gemini Live native-audio model speaks with any of the 30 TTS voices; the
+# list is the same as the generateContent TTS voices, so a chosen voice is always
+# valid on the Live path. We only fall back to a guaranteed-initially-available voice
+# if the *server* closes during setup (a genuine rejection of the config), so the
+# DJ keeps speaking instead of dropping to espeak/silence. We never swap the voice
+# when setup succeeds but just no audio arrives - that is a different failure.
+_LIVE_FALLBACK_VOICE = "kore"
 
 
 def _live_setup(sock, setup: dict, timeout: float = 15.0) -> bool:
@@ -545,14 +539,13 @@ def _live_setup(sock, setup: dict, timeout: float = 15.0) -> bool:
     returns False, so the caller can try another setup on a fresh connection.
     """
     _ws_send_frame(sock, 1, json.dumps({"setup": setup}).encode())
-    _info("gemini (live): setup:: " + json.dumps(setup)[:260])
+    _info("gemini (live): setup:: " + json.dumps(setup)[:300])
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             opcode, data = _ws_read_frame(sock)
         except socket.timeout:
-            _info(f"gemini (live): setup not answered within {timeout:.0f}s "
-                  "(no setupComplete)")
+            _info(f"gemini (live): server never sent setupComplete within {timeout:.0f}s")
             return False
         except Exception as e:
             _info(f"gemini (live): setup read failed: {e.__class__.__name__}: {e}")
@@ -575,8 +568,7 @@ def _live_setup(sock, setup: dict, timeout: float = 15.0) -> bool:
                 _info(f"gemini (live): goAway -> {msg.get('goAway')}")
                 return False
             _info("gemini (live): setup-phase message " + json.dumps(msg)[:300])
-    _info(f"gemini (live): setup not answered within {timeout:.0f}s "
-          "(no setupComplete)")
+    _info(f"gemini (live): server never sent setupComplete within {timeout:.0f}s")
     return False
 
 
@@ -613,73 +605,92 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
     model = tts_model()
     if not _is_live_model(model):
         return False
-    voice = voice_name() or _LIVE_DEFAULT_SAFE_VOICE
-    safe = voice.lower() if voice.lower() in _LIVE_SAFE_VOICES else _LIVE_DEFAULT_SAFE_VOICE
-    # The api/live reference is authoritative here: `responseModalities` and
-    # `speechConfig` both go **inside** `generationConfig` on the setup message.
-    # (The quickstart snippet that puts responseModalities at the top of setup is
-    # wrong - the real server rejects it with 1007 "Unknown name
-    # "responseModalities" at 'setup'".) We do not set systemInstruction: the line
-    # is already written by Gemini for its text, and we only want it voiced as-is.
-    variants = []
-    voice_cfg = {"speechConfig": {"voiceConfig": {
-        "prebuiltVoiceConfig": {"voiceName": voice}}}}
-    v1 = {"model": "models/" + model,
-          "generationConfig": {"responseModalities": ["AUDIO"], **voice_cfg}}
-    variants.append(("configured voice (%s)" % voice, v1))
-    # The Live API's prebuilt voice roster is narrower than the full TTS list; if
-    # the configured voice isn't on it the server closes during setup, so retry on
-    # a fresh connection with a Live-safe voice.
-    if safe != voice.lower():
-        safe_cfg = {"speechConfig": {"voiceConfig": {
-            "prebuiltVoiceConfig": {"voiceName": safe}}}}
-        v2 = {"model": "models/" + model,
-              "generationConfig": {"responseModalities": ["AUDIO"], **safe_cfg}}
-        variants.append(("safe voice (%s)" % safe, v2))
+    voice = voice_name() or _LIVE_FALLBACK_VOICE
 
-    for label, setup in variants:
+    def setup_for(v: str) -> dict:
+        # The api/live reference is authoritative: `responseModalities` and
+        # `speechConfig` both sit **inside** `generationConfig` on the setup
+        # message. (A quickstart snippet puts responseModalities at the top of
+        # setup, but the real server rejects that with 1007.) No systemInstruction:
+        # the line is already written as text and we only want it voiced as-is.
+        return {
+            "model": "models/" + model,
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
+                    "voiceName": v}}},
+            },
+        }
+
+    def attempt(v: str) -> tuple[bool, bool]:
+        """Run a full connect+setup+turn on a fresh connection.
+
+        Returns (spoke_ok, setup_rejected). setup_rejected is True when the server
+        closed/refused during setup (a real config problem), distinct from "setup
+        OK but no audio came back".
+        """
         sock = None
+        label = "voice=%s" % v
+        setup_ok = False
         try:
             sock = _ws_connect(_live_url())
-            _info(f"gemini (live): connected, model={model}, voice={voice_name()}"
-                  f" ({label})")
-            if not _live_setup(sock, setup):
+            _info(f"gemini (live): connected, model={model}, {label}")
+            setup_ok = _live_setup(sock, setup_for(v))
+            if not setup_ok:
+                return False, True
+        except Exception as e:
+            _info(f"gemini (live): connect/setup failed ({label}): "
+                  f"{e.__class__.__name__}: {e}")
+            return False, True
+        finally:
+            # a failed setup left an unneeded connection; close it before returning
+            if not setup_ok and sock is not None:
                 try:
                     sock.close()
                 except Exception:
                     pass
-                continue
+        try:
+            if not setup_ok or sock is None:
+                return False, True
+            audio, rate, compressed, _finished = _send_text_turn(sock, text)
         except Exception as e:
-            _info(f"gemini (live): connect/setup failed ({label}): "
-                  f"{e.__class__.__name__}: {e}")
+            _info(f"gemini (live): turn failed ({label}): {e.__class__.__name__}: {e}")
+            return False, False
+        finally:
             try:
-                if sock is not None:
-                    sock.close()
+                sock.close()
             except Exception:
                 pass
-            continue
-        audio, rate, compressed, _finished = _send_text_turn(sock, text)
-        try:
-            sock.close()
-        except Exception:
-            pass
         if not audio:
-            _info(f"gemini (live): no audio came back ({label})")
-            continue
+            _info(f"gemini (live): setup OK but no audio came back ({label})")
+            return False, False
         if compressed:
             # a container (ogg/opus/mp3) is written as-is; mpv sniffs the content
             # and does not care that the temp name happens to end in .wav
             path.write_bytes(audio)
             ok = path.exists() and path.stat().st_size > 0
-            _info(f"gemini (live): spoke via {label}, wrote {len(audio)} bytes "
+            _info(f"gemini (live): spoke with voice {v}, wrote {len(audio)} bytes "
                   f"of audio container")
-            return ok
+            return ok, False
         _pcm_to_wav(audio, rate, path)
         ok = path.exists() and path.stat().st_size > 0
-        _info(f"gemini (live): spoke via {label}, {len(audio)} PCM bytes @ {rate} Hz "
-              f"({path.stat().st_size if ok else 0} bytes wav)")
-        return ok
-    _info("gemini (live): every setup variant was rejected - falling back")
+        _info(f"gemini (live): spoke with voice {v}, {len(audio)} PCM bytes "
+              f"@ {rate} Hz ({path.stat().st_size if ok else 0} bytes wav)")
+        return ok, False
+
+    # 1. Use exactly the configured voice. Never pre-emptively substitute it.
+    spoke, _setup_rejected = attempt(voice)
+    if spoke:
+        return True
+    # 2. Only if the server actually refused the configured voice during setup do we
+    #    retry on a fresh connection with a voice guaranteed to be available, so the
+    #    DJ still speaks at all. A successful setup with no audio is NOT a voice
+    #    problem, so we do not change the voice for it (espeak handles that case).
+    if _setup_rejected and voice.lower() != _LIVE_FALLBACK_VOICE:
+        spoke, _ = attempt(_LIVE_FALLBACK_VOICE)
+        if spoke:
+            return True
+    _info(f"gemini (live): could not speak with voice {voice} - falling back")
     return False
 
 
