@@ -820,6 +820,19 @@ class OriginTests(unittest.TestCase):
         solo = [self._fan("f1"), self._fan("f2", title="Come as You Are")]
         self.assertEqual([t["id"] for t in prov._prefer_originals(solo)], ["f1", "f2"])
 
+    def test_prefer_originals_plays_the_unalbumed_version_not_the_radio_edit(self):
+        # "why it plays the radio edit, not the unedited, like YouTube Music does" -
+        # an edit is still the artist's own single, but when the full / album-length
+        # recording is in the results too, that is the one a mood queue should pick
+        edition = self._official("edit1", "Smells Like Teen Spirit (Radio Edit)")
+        full = self._official("full1", "Smells Like Teen Spirit")
+        both = prov._prefer_originals([edition, full])
+        self.assertEqual([t["id"] for t in both], ["full1"],
+                         "the radio edit outranked the un-edited recording")
+        # with only the edit on the page, keep it rather than go silent
+        only_edit = self._official("edit2", "Come as You Are (Single Edit)")
+        self.assertEqual([t["id"] for t in prov._prefer_originals([only_edit])], ["edit2"])
+
     def test_cover_and_remix_by_a_fan_are_refused_but_an_official_one_is_not(self):
         for title in ("Smells Like Teen Spirit (cover by Delicious Rock)",
                       "Smells Like Teen Spirit - Remix",

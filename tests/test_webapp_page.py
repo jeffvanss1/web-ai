@@ -215,6 +215,8 @@ class PageShapeTests(unittest.TestCase):
                       "the fallback never tries the reliably-served frame")
         self.assertIn('img.loading = "eager"', js,
                       "a small row tile must not wait for a scroll event that never comes")
+        self.assertIn("track.id ? \"https://i.ytimg.com/vi/\" + track.id", js,
+                      "art() has no id-derived last-resort hqdefault when every field is blank")
 
     def test_the_cache_pill_is_never_squeezed_into_an_ellipsis(self):
         # it said "0 stored, 0 d…" because flex let the icons beside it take the

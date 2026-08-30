@@ -217,6 +217,21 @@ def _is_origin(t: dict) -> bool:
     return bool(filters._TOP_CHANNEL.search(ch))
 
 
+# A shortened-to-radio/single version of the song. Still the artist's own recording
+# (so `_is_origin` says yes), but when the full-length catalog version is also in the
+# results the app should play that one - "why it plays the radio edit, not the
+# unedited, like YouTube Music does". The album version is what a mood mix is for.
+_EDITED = re.compile(
+    r"\b(?:radio\s+edit|radio\s+version|single\s+edit|single\s+version"
+    r"|short\s+version|edited\s+version|album\s+edit|compact\s+version"
+    r"|extended\s+edit|7[\"']\s+edit)\b", re.I)
+
+
+def _is_edited(t: dict) -> bool:
+    """True when a row title advertises a trimmed radio/single version of a song."""
+    return bool(_EDITED.search(str((t or {}).get("title") or "")))
+
+
 def _prefer_originals(rows: list[dict]) -> list[dict]:
     """
     Keep only the artist's own recordings when a search returned any.
@@ -226,9 +241,17 @@ def _prefer_originals(rows: list[dict]) -> list[dict]:
     one a mood mix is for, so when at least one original exists the rest is dropped
     rather than ranked - a cover scoring -1.5 still makes the queue otherwise. A
     search that returns *only* covers/live keeps them, because silence is worse.
+
+    The same rule then walks down the version ladder: among the artist's own
+    recordings, a "radio edit" / trimmed single is only a shade worse than the full
+    one more familiar from a record, so when the un-edited version is there too the
+    edits are passed over and the album-length recording is the one that plays.
     """
     origin = [x for x in (rows or []) if _is_origin(x)]
-    return origin if origin else list(rows or [])
+    if not origin:
+        return list(rows or [])
+    unedited = [x for x in origin if not _is_edited(x)]
+    return unedited if unedited else origin
 
 
 def ytm_search(query: str, limit: int = 12) -> list[dict]:

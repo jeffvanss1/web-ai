@@ -790,8 +790,12 @@ function art(node, track, px, field){
   // can carry its picture in only one of those slots, or only as the raw InnerTube
   // `thumbnail`, so fall through them all - a queue row that only has `art_card`,
   // or an album/discography row that arrived with `thumbnail`, must still be dressed
-  // rather than drawn as a tinted initial. Any real picture wins over the initial.
-  const url = (field && track[field]) || track.art || track.art_card || track.thumbnail;
+  // rather than drawn as a tinted initial. Any real picture wins over the initial,
+  // and if every field is blank but the row has an id, the video's always-served
+  // `hqdefault` frame is the last resort - so a row is never a bare letter when a
+  // real image could exist.
+  const url = (field && track[field]) || track.art || track.art_card || track.thumbnail ||
+              (track.id ? "https://i.ytimg.com/vi/" + track.id + "/hqdefault.jpg" : "");
   if (url) cover(node, url, track.id || "");
   return tint;
 }
