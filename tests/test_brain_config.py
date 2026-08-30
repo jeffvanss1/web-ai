@@ -171,6 +171,35 @@ class PersistenceTests(_Iso):
         self.assertEqual(st["skipped"], [])
         self.assertEqual(st["artists"], {})
 
+    def test_state_cache_is_a_fresh_copy_and_sees_a_rewrite(self):
+        # /api/state calls load_state once a second; the cache must hand back an
+        # independent copy (taste mutates what it gets and saves it) and must
+        # invalidate the moment save_state writes a new file.
+        config.save_state({"liked": [{"title": "t", "artist": "a"}], "volume": 70})
+        first = config.load_state()
+        second = config.load_state()
+        self.assertEqual(first, second)              # same snapshot ...
+        self.assertIsNot(first, second)              # ... but not the same object
+        self.assertIsNot(first["liked"], second["liked"])
+        first["liked"].append({"title": "mut", "artist": "b"})   # mutate the copy
+        self.assertEqual(len(config.load_state()["liked"]), 1)   # cache unpolluted
+        config.save_state({"liked": [{"title": "two", "artist": "c"}], "volume": 90})
+        fresh = config.load_state()
+        self.assertEqual(len(fresh["liked"]), 1)
+        self.assertEqual(fresh["liked"][0]["title"], "two")
+        self.assertEqual(fresh["volume"], 90)
+
+    def test_state_cache_not_poisoned_by_a_previous_temp_home(self):
+        # the cache identity includes the path, so a test that re-points STATE_FILE
+        # at a fresh temp dir must not read a prior temp dir's snapshot
+        config.save_state({"liked": [{"title": "this-dir"}]})
+        self.assertEqual(config.load_state()["liked"][0]["title"], "this-dir")
+        d2 = Path(self._tmp.name) / "other"
+        d2.mkdir()
+        with mock.patch.object(config, "STATE_FILE", d2 / "state.json"):
+            config.save_state({"liked": [{"title": "other-dir"}]})
+            self.assertEqual(config.load_state()["liked"][0]["title"], "other-dir")
+
     def test_timeout_floor_and_garbage(self):
         config.save_llm_config(LLM_TIMEOUT=1)
         self.assertGreaterEqual(config.load_llm_config()["LLM_TIMEOUT"], 5)

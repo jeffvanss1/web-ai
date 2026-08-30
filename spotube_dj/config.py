@@ -7,8 +7,10 @@ schultz-dev0/SpotifyDJ app (~/.spotify-ai-dj/) and you can keep both.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -69,20 +71,109 @@ def apply_llm_overrides() -> None:
             globals()[key] = data[key]
 
 
+# The state/LLM JSON files are read on the hot path: /api/state is polled about
+# once a second (and pushed on every change), and each poll calls load_state() and
+# load_llm_config(). Re-reading and re-parsing a small JSON file fifty times a minute
+# is the kind of waste that shows up as a busy loop on a laptop fan. Both readers
+# cache by (mtime, size) - a file that has not changed is handed back as a copy,
+# and save_*() updates the mtime so the next call re-reads. A copy (not the cached
+# object) is returned because taste mutates the dict it gets and then saves it;
+# handing out the cached object would poison the cache.
+_cache_lock = threading.Lock()
+_state_cache: tuple | None = None        # (mtime_ns, size, data)
+_llm_cache: tuple | None = None          # (mtime_ns, size, data)
+
+
+def _file_identity(path: Path) -> tuple | None:
+    """(path, mtime_ns, size) for a readable file, or None if it is missing/unreadable.
+
+    The path is part of the key on purpose: tests (and a restart that re-points
+    APP_DIR) swap STATE_FILE/config.json between runs, and two different files can
+    share an mtime and a size. Keying on path alone isn't enough either (an edit in
+    place keeps the path) - the mtime/size change is what catches a rewrite.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (str(path), st.st_mtime_ns, st.st_size)
+
+
+def _cached(path: Path, cache: tuple | None) -> tuple | None:
+    """Return (identity, parsed-dict) when the file is unchanged, else None."""
+    if cache is None:
+        return None
+    ident, data = cache
+    if _file_identity(path) == ident:
+        return ident, data
+    return None
+
+
+def _load_state_dict() -> dict:
+    """Read + normalise the state file; the part of load_state that hits the disk."""
+    defaults = {
+        "liked": [],
+        "skipped": [],
+        "artists": {},
+        "genres": {},
+        "volume": 70,
+        "autoplay": False,
+        "repeat": "off",
+        "shuffle": False,
+        "last_request": "",
+        "player": "mpv",
+    }
+    try:
+        data = json.loads(STATE_FILE.read_text())
+    except Exception:
+        return defaults
+    if not isinstance(data, dict):
+        return defaults
+    for k, v in defaults.items():
+        if k not in data or data[k] is None:
+            data[k] = v
+    for key in ("liked", "skipped"):
+        rows = data[key]
+        data[key] = [x for x in rows if isinstance(x, dict)] if isinstance(
+            rows, (list, tuple)) else []
+    data["artists"] = _weights(data["artists"])
+    data["genres"] = _weights(data["genres"])
+    try:
+        data["volume"] = max(0, min(100, int(float(data["volume"]))))
+    except (TypeError, ValueError):
+        data["volume"] = 70
+    data["autoplay"] = bool(data["autoplay"])
+    if str(data["repeat"]) not in ("off", "all", "one"):
+        data["repeat"] = "off"
+    data["shuffle"] = bool(data["shuffle"])
+    data["last_request"] = str(data["last_request"] or "")
+    if str(data["player"]) not in ("mpv", "spotube"):
+        data["player"] = "mpv"
+    return data
+
+
 def load_llm_config() -> dict:
     """
     Read ~/.spotube-dj/config.json. Env vars win over the file so a shell
     export or .env still overrides the GUI, which is what people expect.
     """
-    out: dict = {}
-    try:
-        raw = json.loads(LLM_CONFIG_FILE.read_text())
-    except Exception:
-        raw = {}
-    if isinstance(raw, dict):
-        for k in LLM_KEYS:
-            if k in raw and raw[k] is not None:
-                out[k] = raw[k]
+    global _llm_cache
+    with _cache_lock:
+        hit = _cached(LLM_CONFIG_FILE, _llm_cache)
+        if hit is not None:
+            raw = hit[1]
+        else:
+            try:
+                raw = json.loads(LLM_CONFIG_FILE.read_text())
+            except Exception:
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            _llm_cache = (_file_identity(LLM_CONFIG_FILE), raw)
+    out = {}
+    for k in LLM_KEYS:
+        if k in raw and raw[k] is not None:
+            out[k] = copy.deepcopy(raw[k])
     if "LLM_TIMEOUT" in out:
         try:
             out["LLM_TIMEOUT"] = max(5.0, float(out["LLM_TIMEOUT"]))
@@ -117,58 +208,25 @@ def save_llm_config(**values) -> dict:
         LLM_CONFIG_FILE.chmod(0o600)      # a key on disk should not be world-readable
     except Exception:
         pass
+    with _cache_lock:
+        global _llm_cache
+        _llm_cache = None                 # next load re-reads the fresh file
     apply_llm_overrides()
     return data
 
 
 def load_state() -> dict:
     """Mutable taste profile + settings, persisted as JSON."""
-    defaults = {
-        "liked": [],            # [{title, artist, id, ts}]
-        "skipped": [],          # [{title, artist, ts, reason}]
-        "artists": {},          # artist -> weight
-        "genres": {},           # genre -> weight
-        "volume": 70,
-        # autoplay: start a mix and play on open. Off by default - the web skin
-        # waits for the listener to press Play or search ("even i dont start the
-        # button yet"), and one tap turns it back on.
-        "autoplay": False,
-        "repeat": "off",        # off | all | one
-        "shuffle": False,
-        "last_request": "",
-        "player": "mpv",        # mpv | spotube
-    }
-    try:
-        data = json.loads(STATE_FILE.read_text())
-    except Exception:
-        return defaults
-    if not isinstance(data, dict):
-        # a half-written file, or a list someone pasted in by hand. The state file
-        # is the one thing in this app a listener is likely to open and poke, and a
-        # traceback at startup is not a useful response to a typo in their own file.
-        return defaults
-    for k, v in defaults.items():
-        if k not in data or data[k] is None:
-            data[k] = v
-    # normalise shapes written by older/edited files
-    for key in ("liked", "skipped"):
-        rows = data[key]
-        data[key] = [x for x in rows if isinstance(x, dict)] if isinstance(
-            rows, (list, tuple)) else []
-    data["artists"] = _weights(data["artists"])
-    data["genres"] = _weights(data["genres"])
-    try:
-        data["volume"] = max(0, min(100, int(float(data["volume"]))))
-    except (TypeError, ValueError):
-        data["volume"] = 70
-    data["autoplay"] = bool(data["autoplay"])
-    if str(data["repeat"]) not in ("off", "all", "one"):
-        data["repeat"] = "off"
-    data["shuffle"] = bool(data["shuffle"])
-    data["last_request"] = str(data["last_request"] or "")
-    if str(data["player"]) not in ("mpv", "spotube"):
-        data["player"] = "mpv"
-    return data
+    global _state_cache
+    with _cache_lock:
+        hit = _cached(STATE_FILE, _state_cache)
+        if hit is None:
+            data = _load_state_dict()
+            _state_cache = (_file_identity(STATE_FILE), data)
+        else:
+            data = hit[1]
+    # a copy, never the cached object: taste mutates the dict it gets and saves it
+    return copy.deepcopy(data)
 
 
 def _weights(value) -> dict:
@@ -195,6 +253,7 @@ def _weights(value) -> dict:
 
 
 def save_state(state: dict) -> None:
+    global _state_cache
     ensure_dirs()
     state["liked"] = list(state.get("liked") or [])[-200:]
     state["skipped"] = list(state.get("skipped") or [])[-200:]
@@ -206,6 +265,8 @@ def save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_FILE)
+    with _cache_lock:
+        _state_cache = None          # next load re-reads the fresh file
 
 
 def append_history(entry: dict) -> None:
