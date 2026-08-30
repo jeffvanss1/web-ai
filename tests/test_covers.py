@@ -636,9 +636,12 @@ class ThumbSizeTests(unittest.TestCase):
         caa = {"id": "abc123", "cover_url": "https://coverartarchive.org/x/front"}
         self.assertEqual(self.thumbs.source_of(caa, "row")[0], "caa")
 
-    def test_a_small_slot_borrows_the_bigger_file_instead_of_downloading(self):
-        # 20 rows x 3 sizes was 60 CDN round trips for one page; a row that can use
-        # the card file it already has is the same picture at the same sharpness
+    def test_a_song_keeps_one_cached_cover_for_every_slot(self):
+        # "keep one source": once a song has a cover on disk, every slot - row,
+        # card and the (blurred) hero - uses that same file, so a refresh neither
+        # re-downloads a different/HD rung nor mixes two sources for one record.
+        # 20 rows x 3 sizes was 60 CDN round trips for one page; now it is 0 once
+        # the first file is down.
         d = Path(self.thumbs.cache_dir())
         d.mkdir(parents=True, exist_ok=True)
         big = d / "borrowvid-yt-max-256.jpg"
@@ -650,12 +653,10 @@ class ThumbSizeTests(unittest.TestCase):
             # the tag of the row's own rung (yt-mq) is different and it still uses
             # the card's file: the borrow is about pixels, not filenames
             self.assertEqual(self.thumbs.get({"id": "borrowvid"}, "row"), str(big))
-            self.assertEqual(calls, [], "a slot with a bigger file must not fetch")
-            # and the borrow only goes one way: a 256 file is not the hero's 512
-            self.assertIsNone(self.thumbs.get({"id": "borrowvid"}, "big"))
-            self.assertEqual(len(calls), 1, "the hero asks the CDN for its own rung")
-            self.assertIn("maxresdefault", calls[0],
-                         "the hero must ask for the clean HD rung")
+            self.assertEqual(calls, [], "a slot with a cached cover must not fetch")
+            # and the hero reuses it too instead of asking the CDN for a new rung
+            self.assertEqual(self.thumbs.get({"id": "borrowvid"}, "big"), str(big))
+            self.assertEqual(calls, [], "the hero borrows the cached cover, no fetch")
         finally:
             self.thumbs._store = real
             big.unlink(missing_ok=True)
