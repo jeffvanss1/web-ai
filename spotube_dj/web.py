@@ -482,6 +482,12 @@ class Context:
         self._hrefs: dict[str, dict[str, str]] = {}    # id -> {size: artwork href}
         self._meta: dict[str, dict] = {}               # id -> {album, release_year, ...}
         self._meta_inflight: set[str] = set()          # ids being fetched right now
+        # metadata lookups run on ONE worker, not a thread per unseen id: a 40-row
+        # queue used to spawn 40 subprocesses at once (each a yt-dlp metadata call),
+        # which is the kind of burst that makes a laptop fan scream and a server fall
+        # over. One paced lane keeps it stable; `_meta_inflight` still dedupes.
+        self._meta_queue: queue.Queue = queue.Queue()
+        self._meta_started = False            # the lane starts on first need
         self._subs: list[queue.Queue] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -548,8 +554,10 @@ class Context:
                 return dict(self._meta[vid])
             if vid not in self._meta_inflight:
                 self._meta_inflight.add(vid)
-                threading.Thread(target=self._fetch_meta, args=(vid,),
-                                 daemon=True).start()
+                self._meta_queue.put_nowait(vid)
+                if not self._meta_started:
+                    self._meta_started = True
+                    threading.Thread(target=self._meta_loop, daemon=True).start()
         return {}
 
     def _fetch_meta(self, vid) -> None:
@@ -561,6 +569,16 @@ class Context:
         with self._lock:
             self._meta[vid] = meta
             self._meta_inflight.discard(vid)
+
+    def _meta_loop(self) -> None:
+        """One paced lane for album/release-year lookups (never a thread per row)."""
+        while not self._stop.is_set():
+            try:
+                vid = self._meta_queue.get(timeout=0.4)
+            except queue.Empty:
+                continue
+            if not self._stop.is_set():
+                self._fetch_meta(vid)
 
     def request_art(self, tracks, size: str = "row", limit: int = 14) -> int:
         """
@@ -1453,8 +1471,15 @@ def host_ok(header: str | None, allow_any_host: bool = False) -> bool:
 
 
 HTML_HEADERS = {
+    # `img-src` opens the cover CDNs as well as 'self': a row's own thumbnail only
+    # ever rendered after the artwork lane copied it to /art/ before, because the
+    # strict 'self' allowance silently blocked every i.ytimg.com / googleusercontent
+    # cover (the img fired onerror and was removed, leaving the tinted tile). Now the
+    # row's picture can load straight away and the lane still dresses the rest.
     "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; "
-                               "script-src 'unsafe-inline'; img-src 'self' data:; "
+                               "script-src 'unsafe-inline'; "
+                               "img-src 'self' data: https://i.ytimg.com "
+                               "https://lh3.googleusercontent.com https://yt3.ggpht.com; "
                                "connect-src 'self'; font-src 'self'"),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",

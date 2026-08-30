@@ -28,6 +28,19 @@ HEARD_ENOUGH = 0.72
 HEARD_BARELY = 0.28
 
 
+def _ref(t: dict | None):
+    """A stable key for "which track is this" while we group/weave a set.
+
+    Prefer the catalog id (so a copied dict still matches its original), and fall
+    back to object identity for a row that never had a video id. The previous code
+    used bare `id()` everywhere, which is only correct while the very same dict
+    object is reused - a `dict(t)` copy silently stopped matching.
+    """
+    if isinstance(t, dict) and t.get("id"):
+        return t["id"]
+    return id(t)
+
+
 class Queue:
     def __init__(self) -> None:
         self.items: list[dict] = []
@@ -339,9 +352,9 @@ def _weave(rows: list[dict], mixed: list[dict], every: int = 3) -> list[dict]:
     """
     if not mixed:
         return list(rows)
-    pick = {id(t) for t in mixed}
-    plain = [x for x in rows if id(x) not in pick]
-    taste_rows = [x for x in rows if id(x) in pick]
+    pick = {_ref(t) for t in mixed}
+    plain = [x for x in rows if _ref(x) not in pick]
+    taste_rows = [x for x in rows if _ref(x) in pick]
     out: list[dict] = []
     while plain or taste_rows:
         out += plain[:every]
@@ -356,10 +369,10 @@ def _interleave(ranked: list[dict], buckets: list[list[dict]], count: int) -> li
     Round-robin across the query buckets so the set doesn't become 20 tracks
     from one search. Global artist cap keeps it from feeling repetitive.
     """
-    by_id = {id(t): t for t in ranked}
+    by_id = {_ref(t): t for t in ranked}
     queues: list[list[dict]] = []
     for b in buckets:
-        q = [t for t in b if id(t) in by_id]
+        q = [t for t in b if _ref(t) in by_id]
         q.sort(key=lambda x: -x.get("score", 0.0))
         if q:
             queues.append(q)
