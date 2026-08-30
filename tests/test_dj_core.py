@@ -1947,6 +1947,75 @@ class _LoopPlayer:
         pass
 
 
+class BackgroundRefillTests(unittest.TestCase):
+    """
+    "while the AI processing the queue everything is freeze like the audio doesnt
+    advance" - the engine/hang report. `next()` used to run `_topup()` ->
+    `build_queue` -> the LLM synchronously on the DJ loop, so a low queue made a
+    track change wait seconds-to-minutes for the planner and the player sat silent.
+    These pin that `next()` returns immediately and the refill happens behind it.
+    """
+
+    def _dj(self, n=2):
+        d = DJ(backend="none", headless=True)
+        d.auto = False
+        d.request = ""                       # stop the real refill adding things
+        d._resolve = lambda t: "http://stream"
+        d.add([{"id": f"a{i}", "title": f"T{i}", "artist": "X", "duration": 60,
+                "url": f"http://y/{i}", "query": "q"} for i in range(n)])
+        return d
+
+    def test_next_does_not_wait_for_a_slow_topup(self):
+        d = self._dj(2)
+        done = []
+        def slow_topup(keep=12, force=False):
+            done.append("start")
+            import time
+            time.sleep(0.6)                  # a stand-in for an LLM/network call
+            done.append("end")
+        d._topup = slow_topup
+        t0 = time.time()
+        got = d.next(force=True)
+        elapsed = time.time() - t0
+        self.assertIsNotNone(got, "a queued row must start even while refilling")
+        self.assertLess(elapsed, 0.4, "next() must not block on the planner")
+        self.assertEqual(done, ["start"], "the refill runs behind the play start")
+
+    def test_the_refill_thread_finishes_in_the_background(self):
+        d = self._dj(1)
+        done = []
+        def slow_topup(keep=12, force=False):
+            import time
+            time.sleep(0.5)
+            done.append("end")
+        d._topup = slow_topup
+        d.next(force=True)
+        self.assertEqual(done, [], "the background filler may still be running")
+        import time
+        time.sleep(0.9)
+        self.assertEqual(done, ["end"], "the background refill completes on its own")
+
+    def test_only_one_advance_is_made_when_two_calls_race(self):
+        d = self._dj(4)
+        gate = __import__("threading").Event()
+        orig = d._try_start
+        def slow_start(t):
+            gate.wait(1.0)                   # both threads press at once
+            return orig(t)
+        d._try_start = slow_start
+        got = []
+        def press():
+            got.append(d.next(force=True))
+        t1 = __import__("threading").Thread(target=press)
+        t2 = __import__("threading").Thread(target=press)
+        t1.start(); t2.start()
+        import time; time.sleep(0.25)
+        gate.set()
+        t1.join(); t2.join()
+        started = [t["id"] for t in got if t]
+        self.assertEqual(len(started), 1, "a race must not double-start a track")
+
+
 class AutoAdvanceTests(unittest.TestCase):
     """
     "auto advance doesnt works for some reaseon, even the song's over it doesnt

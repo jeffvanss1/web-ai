@@ -319,13 +319,21 @@ transform:translate(-50%,-50%) scale(0);transition:transform .12s;pointer-events
 .right .pill{flex:0 0 auto;max-width:none}
 @media (max-width:1000px){.right .pill{display:none}}
 .vol{display:flex;align-items:center;gap:8px}
-input[type=range]{-webkit-appearance:none;appearance:none;height:4px;border-radius:2px;
-background:rgba(255,255,255,.24);width:92px;outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;
-border-radius:50%;background:#fff;opacity:0}
-.vol:hover input[type=range]::-webkit-slider-thumb{opacity:1}
+/* a real volume slider: a track you can see and a thumb you can grab. The old
+   styling only set a background on the input and hid the thumb until hover, so
+   on Chromium there was nothing but a 4px grey line with an invisible knob. */
+input[type=range]{-webkit-appearance:none;appearance:none;height:18px;width:92px;
+background:transparent;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:999px;
+background:linear-gradient(90deg,var(--tint) var(--vol,70%),rgba(255,255,255,.2) var(--vol,70%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:13px;
+height:13px;border-radius:50%;background:#fff;margin-top:-4.5px;
+box-shadow:0 0 0 3px rgba(0,0,0,.35);opacity:1;transition:transform .12s}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15)}
+input[type=range]::-moz-range-track{height:4px;border-radius:999px;background:rgba(255,255,255,.2)}
+input[type=range]::-moz-range-progress{height:4px;border-radius:999px;background:var(--tint)}
 input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;
-background:#fff}
+background:#fff;box-shadow:0 0 0 3px rgba(0,0,0,.35)}
 
 /* ---- menus, toasts, misc ---- */
 .menu{position:fixed;z-index:60;min-width:196px;background:#282828;border:1px solid rgba(0,0,0,.6);
@@ -358,14 +366,18 @@ opacity:.85;flex:none}
 .tk.neg i{background:var(--error)}
 body.busy .btn.prim{opacity:.55}
 [hidden]{display:none !important}
+/* a window too narrow to fit the three panels keeps the detail tucked away; the
+   queue button reveals it as an overlay that slides over the content (the same
+   small-screen shape the sidebar takes), so it never forces a 3-column grid at a
+   width that cannot hold one and never leaves a cut-off, unscrollable panel. */
 @media (max-width:1300px){.app{grid-template-columns:280px minmax(0,1fr)}
-.detail{display:none}.app.wide{grid-template-columns:280px minmax(0,1fr) 360px}
-.app.wide .detail{display:flex}}
+.detail{display:none}.app.wide .detail{display:flex;position:absolute;top:0;right:0;
+bottom:0;width:360px;max-width:92vw;z-index:30;box-shadow:-18px 0 60px rgba(0,0,0,.6)}}
 @media (max-width:1000px){.app{grid-template-columns:minmax(0,1fr)}.side{display:none}
 .app.nav .side{display:flex;position:absolute;inset:8px auto 80px 8px;width:300px;z-index:20;
 box-shadow:0 18px 60px rgba(0,0,0,.8)}.cards{grid-template-columns:repeat(auto-fill,
 minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
-.row .ar{display:none}.right .vol input{width:60px}}
+.row .ar{display:none}.right .vol input{width:60px} .app.wide .detail{width:min(360px,100%)}}
 @media (max-width:760px){.center{gap:2px}.player{grid-template-columns:1fr auto}
 .right .iconbtn:nth-child(-n+2){display:none}.quick{grid-template-columns:1fr}}
 </style></head><body>
@@ -1134,6 +1146,7 @@ function drawPlayer(s){
             playing: !!(np.title && !s.paused), at: Date.now()};
   $("vol").value = String(s.volume === undefined ? S.vol : s.volume);
   S.vol = Number($("vol").value);
+  $("vol").style.setProperty("--vol", (S.vol * 100) / 100 + "%");
   const mute = $("b-mute");
   mute.innerHTML = "";
   mute.appendChild(svg(S.vol > 0 ? "vol" : "vol_mute"));
@@ -1409,6 +1422,7 @@ bar.addEventListener("keydown", (e) => {
 let volT = 0;
 $("vol").addEventListener("input", (e) => {
   S.vol = Number(e.target.value);
+  $("vol").style.setProperty("--vol", (S.vol) + "%");
   $("b-mute").innerHTML = "";
   $("b-mute").appendChild(svg(S.vol > 0 ? "vol" : "vol_mute"));
   clearTimeout(volT);
@@ -1418,6 +1432,7 @@ $("b-mute").addEventListener("click", () => {
   const to = S.vol > 0 ? 0 : (S.lastVol || 70);
   if (S.vol > 0) S.lastVol = S.vol;
   $("vol").value = String(to); S.vol = to;
+  $("vol").style.setProperty("--vol", to + "%");
   act("volume", {pct: String(to)});
 });
 $("b-full").addEventListener("click", () => {

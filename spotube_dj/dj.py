@@ -431,6 +431,16 @@ class DJ:
         self.request = ""
         self.seed_refs: list[str] | None = None
         self.info: dict = {}
+        # The audio-advance loop must never block on the network/LLM. `_topup_async`
+        # runs the (potentially slow) refill on one daemon thread at a time and the
+        # play loop carries on, so a next-track that needs a mix-build starts the
+        # current track immediately instead of waiting for the planner.
+        self._refill: threading.Thread | None = None
+        self._refill_lock = threading.Lock()
+        # one advance at a time. `_topup_async` can finish and want to start the row
+        # it just queued from a background thread while the play loop is already
+        # mid-`next()`; without a guard both would pop and start two tracks.
+        self._advancing = threading.Lock()
         # bounded on purpose: `_note` is called from the refill loop, the search
         # lane and every click, and a --daemon that runs for a week would otherwise
         # carry a year of timestamps in RAM to serve the last 40 of them. A list
@@ -568,6 +578,33 @@ class DJ:
         n_mix = sum(1 for x in fresh if x.get("mixed"))
         self._note(f"queue topped up: +{len(fresh)} tracks"
                    + (f" ({n_mix} from what you like)" if n_mix else ""))
+
+    def _topup_async(self, keep: int = 12, force: bool = False) -> None:
+        """
+        Refill the queue on a background thread, never holding the play loop.
+
+        `next()` calls this instead of `_topup()` directly. The user-facing fix was
+        "the audio freezes while the AI is processing the queue": when the queue ran
+        low, a track change ran `build_queue` -> `brain.plan` (an LLM HTTP call, 5-30 s)
+        synchronously on the DJ loop, so the next song waited for the planner and the
+        player sat silent. Now the next row starts what is already queued and the
+        refill happens alongside it. `_start_if_idle` restarts playback if this fill
+        is what first gave the queue something to play.
+        """
+        with self._refill_lock:
+            if self._refill is not None and self._refill.is_alive():
+                return                  # one refill at a time; the running one covers it
+            def work():
+                before = len(self.queue.items)
+                try:
+                    self._topup(keep=keep, force=force)
+                except Exception as e:
+                    # a failed refill must never end the loop or go un-reported
+                    self._note(f"[warn] background top-up failed: "
+                               f"{e.__class__.__name__}: {e}")
+                self._start_if_idle(len(self.queue.items) - before)
+            self._refill = threading.Thread(target=work, daemon=True)
+            self._refill.start()
 
     def _fresh(self, tracks: list[dict]) -> list[dict]:
         """
@@ -809,13 +846,26 @@ class DJ:
         dead. A forced call drops the hold and tries once more (re-holding if it
         still fails), which is why a manual skip must pass force=True.
         """
+        # If the play loop (or the background refill) is already moving to the next
+        # row, this call is a no-op rather than a second advance. The no-op returns
+        # None, which the caller that raced in treats as "didn't move" and retries on
+        # the next tick - so nothing is ever skipped or double-started.
+        if not self._advancing.acquire(blocking=False):
+            return None
+        try:
+            return self._next_locked(force)
+        finally:
+            self._advancing.release()
+
+    def _next_locked(self, force: bool = False) -> dict | None:
+        """Body of `next`, run only while holding the single-advance guard."""
         if self._hold_until and time.time() < self._hold_until:
             if not force:
                 return None
             self._hold_until = 0.0
             self._note("manual change during the cooldown - retrying the resolver now")
         self._learn_from_heard()
-        self._topup()
+        self._topup_async()
         if self.repeat == "one" and not force and self.current:
             # repeat-one is about a track ending, not about a button: pressing next
             # still moves on, exactly like the player everybody already knows
