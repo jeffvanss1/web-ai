@@ -1102,6 +1102,7 @@ def action_unfollow(ctx, fields: dict) -> str:
 
 def _clear_station(ctx) -> str:
     ctx.dj.station = ""
+    ctx.dj.station_seed = None
     return "station label cleared"
 
 

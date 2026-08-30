@@ -394,6 +394,10 @@ class DJ:
     # station names the row a "start a station from this song" set was built around.
     progress = None
     station = ""
+    # the exact song a station was built around (title/artist), so a refill keeps
+    # returning *that* vibe rather than the last typed mood or the general profile.
+    # On the class as well: status()/status reads it for doubles with DJ.__new__.
+    station_seed: dict | None = None
     # read by status() and next() on doubles built with DJ.__new__, so the defaults
     # live on the class and not only in __init__
     repeat = "off"
@@ -413,6 +417,7 @@ class DJ:
         self.headless = headless or backend == "none"
         self.player = None
         self.current: dict | None = None
+        self.station_seed: dict | None = None
         # "" while playing; "finished" / "no stream would start" when a move
         # could not be made. The panel needs the reason, not a blank box.
         self.idle = ""
@@ -545,13 +550,26 @@ class DJ:
         # typed nothing got a queue that never refilled - the taste model had the
         # answer and nobody asked it. `run()` also leans on this call, so the same
         # gate silently turned "--daemon" into "plays one track and stops".
-        request = self.request or str(config.load_state().get("last_request") or "")
+        request = ""
         pool: list[dict] = []
         info: dict = {}
-        if request:
-            tracks, info = build_queue(request, seed_refs=self.seed_refs,
+        # A station refills toward the song it was built around, not the last typed
+        # mood ("if i station the queue for certain music, the next queue must be
+        # similar or related to the vibes, not general vibes"). The seed travels
+        # with build_queue so the planner keeps returning that song's neighbours.
+        if self.station and self.station_seed:
+            request = f"more like {self.station}"
+            tracks, info = build_queue(request, seeds=[self.station_seed],
                                        count=keep * 2)
             pool += tracks or []
+            # don't re-ask the station's own queries on the next refill
+            self._mix_used |= set(info.get("queries") or [])
+        else:
+            request = self.request or str(config.load_state().get("last_request") or "")
+            if request:
+                tracks, info = build_queue(request, seed_refs=self.seed_refs,
+                                           count=keep * 2)
+                pool += tracks or []
         mixed: list[dict] = []
         if self.auto:
             mixed = self._auto_mix(keep)
@@ -642,7 +660,16 @@ class DJ:
         loved"; the exception is an artist you loved *twice*, which is a much
         stronger signal than one heart and can carry a couple of rows.
         """
-        qs = taste.next_queries(avoid=sorted(self._mix_used), limit=4)
+        if self.station:
+            # a station's auto-DJ keeps searching *around* the seed, not the whole
+            # library - the "general vibes" the report was about. Fall back to the
+            # profile only when the seed itself has nothing searchable, so the queue
+            # never dead-ends on an obscure one-off.
+            qs = self._station_queries(limit=4)
+            if not qs:
+                qs = taste.next_queries(avoid=sorted(self._mix_used), limit=4)
+        else:
+            qs = taste.next_queries(avoid=sorted(self._mix_used), limit=4)
         if not qs:
             return []
         want = max(4, keep // 2)        # a top-up that returns one row is noise
@@ -678,6 +705,45 @@ class DJ:
                 break                   # enough for this refill; the next one widens
         return out
 
+    def _station_queries(self, limit: int = 4) -> list[str]:
+        """
+        Widen a station beyond the seed's own top songs, without a similarity API.
+
+        `build_queue` already searches "<artist> top songs" for the seed; these are
+        the *neighbours* - the radio/essential/related phrasings YouTube indexes,
+        and a "more like this exact song" anchor. They are the query-driven stand-in
+        for "fans also like", which the project deliberately does not scrape off the
+        internal YTM browse endpoint (it is undocumented and changes shape).
+
+        Returns [] when the seed has nothing to go on, so the caller can fall back
+        to the profile rather than guessing.
+        """
+        seed = self.station_seed or {}
+        artist = str(seed.get("artist") or "").split(",")[0].strip()
+        title = str(seed.get("title") or "").strip()
+        used = {taste.norm(q) for q in self._mix_used}
+        out: list[str] = []
+
+        def add(q: str) -> None:
+            q = " ".join((q or "").split()).strip()
+            if q and taste.norm(q) not in used and len(out) < limit:
+                used.add(taste.norm(q))
+                out.append(q)
+
+        if artist:
+            add(f"radio {artist}")
+            add(f"{artist} essential songs")
+            add(f"similar to {artist}")
+            add(f"{artist} hits")
+        if title and artist:
+            # anchor on the exact track, so a station that was started from a deep
+            # cut finds that cut's mood, not just the band's biggest hits
+            add(f"more like {title} {artist}")
+        if not out:
+            # no artist on the seed: point the refill at the words we do have
+            add("more like " + (title or artist or "that song"))
+        return out
+
     LOG_LINES = 400      # what one DJ process keeps in memory for the log drawer
 
     # Signed googlevideo URLs expire (usually ~6h); refresh well before that.
@@ -704,6 +770,10 @@ class DJ:
         prev = self.request
         self.request = request
         self.seed_refs = seed_refs
+        # a typed mood is its own vibe: leaving a station's seed attached here would
+        # keep the refill drifting toward the station instead of what was just asked
+        self.station = ""
+        self.station_seed = None
         config.touch_last_request(request)
         self._note(f"planning: {request!r}")
         tracks, info = build_queue(request, seed_refs=seed_refs, count=count,
@@ -750,6 +820,10 @@ class DJ:
         Returns {"ok", "reason", "tracks", "info"}. The empty-profile case answers
         with a sentence, because "the queue is empty" is not information.
         """
+        # "make a mix" is a fresh set from the whole profile, not a continuation of
+        # whatever station was playing, so the station's seed must not steer it
+        self.station = ""
+        self.station_seed = None
         state = config.load_state()
         liked = [{"title": r.get("display_title") or r.get("title") or "",
                   "artist": r.get("display_artist") or r.get("artist") or ""}
@@ -817,6 +891,10 @@ class DJ:
         seed = {"title": t.get("title", ""), "artist": t.get("artist") or t.get("channel", ""),
                 "url": t.get("url", "")}
         self.station = label
+        # the refill needs the seed, not just the label string: an off-theme queue
+        # was the report, and the root cause was _topup consulting the *previous*
+        # request (or the general profile) instead of the song the station is about
+        self.station_seed = seed
         self._note(f"building a station around: {label}")
         try:
             tracks, info = build_queue(f"more like {label}", count=count, seeds=[seed],

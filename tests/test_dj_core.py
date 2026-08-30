@@ -2066,6 +2066,117 @@ class SelfFillTests(_TmpHome):
         self.assertIn("taste cleared: 0 loved, 0 refused", dj.log[-1])
 
 
+class StationRefillTests(_TmpHome):
+    """
+    "if i station the queue for certain music, the next queue must be similar or
+    related to the vibes, not general vibes." A station refill used to ask the
+    *previous* typed request plus the whole-profile auto-mix, so a "Portishead -
+    Roads" station drifted back to "sad lofi" and the library's general sound.
+    The refill must stay on the seed while the station is live.
+    """
+
+    def _dj(self):
+        d = DJ(backend="none", headless=True)
+        d.request = ""
+        d.info = {}
+        return d
+
+    @staticmethod
+    def _row(i, artist="Someone"):
+        return {"id": f"v{i}", "title": f"Song {i}", "artist": artist, "duration": 210,
+                "url": f"u{i}"}
+
+    def test_a_station_refills_toward_the_seed_not_the_last_request(self):
+        d = self._dj()
+        d.station = "Portishead - Roads"
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        d.request = "sad lofi"          # stale: the mood that was typed before the station
+        d.auto = False
+        got = {}
+        def fake(request, **kw):
+            got["request"], got["kw"] = request, kw
+            return ([self._row(1, "Portishead")], {"queries": ["portishead top songs"]})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            d._topup(force=True)
+        self.assertIn("more like Portishead - Roads", got["request"], got)
+        self.assertEqual(got["kw"]["seeds"][0]["title"], "Roads",
+                         "the seed never reached the station's refill")
+        self.assertNotIn("sad lofi", got["request"],
+                         "the stale previous mood hijacked the station")
+        self.assertEqual([t["id"] for t in d.queue.items], ["v1"])
+
+    def test_auto_mix_prefers_station_queries_over_the_profile(self):
+        d = self._dj()
+        d.station = "Nirvana - Come as You Are"
+        d.station_seed = {"title": "Come as You Are", "artist": "Nirvana"}
+        rows = [{"id": "m1", "title": "Breed", "artist": "Nirvana", "duration": 200},
+                {"id": "m2", "title": "S/T", "artist": "Some", "duration": 200}]
+        with mock.patch.object(d, "_station_queries",
+                               return_value=["radio Nirvana"]) as sq, \
+                mock.patch.object(taste, "next_queries",
+                                  side_effect=AssertionError("the profile leaked in")) as nq, \
+                mock.patch.object(prov, "yt_search", return_value=rows), \
+                mock.patch.object(taste, "score_tracks", side_effect=lambda x, **k: x):
+            picked = d._auto_mix(keep=6)
+        sq.assert_called_once()
+        nq.assert_not_called()
+        self.assertTrue(picked, "a station should still auto-fill")
+        self.assertEqual(picked[0]["query"], "radio Nirvana")
+
+    def test_a_typed_search_ends_the_station(self):
+        # a new mood is its own vibe; the old station's seed must not steer it
+        d = self._dj()
+        d.station = "Portishead - Roads"
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        fake = lambda request, **kw: ([self._row(1)], {"queries": ["q"], "engine": "",
+                                     "why": "", "candidates": 1, "searched": 1,
+                                     "off_topic_filtered": 0, "llm_notes": [], "llm_error": ""})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            d.start("high energy")
+        self.assertEqual(d.station, "")
+        self.assertIsNone(d.station_seed)
+
+    def test_make_a_mix_ends_the_station(self):
+        d = self._dj()
+        d.station = "Portishead - Roads"
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        taste.record_like({"title": "Glory Box", "artist": "Portishead", "duration": 300})
+        fake = lambda request, **kw: ([self._row(1)], {"queries": ["q"], "engine": "",
+                                     "why": "", "candidates": 1, "searched": 1,
+                                     "off_topic_filtered": 0, "llm_notes": [], "llm_error": ""})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            d.taste_mix(count=9)
+        self.assertEqual(d.station, "")
+        self.assertIsNone(d.station_seed)
+
+    def test_station_queries_widen_and_never_repeat(self):
+        d = self._dj()
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        d._mix_used = {"portishead essential songs"}
+        qs = d._station_queries(limit=4)
+        self.assertTrue(qs)
+        self.assertNotIn("portishead essential songs", [q.lower() for q in qs])
+        self.assertIn("radio portishead", [q.lower() for q in qs])
+        self.assertTrue(any("more like roads" in q.lower() for q in qs))
+
+    def test_station_with_no_seed_falls_back_to_the_profile(self):
+        # an obscure one-off with no artist on the seed must still fill, not stall
+        d = self._dj()
+        d.station = "untitled ambient"
+        d.station_seed = {"title": "untitled", "artist": ""}
+        with mock.patch.object(d, "_station_queries", return_value=[]) as sq, \
+                mock.patch.object(taste, "next_queries",
+                                  return_value=["ambient music"]) as nq, \
+                mock.patch.object(prov, "yt_search",
+                                  return_value=[{"id": "m1", "title": "A", "artist": "X",
+                                                 "duration": 200}]), \
+                mock.patch.object(taste, "score_tracks", side_effect=lambda x, **k: x):
+            picked = d._auto_mix(keep=6)
+        sq.assert_called_once()
+        nq.assert_called_once()
+        self.assertEqual(picked[0]["artist"], "X")
+
+
 class VibeSubstitutionTests(_TmpHome):
     """
     "each search should be a genuinely distinct mix" - the reason a second search
