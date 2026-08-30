@@ -734,6 +734,14 @@ class ActionTests(unittest.TestCase):
         # the DJ chat is gone, so the settings panel no longer reports a live model
         self.assertNotIn("live_model", view)
 
+        # the TTS voice rides the settings so a browser dropdown can change it
+        self.assertEqual(view["dj_voice"], config.load_dj_voice())
+        self.assertIsInstance(view["dj_voices"], list)
+        self.assertGreaterEqual(len(view["dj_voices"]), 5)
+        names = {v["name"] for v in view["dj_voices"]}
+        self.assertIn("Despina", names)
+        self.assertEqual(view["dj_lead"], float(config.DJ_LEAD_SECS))
+
         with mock.patch("web.config.save_llm_config") as save:
             code, payload = web.save_settings({"model": ["gemini-3.6-flash"],
                                                "key": ["  spaced  "]})
@@ -760,6 +768,25 @@ class ActionTests(unittest.TestCase):
         with mock.patch("web.config.save_llm_config") as save3:
             self.assertEqual(web.save_settings({"base": [""]})[0], 200)
         self.assertEqual(save3.call_args.kwargs["LLM_BASE_URL"], "")
+
+    def test_a_tts_voice_is_saved_as_dj_voice(self):
+        # the Settings dropdown posts its voice name; it is validated against the
+        # catalog and written as DJ_VOICE (never as a raw arbitrary string)
+        with mock.patch("web.config.save_llm_config") as save:
+            code, payload = web.save_settings({"voice": ["Achernar"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(save.call_args.kwargs, {"DJ_VOICE": "Achernar"})
+        self.assertEqual(payload["note"], "saved")
+        # a code point not in the catalog is rejected, not silently stored
+        with mock.patch("web.config.save_llm_config") as save2:
+            code, payload = web.save_settings({"voice": ["Not A Voice"]})
+        self.assertEqual(code, 400)
+        save2.assert_not_called()
+        self.assertIn("unknown TTS voice", payload["error"])
+        # case is tolerated: 'despina' is stored with the canonical name
+        with mock.patch("web.config.save_llm_config") as save3:
+            self.assertEqual(web.save_settings({"voice": ["sulafat"]})[0], 200)
+        self.assertEqual(save3.call_args.kwargs["DJ_VOICE"], "Sulafat")
 
     def test_settings_write_failures_are_500_not_a_broken_tab(self):
         with mock.patch("web.config.save_llm_config", side_effect=OSError("read-only")):

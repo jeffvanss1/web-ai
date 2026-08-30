@@ -61,7 +61,47 @@ LLM_TIMEOUT = _env_timeout()
 MAX_RECENT_HISTORY = 800
 
 
-LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT")
+LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT", "DJ_VOICE")
+
+# The Gemini speech-generation voices (name, gender, character, written language).
+# The "language" is the written language the DJ composes in; choosing an Arabic
+# voice makes the DJ write Arabic, the rest are English accents (US/GB/IN).
+GEMINI_TTS_VOICES = (
+    ("Zephyr", "Female", "bright", "English"),
+    ("Puck", "Male", "upbeat", "English"),
+    ("Charon", "Male", "informative", "English"),
+    ("Kore", "Female", "firm", "English"),
+    ("Fenrir", "Male", "excitable", "English"),
+    ("Leda", "Female", "youthful", "English"),
+    ("Orus", "Male", "firm", "English"),
+    ("Aoede", "Female", "breezy", "English"),
+    ("Callirrhoe", "Female", "easy-going", "English"),
+    ("Autonoe", "Female", "bright", "English"),
+    ("Enceladus", "Male", "breathy", "English"),
+    ("Iapetus", "Male", "clear", "English"),
+    ("Umbriel", "Male", "easy-going", "English"),
+    ("Algieba", "Male", "smooth", "English"),
+    ("Despina", "Female", "smooth", "English"),
+    ("Erinome", "Female", "clear", "English"),
+    ("Algenib", "Male", "gravelly", "English"),
+    ("Rasalgethi", "Male", "informative", "English"),
+    ("Laomedeia", "Female", "upbeat", "English"),
+    ("Achernar", "Female", "soft", "Arabic"),
+    ("Alnilam", "Male", "firm", "English"),
+    ("Schedar", "Male", "even", "English"),
+    ("Gacrux", "Female", "mature", "Arabic"),
+    ("Pulcherrima", "Female", "forward", "English"),
+    ("Achird", "Male", "friendly", "Arabic"),
+    ("Zubenelgenubi", "Male", "casual", "English"),
+    ("Vindemiatrix", "Female", "gentle", "English"),
+    ("Sadachbia", "Male", "lively", "English"),
+    ("Sadaltager", "Male", "knowledgeable", "English"),
+    ("Sulafat", "Female", "warm", "English"),
+)
+GEMINI_TTS_VOICE_NAMES = [v[0] for v in GEMINI_TTS_VOICES]
+# how many seconds before a song ends the DJ starts the next-up announcement
+DJ_LEAD_SECS = max(2.0, min(60.0,
+                            float(os.environ.get("SPOTUBE_DJ_LEAD_SECS", "10"))))
 
 
 def ensure_dirs() -> None:
@@ -191,7 +231,23 @@ def load_llm_config() -> dict:
         out["LLM_BASE_URL"] = os.environ["SPOTUBE_DJ_BASE_URL"]
     if os.environ.get("SPOTUBE_DJ_MODEL"):
         out["LLM_MODEL"] = os.environ["SPOTUBE_DJ_MODEL"]
+    if os.environ.get("SPOTUBE_DJ_TTS_VOICE"):
+        out["DJ_VOICE"] = os.environ["SPOTUBE_DJ_TTS_VOICE"]
     return out
+
+
+def load_dj_voice() -> str:
+    """The effective Gemini voice: env override > saved config > default Despina."""
+    return str(load_llm_config().get("DJ_VOICE") or DJ_VOICE or "Despina")
+
+
+def voice_lang(name: str | None) -> str:
+    """The written language the DJ should compose in for a given voice."""
+    name = str(name or "")
+    for n, _g, _t, lang in GEMINI_TTS_VOICES:
+        if n.lower() == name.lower():
+            return lang
+    return "English"
 
 
 def save_llm_config(**values) -> dict:

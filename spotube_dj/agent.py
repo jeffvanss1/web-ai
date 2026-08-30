@@ -119,12 +119,13 @@ def dj_speech(dj) -> str:
     return " ".join(bits)
 
 
-def dj_prompt(dj) -> str:
+def dj_prompt(dj, lang: str = "English") -> str:
     """A personality prompt that asks a Gemini model to write a *creative* DJ line.
 
     The spoken line is not a canned read: we hand the model the real facts (what
     is playing, why, the set's name, what's next) and ask it to say them the way
     a warm, playful radio DJ would - so every track gets its own turn of phrase.
+    `lang` is the written language for the chosen voice (e.g. 'English', 'Arabic').
     `dj_speech` remains the keyless fallback when there is no key/network.
     """
     snap = snapshot_of(dj)
@@ -146,10 +147,53 @@ def dj_prompt(dj) -> str:
         "spoken line to introduce the song that is starting. Speak like a real DJ "
         "host, not a text readout - vary the phrasing, be friendly, and keep it to "
         "one or two sentences (about 15 to 35 words). Use these facts but express "
-        "them in your own words, and don't mention that you are an AI. Facts: "
+        "them in your own words, and don't mention that you are an AI. Write the "
+        "line in " + lang + ". Facts: "
         + facts + "."
         " Reply with only the line to speak - no labels, no quotes, no preamble."
     )
+
+
+def lead_prompt(dj, lang: str = "English") -> str:
+    """A Gemini prompt for a short *lead-in* to the song coming up next.
+
+    Used ~lead seconds before the current track ends, so the DJ hands over to the
+    next song instead of talking after it has already started.
+    """
+    snap = snapshot_of(dj)
+    nxt = str(snap.get("next") or "").strip()
+    if not nxt:
+        return ""
+    vibe = str(snap.get("vibe") or "").strip()
+    why = str(snap.get("why") or "").strip()
+    context = f"It's part of the {vibe} set." if vibe else ""
+    if why and not vibe:
+        context = why[0].upper() + why[1:] + "."
+    return (
+        "You are a warm, playful radio DJ. The song currently playing is almost "
+        "finished. Give a short spoken lead-in that hands over to the next song "
+        "(one or two sentences, about 10 to 25 words, friendly and energetic). "
+        "The next song is " + nxt + "."
+        + ((" " + context) if context else "")
+        + " Write the line in " + lang + ". "
+        "Reply with only the line to speak - no labels, no quotes, no preamble."
+    )
+
+
+def lead_line(dj) -> str:
+    """A keyless template for the up-next lead-in (used when there is no key)."""
+    snap = snapshot_of(dj)
+    nxt = str(snap.get("next") or "").strip()
+    if not nxt:
+        return ""
+    a, s, t = nxt.partition(" - ")
+    vibe = str(snap.get("vibe") or "").strip()
+    line = f"Up next {a}," if s else f"Up next {nxt}."
+    if s and t:
+        line += f" {t}."
+    if vibe:
+        line += f" It's part of the {vibe} set."
+    return line + " Coming right up."
 
 
 def narrate(snap: dict) -> str:

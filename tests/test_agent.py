@@ -171,9 +171,83 @@ class SpeechTests(unittest.TestCase):
 
     def test_voice_defaults_to_despina(self):
         import djvoice
-        # the gemini voice name is Despina by default, overridable per shell
+        # the gemini voice name is Despina by default, overridable per shell.
+        # load_dj_voice reads the saved config first; a fresh/empty config means the
+        # module default (Despina) is what actually talks.
         with mock.patch.object(config, "DJ_VOICE", "Despina"):
-            self.assertEqual(djvoice.voice_name(), "Despina")
+            with mock.patch.object(config, "load_llm_config", return_value={}):
+                self.assertEqual(djvoice.voice_name(), "Despina")
+
+    def test_voice_setting_rides_the_state(self):
+        # a voice saved in Settings (config) is what the DJ uses, and it can be a
+        # non-English one whose written language follows (Achernar -> Arabic).
+        import djvoice
+        self.assertEqual(config.voice_lang("Despina"), "English")
+        self.assertEqual(config.voice_lang("Achernar"), "Arabic")
+        with mock.patch.object(config, "load_llm_config",
+                               return_value={"DJ_VOICE": "Achernar"}):
+            self.assertEqual(djvoice.voice_name(), "Achernar")
+        # a value already on disk is used as-is (the Settings endpoint is what
+        # guards against an arbitrary name ever being written there; load trusts it)
+        with mock.patch.object(config, "load_llm_config",
+                               return_value={"DJ_VOICE": "No Such Voice"}):
+            self.assertEqual(djvoice.voice_name(), "No Such Voice")
+        # the catalog drives the dropdown and recognises names case-insensitively
+        names = [v[0] for v in config.GEMINI_TTS_VOICES]
+        self.assertIn("Despina", names)
+        self.assertIn("Sulafat", names)
+        self.assertEqual(config.voice_lang("sulafat"), "English")   # case-insensitive
+        self.assertEqual(config.voice_lang("ACHE RNAR"), "English")  # unknown -> English
+
+    def test_lead_time_is_bounded_and_configurable(self):
+        import djvoice
+        self.assertGreaterEqual(config.DJ_LEAD_SECS, 2.0)
+        self.assertLessEqual(config.DJ_LEAD_SECS, 60.0)
+        self.assertEqual(djvoice.lead_secs(), config.DJ_LEAD_SECS)
+
+    def test_lead_in_wait_fires_near_the_end_and_aborts_on_a_skip(self):
+        import djvoice
+        dj = _dj()
+        class P:
+            def progress(self): return (24.0, 30.0)    # 6s remain < lead of 10
+        dj.player = P()
+        # the DJ is still on v1: with 6s left it is time to speak
+        self.assertTrue(djvoice._wait_lead(dj, "v1"))
+        # but a fast skipper who has moved on gets silence, never a stale line
+        dj.current = {"id": "v9", "title": "Other", "artist": "Unknown"}
+        self.assertFalse(djvoice._wait_lead(dj, "v1"))
+        # a track with no player simply stays quiet
+        dj.player = None
+        self.assertFalse(djvoice._wait_lead(dj, "v9"))
+
+    def test_lead_line_beats_the_intro_when_handing_over(self):
+        import djvoice
+        dj = _dj()
+        # keyless: the hand-over gets the \"up next\" template, the intro the current one
+        with mock.patch.object(config, "LLM_API_KEY", ""):
+            self.assertEqual(djvoice._creative_line(dj, agent, next_up=True),
+                             agent.lead_line(dj))
+            self.assertEqual(djvoice._creative_line(dj, agent, next_up=False),
+                             agent.dj_speech(dj))
+        # with nothing queued the lead-in is empty, so the DJ stays silent
+        dj.queue = type("Q", (), {"upcoming": lambda self, n: []})()
+        with mock.patch.object(config, "LLM_API_KEY", ""):
+            self.assertEqual(djvoice._lead_line(dj, agent), "")
+
+    def test_lead_prompt_and_line_hand_over_to_the_next_song(self):
+        dj = _dj()
+        prompt = agent.lead_prompt(dj, "English")
+        self.assertIn("almost finished", prompt)
+        self.assertIn("Reach for the Dead", prompt)
+        self.assertIn("Write the line in English", prompt)
+        line = agent.lead_line(dj)
+        self.assertIn("Up next Boards,", line)
+        self.assertIn("Reach for the Dead", line)
+        self.assertIn("Coming right up", line)
+        # a set with nothing queued says nothing instead of inventing a track
+        dj.queue = type("Q", (), {"upcoming": lambda self, n: []})()
+        self.assertEqual(agent.lead_prompt(dj, "English"), "")
+        self.assertEqual(agent.lead_line(dj), "")
 
     def test_dj_prompt_names_the_song_why_vibe_and_next(self):
         prompt = agent.dj_prompt(_dj())

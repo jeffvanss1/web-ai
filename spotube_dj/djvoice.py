@@ -52,8 +52,8 @@ def enabled(dj=None) -> bool:
 
 
 def voice_name() -> str:
-    """The Gemini voice used for the DJ (Despina by default)."""
-    return (os.environ.get("SPOTUBE_DJ_TTS_VOICE") or config.DJ_VOICE or "Despina")
+    """The Gemini voice used for the DJ (Despina by default, configurable in Settings)."""
+    return config.load_dj_voice()
 
 
 def tts_model() -> str:
@@ -79,20 +79,88 @@ _pending: str | None = None
 _worker = False
 
 
-def speak_for(dj) -> None:
-    """Fire-and-forget: speak the DJ line for the current track of `dj`.
+def lead_secs() -> float:
+    """Seconds before a track ends that the DJ starts the next-up announcement."""
+    return getattr(config, "DJ_LEAD_SECS", 10.0)
 
-    Returns immediately; the line is written (creatively, by Gemini when a key is
-    set) and synthesized/played on a single daemon worker. Never raises.
-    """
-    global _pending
+
+def speak_for(dj) -> None:
+    """[back-compat] Speak the current-track line now (see `speak_intro`)."""
+    speak_intro(dj)
+
+
+def speak_intro(dj) -> None:
+    """Announce the *current* song now - used for the first track of a set."""
     if not enabled(dj):
         return
     try:
         import agent
-        text = _creative_line(dj, agent)
+        text = _creative_line(dj, agent, next_up=False)
     except Exception:
         return
+    _queue(text)
+
+
+def schedule_next(dj) -> None:
+    """Announce the *upcoming* song ~`lead_secs` before the current one ends.
+
+    The line is written and synthesized ahead of time; a monitor thread waits
+    until the current track is close to its end, then speaks. So the DJ leads
+    into the next song instead of coming on late, after it has started.
+    """
+    if not enabled(dj):
+        return
+    threading.Thread(target=_monitor, args=(dj,), daemon=True).start()
+
+
+def _monitor(dj) -> None:
+    """Generate the up-next line, wait until near the end, then speak it."""
+    try:
+        import agent
+        current_id = (dj.current or {}).get("id")
+        if not current_id:
+            return
+        text = _lead_line(dj, agent)          # write it now, so it is ready in time
+    except Exception:
+        return
+    if not text:
+        return
+    if not _wait_lead(dj, current_id):
+        return
+    _queue(text)
+
+
+def _wait_lead(dj, current_id: str) -> bool:
+    """Poll the player; True when the current track is within `lead` of its end."""
+    player = getattr(dj, "player", None)
+    prog = getattr(player, "progress", None)
+    if prog is None:
+        return False
+    lead = lead_secs()
+    deadline = time.monotonic() + 60.0        # a hard cap so a dead beat cannot hang
+    while time.monotonic() < deadline:
+        if (dj.current or {}).get("id") != current_id:
+            return False                      # advanced/skipped; the line is stale
+        if getattr(dj, "paused", False):
+            time.sleep(0.5)
+            continue
+        try:
+            pos, dur = prog()
+        except Exception:
+            return False
+        if not dur or dur <= 0:
+            time.sleep(0.5)
+            continue
+        remaining = dur - pos
+        if remaining <= min(lead, max(0.0, dur * 0.3)):   # short tracks lead sooner
+            return True
+        time.sleep(0.25)
+    return False
+
+
+def _queue(text: str) -> None:
+    """Enqueue a line for the single speech worker (serializes rapid changes)."""
+    global _pending
     if not text:
         return
     global _worker
@@ -103,19 +171,36 @@ def speak_for(dj) -> None:
             threading.Thread(target=_worker_loop, daemon=True).start()
 
 
-def _creative_line(dj, agent) -> str:
+def _creative_line(dj, agent, next_up: bool = False) -> str:
     """A creative DJ line: ask Gemini to write it, fall back to the template."""
     if config.LLM_API_KEY:
         try:
             import brain
-            prompt = agent.dj_prompt(dj)
+            lang = config.voice_lang(config.load_dj_voice())
+            prompt = (agent.lead_prompt(dj, lang) if next_up
+                      else agent.dj_prompt(dj, lang))
             if prompt:
                 line = brain.free_text(prompt, max_chars=400)
                 if line:
                     return line
         except Exception:
             pass
-    return agent.dj_speech(dj)            # keyless, still reads naturally enough
+    return (agent.lead_line(dj) if next_up else agent.dj_speech(dj))
+
+
+def _lead_line(dj, agent) -> str:
+    """A creative up-next line (Gemini) or a readable template fallback."""
+    if not _has_any_next(dj):
+        return ""
+    return _creative_line(dj, agent, next_up=True)
+
+
+def _has_any_next(dj) -> bool:
+    """Is there an upcoming row after the current one?"""
+    try:
+        return bool(dj.queue.upcoming(1))
+    except Exception:
+        return False
 
 
 def _worker_loop() -> None:

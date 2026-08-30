@@ -646,6 +646,10 @@ BODY = """
       autocomplete="off" spellcheck="false"></label>
      <label class="setrow"><span>Model</span><input id="in-model" type="text"
       placeholder="gemini-3.5-flash" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>DJ voice</span>
+      <select id="in-voice" class="infield"></select>
+      <small class="setnote" id="voice-lang"></small>
+     </label>
      <div class="acts">
       <button class="btn prim" id="savebtn">@@check@@<span>Save</span></button>
       <button class="btn ghost" data-action="test_brain">@@sparkle@@<span>Test the planner</span></button>
@@ -1581,6 +1585,26 @@ function drawSettings(s){
   const fillIn = (node, v) => { if (node && document.activeElement !== node) node.value = v; };
   fillIn($("in-base"), st.base || "");
   fillIn($("in-model"), st.model || "");
+  // DJ voice dropdown: only rebuild its options when the effective voice (or the
+  // catalog) changes, so a mid-click selection is never overwritten by the tick.
+  const sel = $("in-voice");
+  if (sel && (sel.dataset.current !== st.dj_voice)) {
+    const current = st.dj_voice || "Despina";
+    sel.options.length = 0;
+    for (const v of (st.dj_voices || [])) {
+      const o = document.createElement("option");
+      o.value = v.name;
+      o.textContent = v.name + (v.trait ? " · " + v.trait : "");
+      if (v.lang) o.textContent += " · " + v.lang;
+      if (v.name === current) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.dataset.current = current;
+  }
+  const lang = sel && sel.selectedOptions[0] && sel.selectedOptions[0].textContent
+    ? String(sel.selectedOptions[0].textContent) : "";
+  $("voice-lang").textContent = (st.dj_voice || "Despina") + " speaks " +
+    ((lang && lang.includes("·")) ? lang.split("·").pop().trim() : "English");
   $("unkeybtn").hidden = !st.key_set;
   $("engine2").textContent = st.key_set
     ? "Planning goes through " + (st.model || "the default model") + " at " +
@@ -1781,11 +1805,19 @@ $("savebtn").addEventListener("click", async () => {
   const f = {base: $("in-base").value.trim(), model: $("in-model").value.trim()};
   const k = $("in-key").value.trim();
   if (k) f.key = k;
+  const v = $("in-voice");
+  if (v && v.value) f.voice = v.value;
   try {
     const j = await post("/api/settings", f);
     draw(j.state); $("in-key").value = "";
     toast(j.note || "saved");
   } catch (e) { toast(e.message); }
+});
+$("in-voice").addEventListener("change", () => {
+  const sel = $("in-voice");
+  const lang = sel.selectedOptions[0] && sel.selectedOptions[0].textContent;
+  $("voice-lang").textContent = sel.value + " speaks " +
+    ((lang && lang.includes("·")) ? lang.split("·").pop().trim() : "English");
 });
 let wipeArm = 0;
 $("wipebtn").addEventListener("click", () => {

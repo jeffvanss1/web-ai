@@ -198,8 +198,12 @@ def settings_view() -> dict:
             "base": str(config.LLM_BASE_URL or data.get("LLM_BASE_URL") or ""),
             "model": str(data.get("LLM_MODEL") or config.LLM_MODEL
                          or config.GEMINI_DEFAULT_MODEL),
-            "dj_voice": str(config.DJ_VOICE or "Despina"),
-            "dj_model": str(config.GEMINI_DEFAULT_TTS_MODEL),
+            "dj_voice": config.load_dj_voice(),
+            "dj_voice_model": str(config.GEMINI_DEFAULT_TTS_MODEL),
+            "dj_voices": [{"name": name, "gender": gender, "trait": trait,
+                           "lang": lang if lang != "English" else ""}
+                          for name, gender, trait, lang in config.GEMINI_TTS_VOICES],
+            "dj_lead": float(config.DJ_LEAD_SECS or 10.0),
             "engine": brain.configured_engine(),
             "note": brain.why_offline()}
 
@@ -377,7 +381,7 @@ def build_state(ctx) -> dict:
         "auto": bool(st.get("auto")),
         "autoplay": bool((dj.state or {}).get("autoplay")),
         "voice": bool((dj.state or {}).get("voice", True)),
-        "voice_note": ("gemini · Despina" if config.LLM_API_KEY
+        "voice_note": (("gemini · " + config.load_dj_voice()) if config.LLM_API_KEY
                        else "offline (no key)"),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
@@ -1327,11 +1331,19 @@ def save_settings(fields: dict) -> tuple[int, dict]:
         vals["LLM_BASE_URL"] = one("base")
     if "model" in fields:
         vals["LLM_MODEL"] = one("model")
+    if "voice" in fields:
+        voice = one("voice")
+        names = [n.lower() for n in config.GEMINI_TTS_VOICE_NAMES]
+        if voice.lower() not in names:
+            return 400, {"error": (f"unknown TTS voice {voice!r}; pick one of the "
+                                   "voices in the dropdown")}
+        vals["DJ_VOICE"] = config.GEMINI_TTS_VOICE_NAMES[names.index(voice.lower())]
     if one("clear_key") == "1":
         vals["LLM_API_KEY"] = ""
     elif one("key"):
         vals["LLM_API_KEY"] = one("key")
-    if not vals:
+    key_touched = ("key" in fields) or ("clear_key" in fields)
+    if not vals and not key_touched:
         return 400, {"error": "nothing to save - send key, base, model or clear_key"}
     try:
         config.save_llm_config(**vals)
@@ -1340,7 +1352,8 @@ def save_settings(fields: dict) -> tuple[int, dict]:
         # class name leaves "could not write the config" and no idea which file stuck
         return 500, {"error": f"could not write the config: {e.__class__.__name__}: {e}"}
     return 200, {"settings": settings_view(),
-                 "note": "saved" if "LLM_API_KEY" in vals else "saved (key kept as it was)"}
+                 "note": ("saved" if (("LLM_API_KEY" in vals) or not key_touched)
+                          else "saved (key kept as it was)")}
 
 
 def run_action(ctx, name: str, fields: dict) -> tuple[int, dict]:

@@ -980,6 +980,11 @@ class DJ:
 
     def _next_locked(self, force: bool = False) -> dict | None:
         """Body of `next`, run only while holding the single-advance guard."""
+        # was anything playing when we were asked to move? The very first track
+        # (came up from idle/empty) gets an intro now; every later advance is a
+        # hand-off, so the DJ leads into the NEXT song ~lead seconds before this
+        # one ends instead of talking after it started.
+        was_playing = bool(self.current)
         if self._hold_until and time.time() < self._hold_until:
             if not force:
                 return None
@@ -1031,7 +1036,12 @@ class DJ:
                 if not self.headless and self.player:
                     try:
                         import djvoice
-                        djvoice.speak_for(self)
+                        if was_playing:
+                            # a hand-off: lead into the next song before this ends
+                            djvoice.schedule_next(self)
+                        else:
+                            # the very first track of a set: introduce it now
+                            djvoice.speak_intro(self)
                     except Exception:
                         pass
                 # while this one plays, the next two go onto disk - at the *front* of
