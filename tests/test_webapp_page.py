@@ -722,6 +722,26 @@ class ArtSlotTests(unittest.TestCase):
         self.assertIn("color:#e8e8e8", why)
         self.assertIn("line-height", why)
 
+    def test_the_playing_colour_comes_from_the_cover_not_a_palette_hash(self):
+        # "match the color with majority color every single cover": the page must
+        # read the cover's dominant colours and feed --tint/--tint2 from them, with
+        # the palette only as a fallback while a picture has not yet been decoded.
+        self.assertIn("const coverColors = {}", self.js,
+                      "there is no per-video cover colour cache")
+        self.assertIn("function dominantColor(img, vid)", self.js,
+                      "the cover's dominant colour is never extracted")
+        self.assertIn("function normColor", self.js,
+                      "the extracted colour is never normalised to a usable accent")
+        self.assertIn("img.onload = () => dominantColor(img, vid)", self.js,
+                      "a loaded cover never samples its own colour")
+        self.assertIn("coverColors[track.id]", self.js,
+                      "backdrop() does not read the cover's own colour")
+        self.assertNotIn("dominantColor(img, vid) ;", self.js)
+        # the wash gradient composes tint+alpha as 8-digit hex, so the colour must be
+        # hex (an rgb() string would make `tint+"00"` invalid)
+        self.assertIn('"#" + hx(r) + hx(g) + hx(b)', self.js,
+                      "the dominant colour is not emitted as hex, so the wash breaks")
+
 
 if __name__ == "__main__":
     unittest.main()

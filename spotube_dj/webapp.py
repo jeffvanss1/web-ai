@@ -806,6 +806,58 @@ function hueOf(seed){
   for (const ch of String(seed || "?")) h = (h * 131 + ch.charCodeAt(0)) >>> 0;
   return h;
 }
+/* the playing colour should be the cover's majority colour, not a hash into the
+   palette. Every <img> that loads (a tile, a card, the hero) has its dominant
+   colours pulled out here and cached under the video id, so `backdrop` can tint the
+   page from the artwork itself - once, not on every tick. Reading pixels requires a
+   same-origin (or `data:`) image; a cross-origin one taints the canvas and the read
+   throws, which we swallow and leave the palette fallback in place (the artwork
+   lane dresses rows to a same-origin /art/ file, so by the time a row re-renders it
+   is readable). */
+const coverColors = {};         // vid -> {main, alt}
+function normColor(r, g, b){
+  // clamp into a usable mid accent: a near-black cover must not give an invisible
+  // tint and a near-white one must not wash the buttons out
+  const L = 0.2126*r + 0.7152*g + 0.0722*b;
+  if (L < 42)  { const f = 42/Math.max(1, L); r = Math.min(255, r*f); g = Math.min(255, g*f); b = Math.min(255, b*f); }
+  else if (L > 208) { const f = 208/L; r *= f; g *= f; b *= f; }
+  // hex, so it composes with the existing `tint + "00"` alpha shorthand in the wash
+  const hx = (v) => ("0" + Math.round(v).toString(16)).slice(-2);
+  return "#" + hx(r) + hx(g) + hx(b);
+}
+function dominantColor(img, vid){
+  if (!vid || !img || coverColors[vid]) return;
+  try {
+    const s = 30;
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = s;
+    const cx = cv.getContext("2d", {willReadFrequently:true});
+    if (!cx) return;
+    const iw = img.naturalWidth, ih = img.naturalHeight;
+    if (!iw || !ih) return;
+    const scale = Math.max(s/iw, s/ih);
+    const w = iw*scale, h = ih*scale;
+    cx.drawImage(img, (s - w)/2, (s - h)/2, w, h);
+    const d = cx.getImageData(0, 0, s, s).data;
+    const buckets = {};
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] < 125) continue;                    // skip transparent
+      const kr = d[i] >> 5, kg = d[i + 1] >> 5, kb = d[i + 2] >> 5;
+      const key = (kr << 10) | (kg << 5) | kb;
+      const b = buckets[key] || (buckets[key] = {r:0, g:0, b:0, n:0});
+      b.r += d[i]; b.g += d[i + 1]; b.b += d[i + 2]; b.n++;
+    }
+    const top = Object.values(buckets).sort((a, b) => b.n - a.n);
+    if (!top.length) return;
+    const a = top[0];
+    const main = normColor(a.r/a.n, a.g/a.n, a.b/a.n);
+    // a real second colour from the cover if there is one, else a hue flip
+    let alt;
+    if (top[1] && top[1].n > 0) alt = normColor(top[1].r/top[1].n, top[1].g/top[1].n, top[1].b/top[1].n);
+    else                       alt = normColor(a.b/a.n, a.g/a.n, a.r/a.n);
+    coverColors[vid] = {main, alt};
+  } catch (e) { /* tainted canvas: leave the palette fallback in place */ }
+}
 function art(node, track, px, field){
   const tint = paint(node, seedOf(track), px);
   track = track || {};
@@ -836,6 +888,7 @@ function cover(node, url, vid, tried){
   // has no scroll event to react to) and leave the tinted tile a cover should have
   // covered. Eager pictures in an always-visible list cost nothing meaningful.
   const img = el("img"); img.src = finalUrl; img.alt = ""; img.loading = "eager";
+  img.onload = () => dominantColor(img, vid);
   img.onerror = () => {
     img.remove();
     if (!tried && hq && hq !== finalUrl) cover(node, hq, vid, true);
@@ -854,12 +907,12 @@ function backdrop(track, playing){
   for (const ch of String(t)) h = (h * 131 + ch.charCodeAt(0)) >>> 0;
   const pal = getComputedStyle(document.documentElement).getPropertyValue("--tiles").split(",");
   const other = pal[(h >> 5) % pal.length];
-  // the glow is colour even when nothing is playing: take the seed's own palette
-  // pair (not a static near-black), so the page is never a flat grey that swallows
-  // the tint. Playing uses the same two rungs so the wash is consistent - it only
-  // gets a real image layered on top once a cover exists.
-  const tint = pal[h % pal.length];
-  const tint2 = pal[((h >> 3) >>> 0) % pal.length];
+  // the playing colour is the cover's majority colour once that picture has been
+  // read (see dominantColor). Until it lands we fall back to the seed's palette
+  // pair so the wash is never a static grey and never jumps from nothing.
+  const c = (playing && track && track.id && coverColors[track.id]) || null;
+  const tint = c ? c.main : pal[h % pal.length];
+  const tint2 = c ? c.alt : pal[((h >> 3) >>> 0) % pal.length];
   document.documentElement.style.setProperty("--tint", tint);
   document.documentElement.style.setProperty("--tint2", tint2);
   /* the wash underneath a still-loading (or unavailable) cover is the two palette
