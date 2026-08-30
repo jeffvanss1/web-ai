@@ -438,12 +438,12 @@ def with_art(state: dict, ctx) -> dict:
             if not isinstance(t, dict):
                 continue
             for slot, size in (("art", "row"), ("art_card", "card")):
-                # a row that already has its own cover (the album art, from the row's
-                # thumbnail) keeps it: the lane's video frame is a *smaller, worse*
-                # picture, and stamping it here is why a good album cover could be
-                # replaced by a 72px frame the moment the lane got to that row
-                if str(t.get(slot) or "").startswith("http"):
-                    continue
+                # the artwork lane's own file is preferred the moment it exists: it is
+                # served from this same origin (so it never fights a cross-origin image
+                # CDN that some browsers/network paths refuse), and at `card` size it is
+                # the album art rather than a video frame. Until a file is on disk the
+                # row's own thumbnail (or nothing) shows, so a good picture is never
+                # replaced by a *worse* one before the lane has something better.
                 href = ctx.art_href(t.get("id") or "", size)
                 if href:
                     t[slot] = href
@@ -579,12 +579,6 @@ class Context:
                 if wanted >= limit:
                     break
                 t = t if isinstance(t, dict) else {}
-                # a row that already carries its own cover (an album tracklist or a
-                # discography row - the album card's art) is dressed already: asking
-                # the lane to fetch a video frame for it spends the lane on a poorer
-                # picture and makes the genuinely bare rows wait longer
-                if str(t.get("thumbnail") or "").startswith("http"):
-                    continue
                 vid = str(t.get("id") or "")
                 if not vid or (vid, size) in self._seen_art:
                     continue

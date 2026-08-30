@@ -325,20 +325,22 @@ class ArtStampingTests(unittest.TestCase):
         self.assertEqual(s["up_next"][0]["art_card"], "/art/next2.png",
                          "the grid tile needs the 256px file")
 
-    def test_with_art_keeps_a_cover_the_row_brought(self):
-        # a discography / album row arrives with the album's real art already in
-        # `art`/`art_card`; stamping the lane's video frame on top trades a real
-        # album cover for a smaller, blurrier picture the moment the lane reaches it
+    def test_with_art_prefers_the_lanes_own_file_when_it_exists(self):
+        # a row may arrive with a cross-origin cover in `art`/`art_card`; once the
+        # artwork lane has a file on disk it is the same-origin href that wins, so a
+        # queue/card row is never left on an image CDN some browsers/network paths
+        # refuse. Until then the row's own picture (or nothing) shows.
         self.ctx._hrefs = {"vid0": {"row": "/art/frame.jpg", "card": "/art/frame2.jpg"}}
         s = web.build_state(self.ctx)
         row = dict(s["up_next"][0])
+        row["id"] = "vid0"
         row["art"] = "https://i.ytimg.com/cover.jpg"
         row["art_card"] = "https://i.ytimg.com/cover-card.jpg"
         s["up_next"][0] = row
         web.with_art(s, self.ctx)
-        self.assertEqual(s["up_next"][0]["art"], "https://i.ytimg.com/cover.jpg",
-                         "an existing album cover must not be replaced by a frame")
-        self.assertEqual(s["up_next"][0]["art_card"], "https://i.ytimg.com/cover-card.jpg")
+        self.assertEqual(s["up_next"][0]["art"], "/art/frame.jpg",
+                         "the lane's own file must win over a cross-origin cover")
+        self.assertEqual(s["up_next"][0]["art_card"], "/art/frame2.jpg")
 
     def test_a_hero_never_upscale_a_row_thumbnail(self):
         # the old behaviour, written down as a test so it cannot come back: with
@@ -1935,19 +1937,20 @@ class ArtLaneTests(unittest.TestCase):
         self.assertEqual(self.ctx.request_art([{"id": "v3"}], "row"), 0,
                          "work the lane has drawn is not work to repeat")
 
-    def test_a_row_that_carries_its_own_cover_is_not_queued_for_a_frame(self):
-        # album tracklists / discography rows arrive with the album's real art in
-        # `thumbnail`; asking the lane to fetch a 72px video frame for them spends
-        # the lane on a poorer picture while genuinely bare rows wait
+    def test_a_row_that_carries_a_thumbnail_is_still_queued_for_its_own_file(self):
+        # a row may carry a `thumbnail`, but that is a cross-origin URL that can be
+        # refused in the browser; the lane still fetches a same-origin file for it so
+        # the queue/cards are never stuck on a cross-origin image CDN. `thumbnail`
+        # alone never keeps a row off the lane.
         tracks = [{"id": "v1", "thumbnail": "https://i.ytimg.com/cover.jpg"},
                   {"id": "v2", "thumbnail": ""},
                   {"id": "v3"}]
-        self.assertEqual(self.ctx.request_art(tracks, "row"), 2)
+        self.assertEqual(self.ctx.request_art(tracks, "row"), 3)
         got = []
         while not self.ctx.art.empty():
             got.append(self.ctx.art.get_nowait())
-        self.assertEqual([g[0]["id"] for g in got], ["v2", "v3"],
-                         "a row that already has a cover must not be queued")
+        self.assertEqual([g[0]["id"] for g in got], ["v1", "v2", "v3"],
+                         "a row with a thumbnail must still get the lane's same-origin file")
 
     def test_only_the_visible_rows_are_warmed(self):
         tracks = [{"id": f"v{i}"} for i in range(60)]
