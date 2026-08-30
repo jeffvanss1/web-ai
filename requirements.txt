@@ -1,0 +1,1 @@
+yt-dlp>=2024.10.7   # the audio source; keep it updated, YouTube breaks old versions
