@@ -214,6 +214,15 @@ class PageShapeTests(unittest.TestCase):
             self.assertNotIn(banned, self.js,
                              f"Credits still re-presents the transport: {banned}")
 
+    def test_the_queued_header_can_carry_the_mix_name(self):
+        # the Daylist-style title ("lofi tuesday night") must be readable in the
+        # Up Next header, not just carried in state nobody paints. The page builds
+        # that line from s.vibe, prefixing it to the count when present.
+        self.assertIn("(s.vibe || \"\")", self.js,
+                      "the header never reads the mix name the engine computed")
+        self.assertIn('"").trim()', self.js,
+                      "a blank vibe must not render the word 'undefined'")
+
     def test_a_row_with_only_a_thumbnail_still_gets_a_cover(self):
         # `art` used to read `track.art` alone, so a queue row that only carried
         # `art_card`, or an album/discography row that only carried the raw

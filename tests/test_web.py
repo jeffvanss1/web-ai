@@ -113,12 +113,24 @@ class BuildStateTests(unittest.TestCase):
         for key in ("now", "up_next", "queued", "position", "duration", "paused",
                     "auto", "volume", "backend", "idle", "idle_note", "why", "request",
                     "queries", "engine_note", "cache_note", "foot", "log", "search",
-                    "loved"):
+                    "loved", "vibe"):
             self.assertIn(key, s, key)
 
     def test_json_encodes_it(self):
         # a raw track dict anywhere in here would blow up on bytes/objects instead
         json.dumps(web.build_state(self.ctx))
+
+    def test_the_mix_name_reaches_the_page(self):
+        # the Daylist-style title is computed in the build_queue info and has to
+        # ride the same state object that paints the header under Up Next
+        self.dj.info["vibe"] = "lofi tuesday night"
+        s = web.build_state(self.ctx)
+        self.assertEqual(s["vibe"], "lofi tuesday night")
+
+    def test_missing_vibe_is_a_blank_string(self):
+        # no name yet literally means "no name", not the word "None" on the page
+        self.dj.info = {}
+        self.assertEqual(web.build_state(self.ctx)["vibe"], "")
 
     def test_playing_track_is_not_also_in_up_next(self):
         # the chronology complaint: Up Next shows what comes *after* this song

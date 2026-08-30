@@ -257,6 +257,57 @@ class TasteTests(_TmpHome):
         taste.record_like({"title": "a", "artist": "b"})  # must not explode
 
 
+# --------------------------------------------------------------- mix names
+
+
+class MixVibeTests(_TmpHome):
+    def test_empty_profile_still_gets_a_name(self):
+        # with nothing learned, the mix still needs a title, not an empty string
+        name = taste.mix_vibe("", when=time.mktime(time.strptime("2026-03-10 23:00", "%Y-%m-%d %H:%M")))
+        self.assertTrue(name.strip())
+        self.assertIn("night", name)
+
+    def test_mix_vibe_uses_weekday_and_daypart(self):
+        # "lofi tuesday morning" - a short mood from the profile + the clock,
+        # the way Spotify titles a Daylist, not a sentence with the artist in it
+        taste.record_like({"title": "lofi beats", "artist": "Boards of Canada"})
+        when = time.mktime(time.strptime("2026-03-10 09:00", "%Y-%m-%d %H:%M"))  # a tuesday
+        name = taste.mix_vibe("", when=when)
+        lowered = name.lower()
+        self.assertEqual(lowered, "lofi tuesday morning", name)
+        self.assertNotIn("boards", lowered, "a Daylist name is a mood, not a credits line")
+
+    def test_mix_vibe_uses_a_loved_artist_when_there_is_no_mood_yet(self):
+        # fresh profile with just a love: the artist stands in as the name so a
+        # first listener sees "radiohead saturday night", not a bare "night"
+        taste.record_like({"title": "Everything In Its Right Place",
+                           "artist": "Radiohead"})
+        when = time.mktime(time.strptime("2026-03-14 23:00", "%Y-%m-%d %H:%M"))  # a saturday
+        name = taste.mix_vibe("", when=when).lower()
+        self.assertIn("radiohead", name)
+        self.assertIn("saturday", name)
+        self.assertIn("night", name)
+
+    def test_mix_vibe_uses_the_request_when_the_profile_is_empty(self):
+        # no learned genres yet: fall back to the request's own mood word
+        when = time.mktime(time.strptime("2026-03-10 08:00", "%Y-%m-%d %H:%M"))
+        name = taste.mix_vibe("play sad lofi for me", when=when)
+        self.assertIn("sad", name.lower())
+        self.assertIn("morning", name.lower())
+
+    def test_mix_vibe_never_raises_on_bad_when(self):
+        # a clock that came back as garbage must not take the queue down
+        self.assertTrue(taste.mix_vibe("chill", when="not-a-time").strip())
+        self.assertTrue(taste.mix_vibe(None, when=-100).strip())
+
+    def test_strength_scales_the_like(self):
+        # a stronger like must move the artist weight more than a plain one
+        taste.record_like({"title": "a", "artist": "Boards of Canada"}, strength=1.6)
+        strong = config.load_state()["artists"]["boards of canada"]
+        # record_like bumps the artist by 2.0 * strength (a plain like = 2.0)
+        self.assertAlmostEqual(strong, 2.0 * 1.6, places=3)
+
+
 # ------------------------------------------------------- queue + interleave
 
 
@@ -1164,6 +1215,24 @@ class AdvanceAndLearningTests(unittest.TestCase):
         with mock.patch.object(taste, "record_like"):
             d._learn_from_heard()
         self.assertTrue(any("heard 100%" in n for n in notes), notes)
+
+    def test_full_play_counts_as_a_strong_like(self):
+        # a whole song through is the strongest signal there is; it must teach
+        # the profile harder than a track that merely crossed the "enough" line
+        import taste
+        d = self._dj(2)
+        d.current = {"id": "full", "title": "full", "artist": "Whole Artist", "duration": 100}
+        d.last_pos = 96.0                          # >= HEARD_FULL (0.92)
+        notes = []
+        d._note = lambda m: notes.append(m)
+        with mock.patch.object(taste, "record_like") as like, \
+             mock.patch.object(taste, "record_skip") as skip:
+            d._learn_from_heard()
+            d._learn_from_heard()                  # once per track, not per poll
+        like.assert_called_once()
+        self.assertEqual(like.call_args.kwargs.get("strength"), 1.6, like.call_args)
+        skip.assert_not_called()
+        self.assertTrue(any("loved" in n for n in notes), notes)
 
     def test_exhausted_queue_clears_now_playing(self):
         d = self._dj(1)

@@ -1321,7 +1321,11 @@ function drawChips(s){
     return;
   }
   box.style.display = "";
-  setText(head, rows.length + " queued" + (s.request ? " from " + JSON.stringify(s.request) : ""));
+  // a Daylist-style name for the set, when the engine gave one ("lofi tuesday
+  // night"): it reads as a tuned radio station rather than a raw search
+  const vibe = (s.vibe || "").trim();
+  setText(head, (vibe ? vibe + " · " : "") + rows.length + " queued" +
+    (s.request ? " from " + JSON.stringify(s.request) : ""));
   // the row being heard is marked, so the current id is part of what changed
   redraw(box, sigOf([rows.slice(0, 12), (s.now || {}).id || ""]), (b) =>
     rows.slice(0, 12).forEach((t, i) => b.appendChild(cardNode(t, i))));

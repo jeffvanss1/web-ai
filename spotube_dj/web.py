@@ -370,6 +370,7 @@ def build_state(ctx) -> dict:
         "idle": idle,
         "idle_note": why,
         "why": why,
+        "vibe": str((dj.info or {}).get("vibe") or ""),   # "lofi tuesday night"
         "request": str(st.get("request") or ""),
         "queries": list(st.get("queries") or []),
         "engine_note": engine_note(dj.info),

@@ -126,7 +126,7 @@ def _remember(state: dict, key: str, row: dict, dedupe: bool = True) -> None:
     rows.append(row)
 
 
-def record_like(track: dict) -> None:
+def record_like(track: dict, strength: float = 1.0) -> None:
     state = load_state()
     _remember(state, "liked", {
         "title": norm(track.get("title", "")),
@@ -141,9 +141,13 @@ def record_like(track: dict) -> None:
         "id": str(track.get("id") or ""),
         "ts": time.time(),
     })
-    _bump(state["artists"], track.get("artist", ""), 2.0)
+    # `strength` is how strongly this was liked - a full play to the end is a
+    # stronger vote than one that just crossed the "enough" line. Scaling the bumps
+    # is what makes the ranking feel like it weighs how long you actually listened.
+    s = float(strength) if strength else 1.0
+    _bump(state["artists"], track.get("artist", ""), 2.0 * s)
     for tag in title_hints(track.get("title", "")):
-        _bump(state["genres"], tag, 1.0)
+        _bump(state["genres"], tag, 1.0 * s)
     save_state(state)
 
 
@@ -389,6 +393,65 @@ def _positive(table: dict) -> list[tuple[str, float]]:
     """Loved keys, strongest first, ignoring anything the weight is not positive."""
     return sorted(((k, float(v)) for k, v in (table or {}).items()
                    if k and float(v) > 0), key=lambda kv: -kv[1])
+
+
+# ---------------------------------------------------------------- mix title
+# A Daylist-style name for the current set: the mood/genre the profile favours and
+# the time of day - "lofi tuesday night". The loved artist only stands in when the
+# profile has no mood yet, so a fresh listener still gets a name. This is the
+# "the mix has a name" bit that makes the queue read as a personally tuned radio
+# station rather than a raw search.
+_DAYPART = ((5, "early morning"), (12, "morning"), (17, "afternoon"),
+            (22, "evening"), (24, "night"))
+_WEEKDAY = ("monday", "tuesday", "wednesday", "thursday", "friday",
+            "saturday", "sunday")
+
+
+def _daypart(hour: int) -> str:
+    for hi, name in _DAYPART:
+        if hour < hi:
+            return name
+    return "night"
+
+
+def mix_vibe(request: str | None = None, when: float | None = None) -> str:
+    """
+    -> a short lowercase Daylist-style name for the current mix, like "lofi tuesday
+    night" or "sad lofi thursday morning".
+
+    Spotify's Daylist titles a playlist by the moment, so the name is a mood/genre
+    plus the clock, not a sentence. The mood comes from the strongest positive tag
+    the profile has learned; if the profile is still empty, the strongest
+    meaningful word of the request. Only when there is no mood at all does the
+    loved artist stand in as the name (so a fresh listener still gets "boards of
+    canada saturday", not a disembodied "night"). Never raises and never returns
+    an empty string - a bare daypart is still a name.
+    """
+    state = load_state()
+    genres = _positive(state.get("genres"))
+    artists = _positive(state.get("artists"))
+    try:
+        t = time.localtime(float(when) if when is not None else time.time())
+    except (TypeError, ValueError, OSError):
+        t = time.localtime()
+    daypart = _daypart(int(t.tm_hour))
+    weekday = _WEEKDAY[int(t.tm_wday)] if 0 <= int(t.tm_wday) < len(_WEEKDAY) else ""
+
+    subject = ""
+    if genres:
+        subject = str(genres[0][0]).strip()
+    elif artists:
+        # no mood learned yet, but a loved artist is still a name worth showing
+        subject = str(artists[0][0]).strip()
+    elif request:
+        # no profile yet: use the request's own strongest signal, dropping the
+        # stop/activity words (like "want" or "play") so the name is a mood and
+        # not an errand - "play sad lofi for me" becomes "sad lofi"
+        words = [w for w in tokens(request) if w not in _STOP]
+        subject = " ".join(words[:1])
+
+    parts = [p for p in (subject or "", weekday, daypart) if p]
+    return " ".join(parts) or daypart or "mix"
 
 
 # connectives and ask-words: they are how a request is phrased, not what a

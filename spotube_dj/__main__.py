@@ -132,6 +132,8 @@ def cmd_list(a) -> int:
               f"{t.get('score', 0):+5.1f} {t['url']}")
     print(f"\nengine={info.get('engine')} candidates={info.get('candidates')} "
           f"spotify={info.get('spotify')}")
+    if info.get("vibe"):
+        print(f"mix: {info['vibe']}")   # Daylist-style name, e.g. "lofi tuesday night"
     print(f"why: {info.get('why') or '-'}")
     _brain_note(info)
     return 0

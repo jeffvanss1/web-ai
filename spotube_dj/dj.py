@@ -25,6 +25,7 @@ import taste
 
 # how much of a track you must hear before we count it as "enough"
 HEARD_ENOUGH = 0.72
+HEARD_FULL = 0.92
 HEARD_BARELY = 0.28
 
 
@@ -313,6 +314,10 @@ def build_queue(request: str, seed_refs: list[str] | None = None,
         "off_topic_filtered": filtered,
         "streams_dropped": streams,
         "spotify": "metadata on" if sp_available else "off (no client id)",
+        # the Daylist-style name for this set: mood/artist + time of day.
+        # `why` may be detached from the request (an LLM rewrote it), so prefer
+        # the query the set was actually built from when naming the vibe.
+        "vibe": taste.mix_vibe((request or "").strip() or ""),
     }
     return out, info
 
@@ -531,7 +536,12 @@ class DJ:
             taste.record_skip(t, "early-skip" if ratio < 0.35 else "skip")
             self._note(f"  learned: skipped by hand (heard {ratio * 100:.0f}%)")
             return
-        if ratio >= HEARD_ENOUGH:
+        if ratio >= HEARD_FULL:
+            # heard the whole thing - the strongest signal there is, so it counts
+            # harder than a track that merely crossed the "enough" line
+            taste.record_like(t, strength=1.6)
+            self._note(f"  learned: loved (heard {ratio*100:.0f}%)")
+        elif ratio >= HEARD_ENOUGH:
             taste.record_like(t)
             self._note(f"  learned: liked (heard {ratio*100:.0f}%)")
         elif ratio <= HEARD_BARELY:
@@ -918,7 +928,7 @@ class DJ:
             self._note(f"[warn] the station could not be built: {e.__class__.__name__}: {e}")
             return {"ok": False, "reason": f"{e.__class__.__name__}", "tracks": []}
         self.info = dict(self.info or {})
-        self.info.update({k: info[k] for k in ("engine", "why", "queries") if k in info})
+        self.info.update({k: info[k] for k in ("engine", "why", "queries", "vibe") if k in info})
         # a station should persist: if there was no mood at all, this becomes it
         self.request = self.request or f"more like {label}"
         fresh = self._fresh(tracks)
