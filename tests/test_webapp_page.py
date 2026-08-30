@@ -178,20 +178,32 @@ class PageShapeTests(unittest.TestCase):
 
     def test_the_playing_color_drifts_slowly_instead_of_holding_still(self):
         # the cover-derived tint should be alive, not a fixed gradient: a slow
-        # keyframes animation moves the wash across the page and wanders its hue
+        # keyframes animation moves the wash across the page. The drift must be a
+        # pure `transform` animation - animating filter/background-position on a
+        # blurred layer re-rasterizes the blur every frame and is the source of jank.
         css = re.search(r"<style>([\s\S]*)</style>", self.html).group(1)
         self.assertIn("@keyframes tintdrift", css,
                       "the backdrop has no slow colour drift animation")
         self.assertIn("animation:tintdrift", css,
                       "the backdrop layer never runs the tint animation")
-        self.assertIn("hue-rotate(", css,
-                      "the animation does not wander the hue of the playing colour")
         # "slow" is a stated requirement: a 1-2s loop reads as a busy page, a 20s+ one as ambient
         m = re.search(r"animation:tintdrift\s+([\d.]+)s", css)
         self.assertIsNotNone(m, "the tint animation has no duration")
         self.assertGreaterEqual(float(m.group(1)), 8,
                                 f"the tint animation cycles every {m.group(1)}s "
                                 "- far too fast to feel ambient")
+        # smoothness: the keyframes move only `transform`, never `filter`/hue-rotate
+        # (a static hue tint is allowed on the base layer; an animated one is not)
+        kf = re.search(r"@keyframes tintdrift\{([\s\S]*?)\}\s*$", css)
+        self.assertIsNotNone(kf, "the tintdrift keyframes block is missing")
+        kf_body = kf.group(1)
+        self.assertIn("transform:", kf_body, "the drift does not move the backdrop")
+        self.assertNotIn("hue-rotate(", kf_body,
+                         "the keyframes animate filter/hue-rotate - that re-blurs "
+                         "the 72px backdrop every frame and causes lag")
+        self.assertNotIn("--gx", kf_body,
+                         "the keyframes animate custom gradient properties - that "
+                         "re-blurs the backdrop every frame and causes lag")
 
     def test_credits_carry_only_the_record_facts(self):
         # the transport bar already shows progress, length and cache state, so the
