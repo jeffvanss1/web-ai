@@ -1,10 +1,11 @@
-"""Tests for the Spotify-DJ announcer (the local, offline narrator).
+"""Tests for the Spotify-DJ announcer and its spoken voice.
 
-The old AI DJ chat (Gemini Live API over a WebSocket) is gone. This module now
-builds a short, always-on line from what the mixer actually did - the request,
-the vibe, a from-your-likes pick, the station seed and the planner's reason -
-with no model, no key and no network. These tests run it directly, so a dropped
-connection is impossible by construction.
+The announcer builds a line from what the mixer actually did (the request, the
+vibe, a from-your-likes pick, the station seed, the planner's reason) - no text
+chat. The *spoken* DJ optionally uses Gemini's speech generation (the Despina
+voice) when a key is set; without one it falls back to espeak or stays silent.
+These tests exercise the line, the prompt, the Gemini-voice decode and the
+no-audio no-op, all offline (the network calls are mocked).
 """
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from unittest import mock
 import tests  # noqa: F401  (sys.path bootstrap)
 
 import agent
+import brain
 import config
 
 
@@ -167,13 +169,75 @@ class SpeechTests(unittest.TestCase):
             dj.state = {"voice": True}
             self.assertFalse(djvoice.enabled(dj))
 
+    def test_voice_defaults_to_despina(self):
+        import djvoice
+        # the gemini voice name is Despina by default, overridable per shell
+        with mock.patch.object(config, "DJ_VOICE", "Despina"):
+            self.assertEqual(djvoice.voice_name(), "Despina")
+
+    def test_dj_prompt_names_the_song_why_vibe_and_next(self):
+        prompt = agent.dj_prompt(_dj())
+        for frag in ("Oneohtrix", "sad lofi", "Boards of Canada", "lofi tuesday night",
+                     "Reach for the Dead", "radio DJ"):
+            self.assertIn(frag, prompt)
+        self.assertIn("Reply with only the line", prompt)
+
+    def test_creative_line_uses_gemini_when_written_else_the_template(self):
+        import djvoice
+        dj = _dj()
+        # no key -> the offline template is used (no network, no crash)
+        with mock.patch.object(config, "LLM_API_KEY", ""):
+            self.assertEqual(djvoice._creative_line(dj, agent), agent.dj_speech(dj))
+        # a key + a model that answers -> the generated line wins
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(brain, "free_text",
+                                   return_value="Ooh, we're going to Boards of Canada."):
+                self.assertEqual(djvoice._creative_line(dj, agent),
+                                 "Ooh, we're going to Boards of Canada.")
+
+    def test_gemini_synth_writes_a_wav_from_pcm(self):
+        import djvoice
+        import base64, wave as wave_mod, tempfile
+        from pathlib import Path
+        pcm = b"\x00\x00\x01\x00" * 100          # 200 sample frames of silence-ish
+        fake = {"candidates": [{"content": {"parts": [{
+            "inlineData": {"data": base64.b64encode(pcm).decode(),
+                           "mimeType": "audio/L16;codec=pcm;rate=24000"}}]}}]}
+        out = Path(tempfile.mkstemp(suffix=".wav")[1])
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(brain, "_gemini_url", return_value="https://gemini"), \
+                 mock.patch.object(brain, "_post", return_value=fake), \
+                 mock.patch.object(brain, "_gemini_headers", return_value={"x-goog-api-key": "x"}):
+                self.assertTrue(djvoice._gemini_synth("hello", out))
+        with wave_mod.open(str(out), "rb") as wf:
+            self.assertEqual(wf.getframerate(), 24000)
+            self.assertEqual(wf.getsampwidth(), 2)
+            self.assertEqual(wf.getnchannels(), 1)
+        out.unlink(missing_ok=True)
+
     def test_speak_for_never_raises_without_audio(self):
-        # no engine/mpv in the sandbox: the trigger must be a silent no-op, not a crash
+        # no engine/mpv: the trigger must be a silent no-op, not a crash
         import djvoice
         dj = _dj()
         dj.state = {"voice": True}
-        djvoice.speak_for(dj)              # returns immediately, spawns nothing harmful
+        with mock.patch("djvoice.config") as cfg:
+            cfg.LLM_API_KEY = ""
+            cfg.DJ_VOICE = "Despina"
+            with mock.patch("djvoice._synth", return_value=None):
+                djvoice.speak_for(dj)      # returns immediately, spawns nothing harmful
 
     def test_voice_flag_is_json_safe(self):
         import json
         self.assertIsInstance(json.dumps({"voice": True}), str)
+
+    def test_voice_note_and_despina_ride_the_state(self):
+        # build_state exposes the voice flag and a human note about the engine
+        import web as web_mod
+        from tests.test_web import fake_dj
+        djf = fake_dj()
+        ctx = web_mod.Context(djf)
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            s = web_mod.build_state(ctx)
+        self.assertIn("voice", s)
+        self.assertIn("voice_note", s)
+        self.assertIn("Despina", s["voice_note"])

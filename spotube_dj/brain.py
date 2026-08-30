@@ -497,6 +497,29 @@ def _gemini_parts(data: dict) -> list[str]:
     return [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
 
 
+def free_text(prompt: str, max_chars: int = 600) -> str:
+    """One-shot Gemini text reply for an arbitrary prompt; '' on no key/failure.
+
+    Separate from `plan`, which is tuned for the query-plan job. The spoken DJ
+    uses this to have a model write a *creative* line from the current facts.
+    """
+    if not config.LLM_API_KEY:
+        return ""
+    for model in _model_candidates():
+        url = _gemini_url(model)
+        payload = {"contents": [{"parts": [{"text": prompt}]}],
+                   "generationConfig": {"temperature": 0.9,
+                                        "maxOutputTokens": 200}}
+        try:
+            data = _post(url, payload, _gemini_headers())
+        except Exception:
+            continue
+        text = " ".join(_gemini_parts(data)).strip()
+        if text:
+            return text[:max_chars]
+    return ""
+
+
 def _gemini(prompt: str) -> dict | None:
     """
     Ask Gemini for the query plan.

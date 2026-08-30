@@ -198,6 +198,8 @@ def settings_view() -> dict:
             "base": str(config.LLM_BASE_URL or data.get("LLM_BASE_URL") or ""),
             "model": str(data.get("LLM_MODEL") or config.LLM_MODEL
                          or config.GEMINI_DEFAULT_MODEL),
+            "dj_voice": str(config.DJ_VOICE or "Despina"),
+            "dj_model": str(config.GEMINI_DEFAULT_TTS_MODEL),
             "engine": brain.configured_engine(),
             "note": brain.why_offline()}
 
@@ -375,6 +377,8 @@ def build_state(ctx) -> dict:
         "auto": bool(st.get("auto")),
         "autoplay": bool((dj.state or {}).get("autoplay")),
         "voice": bool((dj.state or {}).get("voice", True)),
+        "voice_note": ("gemini · Despina" if config.LLM_API_KEY
+                       else "offline (no key)"),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
         "idle": idle,

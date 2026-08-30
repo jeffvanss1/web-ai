@@ -1,2 +1,1 @@
 yt-dlp>=2024.10.7   # the audio source; keep it updated, YouTube breaks old versions
-edge-tts>=6.1.10    # the spoken DJ (reads "why this song / what's next" aloud); optional - falls back to espeak offline or stays silent

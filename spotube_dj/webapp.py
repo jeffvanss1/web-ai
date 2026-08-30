@@ -562,6 +562,7 @@ margin-bottom:4px}
 background:var(--accent);box-shadow:0 0 8px var(--accent)}
 .djline .lh{display:flex;align-items:center;gap:8px;margin-bottom:4px}
 .djline .lh .djtag{margin-bottom:0}
+.djvnote{font-size:11px;color:var(--muted)}
 .djvoice{margin-left:auto;display:inline-flex;align-items:center;gap:5px;
 font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--edge);
 background:var(--card);color:var(--muted);cursor:pointer}
@@ -688,6 +689,7 @@ BODY = """
    <div class="djline" id="djline">
     <div class="lh">
      <span class="djtag">the DJ</span>
+     <span class="djvnote" id="djvnote">gemini · Despina</span>
      <button class="djvoice on" id="djvoice" data-action="voice"
       title="The DJ reads each song out loud">@@vol@@<span id="djvoicet">on</span></button>
     </div>
@@ -1582,11 +1584,11 @@ function drawSettings(s){
   $("unkeybtn").hidden = !st.key_set;
   $("engine2").textContent = st.key_set
     ? "Planning goes through " + (st.model || "the default model") + " at " +
-      (st.base || "generativelanguage.googleapis.com") + ". The key is only ever sent back as "
+      (st.base || "generativelanguage.googleapis.com") + ", and the DJ's voice is " +
+      (st.dj_voice || "Despina") + ". The key is only ever sent back as "
       + (st.key_mask || "a mask") + "."
-    : "No key saved, so a small offline parser plans the searches. Paste a Gemini key (or a " +
-      "local model URL) and the DJ writes its own query plan instead - it still never touches " +
-      "a Spotify API.";
+    : "No key saved, so a small offline parser plans the searches and the DJ voice stays " +
+      "quiet/robotic. Paste a Gemini key (or a local model URL) and the DJ speaks in a real voice.";
   $("setnote").textContent = st.note || "";
 }
 function drawRecents(s){
@@ -1690,6 +1692,9 @@ function drawDJ(s){
     const vt = $("djvoicet");
     if (vt) vt.textContent = on ? "on" : "off";
   }
+  // say which voice is behind the button (Gemini/Despina when a key is set)
+  const vn = $("djvnote");
+  if (vn) vn.textContent = (s && s.voice_note) || "";
 }
 
 /* ---------- search ---------- */

@@ -119,6 +119,39 @@ def dj_speech(dj) -> str:
     return " ".join(bits)
 
 
+def dj_prompt(dj) -> str:
+    """A personality prompt that asks a Gemini model to write a *creative* DJ line.
+
+    The spoken line is not a canned read: we hand the model the real facts (what
+    is playing, why, the set's name, what's next) and ask it to say them the way
+    a warm, playful radio DJ would - so every track gets its own turn of phrase.
+    `dj_speech` remains the keyless fallback when there is no key/network.
+    """
+    snap = snapshot_of(dj)
+    now = str(snap.get("now") or "nothing playing")
+    why = str(snap.get("why") or "").strip()
+    nxt = str(snap.get("next") or "").strip()
+    vibe = str(snap.get("vibe") or "").strip()
+    if not now or now.lower() == "nothing playing":
+        return ""
+    facts = f"the song now playing is {now}"
+    if why:
+        facts += f"; the reason it's on is {why}"
+    if vibe:
+        facts += f"; it's part of the {vibe} set"
+    if nxt:
+        facts += f"; up next is {nxt}"
+    return (
+        "You are a warm, smooth, a little playful radio DJ. Say ONE short, natural "
+        "spoken line to introduce the song that is starting. Speak like a real DJ "
+        "host, not a text readout - vary the phrasing, be friendly, and keep it to "
+        "one or two sentences (about 15 to 35 words). Use these facts but express "
+        "them in your own words, and don't mention that you are an AI. Facts: "
+        + facts + "."
+        " Reply with only the line to speak - no labels, no quotes, no preamble."
+    )
+
+
 def narrate(snap: dict) -> str:
     """A short, warm DJ line for the set: why now + what's next. Never raises."""
     now = str(snap.get("now") or "").strip()

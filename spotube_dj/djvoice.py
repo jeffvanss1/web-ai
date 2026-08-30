@@ -1,38 +1,36 @@
 """
-djvoice.py - the spoken DJ.
+djvoice.py - the spoken DJ, using Gemini's speech generation (the Despina voice).
 
 The on-screen announcer (agent.narrate) is visual. This module makes the same
-"why this song / what's next" line actually *speak* on each new track, so the DJ
-reads it aloud over the music like Spotify's DJ. No API key is needed:
+"why this song / what's next" line actually *speak* on each new track, over the
+music, like Spotify's DJ. It is not a plain robotic read:
 
-  1. **edge-tts** (Microsoft neural voices, online, free) gives the best voice.
-  2. **espeak / espeak-ng** (offline) is used as a fallback; it is robotic but
-     works with no account and no network.
-  3. If neither is available, or the player's audio can't be reached, it stays
-     silent - the vocal line is a nicety, never a crash.
+  1. **Gemini** writes the line and voices it. A Gemini model is asked (via the
+     speech-generation API, model `gemini-3.1-flash-tts-preview`) to say the
+     facts in a warm, playful DJ voice - so every track gets its own phrasing.
+     The voice is **Despina** (warm, smooth) by default, changeable by voice name.
+  2. **espeak / espeak-ng** is the offline fallback (robotic, but no key/network).
+  3. If there is no key and no espeak, it stays silent - the vocal line is a
+     nicety, never a crash.
 
-Speech is synthesized and played on a background thread so it never blocks the
-engine or the web server, and it degrades gracefully in a sandbox with no audio.
+Speech is generated and played on a single worker thread, so a fast skipper only
+hears the latest line and the engine/webserver are never blocked. It degrades
+gracefully in a sandbox with no network or audio.
 """
 
 from __future__ import annotations
 
-import asyncio
+import base64
 import os
 import subprocess
 import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 
 import bins
 import config
-
-# A confident, announcer-ish male voice by default; overridable per shell or in
-# the config, and a female alternative that also reads well.
-DEFAULT_VOICE = "en-US-ChristopherNeural"
-DEFAULT_VOICE_F = "en-US-AriaNeural"
-_cache = {"edge": None}          # import edge_tts once, keep talking to it
 
 
 def enabled(dj=None) -> bool:
@@ -54,23 +52,23 @@ def enabled(dj=None) -> bool:
 
 
 def voice_name() -> str:
-    """The configured TTS voice (edge-tts names)."""
-    raw = (os.environ.get("SPOTUBE_DJ_VOICE_NAME") or DEFAULT_VOICE).strip()
-    return raw or DEFAULT_VOICE
+    """The Gemini voice used for the DJ (Despina by default)."""
+    return (os.environ.get("SPOTUBE_DJ_TTS_VOICE") or config.DJ_VOICE or "Despina")
+
+
+def tts_model() -> str:
+    """The speech-generation model (a gemini-*-tts-preview)."""
+    return (os.environ.get("SPOTUBE_DJ_TTS_MODEL") or config.GEMINI_DEFAULT_TTS_MODEL
+            or "gemini-3.1-flash-tts-preview")
 
 
 def engines() -> list[str]:
-    """Which speech engine(s) this machine can actually use, in preference order."""
+    """Which engines this machine can possibly use, in preference order."""
     out = []
-    try:
-        import edge_tts  # noqa: F401
-        out.append("edge-tts")
-    except Exception:
-        pass
+    if config.LLM_API_KEY:
+        out.append("gemini")
     if bins.find("espeak-ng") or bins.find("espeak"):
         out.append("espeak")
-    if bins.find("mpv"):
-        out.append("mpv")
     return out
 
 
@@ -84,16 +82,15 @@ _worker = False
 def speak_for(dj) -> None:
     """Fire-and-forget: speak the DJ line for the current track of `dj`.
 
-    Returns immediately; the synthesis + playback happen on a single daemon
-    worker so a slow network voice never stalls the engine, and only the most
-    recent line is announced. Never raises.
+    Returns immediately; the line is written (creatively, by Gemini when a key is
+    set) and synthesized/played on a single daemon worker. Never raises.
     """
     global _pending
     if not enabled(dj):
         return
     try:
         import agent
-        text = agent.dj_speech(dj)
+        text = _creative_line(dj, agent)
     except Exception:
         return
     if not text:
@@ -106,8 +103,23 @@ def speak_for(dj) -> None:
             threading.Thread(target=_worker_loop, daemon=True).start()
 
 
+def _creative_line(dj, agent) -> str:
+    """A creative DJ line: ask Gemini to write it, fall back to the template."""
+    if config.LLM_API_KEY:
+        try:
+            import brain
+            prompt = agent.dj_prompt(dj)
+            if prompt:
+                line = brain.free_text(prompt, max_chars=400)
+                if line:
+                    return line
+        except Exception:
+            pass
+    return agent.dj_speech(dj)            # keyless, still reads naturally enough
+
+
 def _worker_loop() -> None:
-    """Serial synthesis+play: take the latest pending line, then stop when idle."""
+    """Serial line-write + synth + play: take the latest pending, stop when idle."""
     global _pending, _worker
     while True:
         with _cond:
@@ -117,8 +129,7 @@ def _worker_loop() -> None:
             with _cond:
                 _worker = False
                 return                    # idle; the next speak_for restarts me
-        # a little breathing room so two DJ lines don't overlap
-        time.sleep(0.15)
+        time.sleep(0.15)                  # breathing room so two lines don't overlap
         _say(text)
 
 
@@ -140,31 +151,65 @@ def _say(text: str) -> None:
 
 
 def _engine() -> str:
-    """Pick the engine: edge-tts if importable, else espeak, else none."""
-    try:
-        import edge_tts  # noqa: F401
-        _cache["edge"] = True
-        return "edge-tts"
-    except Exception:
-        _cache["edge"] = False
+    """Pick the engine: Gemini if a key is set, else espeak, else none."""
+    if config.LLM_API_KEY:
+        return "gemini"
     if bins.find("espeak-ng") or bins.find("espeak"):
         return "espeak"
     return ""
 
 
-def _edge_synth(text: str, path: Path) -> bool:
-    """Synthesize with edge-tts (needs network). Returns True on success."""
+def _gemini_synth(text: str, path: Path) -> bool:
+    """Ask Gemini's speech model to speak `text` with the configured voice.
+
+    The response is base64 PCM (signed 16-bit, mono, 24 kHz by default); we wrap
+    it as a WAV so mpv can play it. Returns True on success; a missing key, an
+    HTTP error or a bad payload is False (the caller falls back to espeak).
+    """
+    if not config.LLM_API_KEY:
+        return False
     try:
-        import edge_tts
+        import brain
+        url = brain._gemini_url(tts_model())
+        payload = {"contents": [{"parts": [{"text": text}]}],
+                   "generationConfig": {
+                       "responseModalities": ["AUDIO"],
+                       "speechConfig": {
+                           "voiceConfig": {
+                               "prebuiltVoiceConfig": {"voiceName": voice_name()}
+                           }
+                       },
+                   }}
+        data = brain._post(url, payload, brain._gemini_headers())
     except Exception:
         return False
     try:
-        voice = voice_name()
-        # edge_tts.Communicate is async; drive it on the current thread's loop.
-        asyncio.run(edge_tts.Communicate(text, voice=voice).save(str(path)))
+        part = (data["candidates"][0]["content"]["parts"][0])
+        inline = part.get("inlineData") or {}
+        b64 = inline.get("data")
+        if not b64:
+            return False
+        pcm = base64.b64decode(b64)
+        rate = 24000
+        mime = str(inline.get("mimeType") or "")
+        if "rate=" in mime:
+            try:
+                rate = int(mime.split("rate=")[1].split(";")[0])
+            except (ValueError, IndexError):
+                rate = 24000
+        _pcm_to_wav(pcm, rate, path)
         return path.exists() and path.stat().st_size > 0
     except Exception:
         return False
+
+
+def _pcm_to_wav(pcm: bytes, rate: int, path: Path) -> None:
+    """Wrap raw signed-16-bit mono PCM in a WAV container (mpv plays WAV natively)."""
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(max(8000, rate))
+        wf.writeframes(pcm)
 
 
 def _espeak_synth(text: str, path: Path) -> bool:
@@ -184,24 +229,19 @@ def _espeak_synth(text: str, path: Path) -> bool:
 def _synth(text: str) -> str | None:
     """Return a path to a spoken clip for `text`, or None if it could not be made."""
     engine = _engine()
-    if not engine:
-        return None
-    clip = Path(tempfile.mkstemp(suffix=".mp3" if engine == "edge-tts" else ".wav")[1])
-    ok = _edge_synth(text, clip) if engine == "edge-tts" else _espeak_synth(text, clip)
+    clip = Path(tempfile.mkstemp(suffix=".wav")[1])
+    ok = False
+    if engine == "gemini":
+        ok = _gemini_synth(text, clip)
+        if not ok and (bins.find("espeak-ng") or bins.find("espeak")):
+            ok = _espeak_synth(text, clip)      # offline fallback after a Gemini miss
+    elif engine == "espeak":
+        ok = _espeak_synth(text, clip)
     if not ok:
         try:
             clip.unlink(missing_ok=True)
         except OSError:
             pass
-        # if edge-tts failed (e.g. no network), try the offline engine as a fallback
-        if engine == "edge-tts":
-            clip = Path(tempfile.mkstemp(suffix=".wav")[1])
-            if _espeak_synth(text, clip):
-                return str(clip)
-            try:
-                clip.unlink(missing_ok=True)
-            except OSError:
-                pass
         return None
     return str(clip)
 
@@ -212,20 +252,8 @@ def _play(path: str) -> None:
     if not exe:
         return
     try:
-        # `--force-window=no --no-video --really-quiet`: a tiny audio-only process.
-        # Volume a touch below the music so the voice sits in front of it, and
-        # `--keep-open=no` lets it exit the moment the clip ends.
         subprocess.Popen([exe, "--really-quiet", "--no-video", "--force-window=no",
                           "--volume=90", "--", path],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
-
-
-# expose for tests / tools
-def _has_edge() -> bool:
-    try:
-        import edge_tts  # noqa: F401
-        return True
-    except Exception:
-        return False
