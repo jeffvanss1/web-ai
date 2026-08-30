@@ -2176,6 +2176,48 @@ class StationRefillTests(_TmpHome):
         nq.assert_called_once()
         self.assertEqual(picked[0]["artist"], "X")
 
+    def test_picking_a_song_replaces_the_upcoming_set(self):
+        # "what if i chose a song? the songs next to it build around it" - a plain
+        # pick clears what was queued ahead and puts the tight build there instead
+        d = self._dj()
+        d.queue.items = [dict(self._row(0)), dict(self._row(1)), dict(self._row(2)),
+                         dict(self._row(3))]
+        d.current = self._row(1)                 # the picked song is playing
+        d.queue.pos = 2                          # v2, v3 are the old upcoming
+        new_rows = [self._row(10, artist="Vibe"),
+                    self._row(11, artist="Vibe 2")]
+        def fake(request, **kw):
+            return (list(new_rows), {"engine": "", "why": "", "queries": [request],
+                                     "candidates": 2, "searched": 1,
+                                     "off_topic_filtered": 0, "llm_notes": [],
+                                     "llm_error": ""})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            r = d.radio_from(self._row(1), count=10, replace=True)
+        self.assertTrue(r["ok"], r)
+        ids = [t["id"] for t in d.queue.items]
+        self.assertNotIn("v2", ids, "the old upcoming set survived a pick")
+        self.assertNotIn("v3", ids)
+        self.assertIn("v10", ids)
+        self.assertIn("v11", ids)
+        self.assertEqual(d.station_seed["title"], "Song 1",
+                         "the picked song is the anchor")
+
+    def test_radio_from_without_replace_still_appends(self):
+        # the explicit station button keeps its "don't lose the album" contract
+        d = self._dj()
+        d.queue.items = [dict(self._row(0)), dict(self._row(1))]
+        d.current = self._row(0)
+        d.queue.pos = 1
+        new_rows = [self._row(20, artist="Vibe")]
+        with mock.patch.object(dj_mod, "build_queue", lambda *a, **k: (list(new_rows), {
+                "queries": ["q"], "engine": "", "why": "", "candidates": 1,
+                "searched": 1, "off_topic_filtered": 0, "llm_notes": [],
+                "llm_error": ""})):
+            d.radio_from(self._row(1), count=6, replace=False)
+        ids = [t["id"] for t in d.queue.items]
+        self.assertIn("v1", ids, "the station button must not drop the queued rows")
+        self.assertIn("v20", ids)
+
 
 class VibeSubstitutionTests(_TmpHome):
     """

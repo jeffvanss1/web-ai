@@ -819,7 +819,23 @@ def action_play_row(ctx, fields: dict) -> str:
     q.remove_id(tid)
     q.insert_at(q.pos, dict(t))
     ctx.dj.next(force=True)
-    return f"playing {t.get('title')}"
+    # "what if i chose a song? the songs next to it build around it" - a plain pick
+    # of a song now anchors the queue: the upcoming rows are replaced by a tight
+    # build around this exact song (radio/similar-to), not left as whatever mix the
+    # song happened to sit in. Build runs off the socket's thread, the picked song
+    # already plays.
+    label = f"{t.get('artist') or t.get('channel') or ''} - {t.get('title')}".strip(" -")
+    def job():
+        try:
+            ctx.dj.radio_from(dict(t), count=20, replace=True)
+        except Exception as e:
+            ctx.dj._note(f"[warn] building around '{t.get('title')}' failed: "
+                         f"{e.__class__.__name__}: {e}")
+    if not ctx.start_job(job):
+        # a build is already running; the picked song still plays, and the running
+        # one will be the set that follows
+        return f"playing {t.get('title')} (a mix is already building - it will follow)"
+    return f"playing {t.get('title')} - building {label or 'similar'} around it"
 
 
 def action_queue_next(ctx, fields: dict) -> str:

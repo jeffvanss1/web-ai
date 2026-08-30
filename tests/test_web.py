@@ -475,8 +475,14 @@ class ActionTests(unittest.TestCase):
 
     def test_play_row_jumps_the_queue_to_it_and_forces_the_move(self):
         target = self.dj.queue.items[3]
-        with mock.patch.object(self.dj, "next", return_value=None) as n:
+        # a pick anchors the queue around the song; stub the (off-socket) build so the
+        # queue-jump is what is asserted and no worker leaks past this test
+        with mock.patch.object(self.dj, "next", return_value=None) as n, \
+                mock.patch.object(self.dj, "radio_from",
+                                  return_value={"ok": True, "tracks": []}):
             code, payload = self.run_it("play_row", id=target["id"])
+            if self.ctx.job:
+                self.ctx.job.join(2)
         self.assertEqual(code, 200)
         self.assertIn("Track 3", payload["note"])
         self.assertEqual(self.dj.queue.items[self.dj.queue.pos]["id"], target["id"])
@@ -935,12 +941,30 @@ class QueueRowActionTests(unittest.TestCase):
         # "the queue UI bug when click": clicking the same queued row used to copy it
         # on top of itself, so it played twice in a row. remove_id first, then play.
         web.run_action(self.ctx, "play_row", {"id": [""]})  # no-op guard path
-        # play the row that is currently next (vid1 is at the cursor in fake_dj)
-        _code, payload = self.run_it("play_row", id="vid1")
-        self.assertEqual(payload["note"], "playing Track 1")
+        # a pick anchors the queue around the song (radio_from, off the socket), so
+        # stub that build; the duplicate fix is what this asserts
+        with mock.patch.object(self.dj, "radio_from",
+                               return_value={"ok": True, "tracks": []}):
+            _code, payload = self.run_it("play_row", id="vid1")
+            if self.ctx.job:
+                self.ctx.job.join(2)
+        self.assertIn("playing Track 1", payload["note"])
         self.assertEqual(
             [t["id"] for t in self.dj.queue.upcoming(10)].count("vid1"), 0,
             "the row that just played must not still be waiting in the queue")
+
+    def test_play_row_anchors_the_queue_on_the_picked_song(self):
+        # "what if i chose a song? the songs next to it build around it" - a pick
+        # hands the song to radio_from with replace=True (build the upcoming set
+        # around it) rather than leaving whatever mix the row happened to sit in
+        with mock.patch.object(self.dj, "radio_from") as rf:
+            _code, payload = self.run_it("play_row", id="vid1")
+            if self.ctx.job:
+                self.ctx.job.join(2)
+        rf.assert_called_once()
+        self.assertEqual(rf.call_args[0][0]["title"], "Track 1",
+                         "the picked song is the anchor, not a generic vibe")
+        self.assertTrue(rf.call_args[1]["replace"])
 
 
 class SearchTests(unittest.TestCase):

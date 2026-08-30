@@ -869,19 +869,21 @@ class DJ:
         self._start_if_idle(len(fresh))
         return {"ok": True, "tracks": fresh, "info": info}
 
-    def radio_from(self, track: dict | None, count: int = 20) -> dict:
+    def radio_from(self, track: dict | None, count: int = 20,
+                   replace: bool = False) -> dict:
         """
         "Start a station from this song", for both skins.
 
         One row of the queue becomes the seed: the planner is told the artist and
         title, `build_queue` adds the "<artist> top songs" searches that actually
         return that artist's music, and the taste ranking then pulls in the
-        neighbours. It lands in the queue rather than replacing it, so pressing it
-        mid-album cannot lose the rest of what you were about to hear.
+        neighbours.
 
-        It used to be duplicated in each skin, and both copies were broken in their
-        own way - the Tk one passed a keyword that did not exist, the web one built
-        a station nobody ever started.
+        By default it lands in the queue rather than replacing it, so pressing a
+        station mid-album cannot lose the rest of what you were about to hear. With
+        `replace=True` (a plain pick of a song) the tracks queued ahead of it are
+        dropped and the next ones come from this build - "if i chose a song, the
+        songs next to it build around it".
         """
         t = track or {}
         if not (t.get("title") or t.get("artist") or t.get("channel")):
@@ -912,6 +914,10 @@ class DJ:
                        "different row")
             return {"ok": False, "reason": "nothing similar found", "tracks": [],
                     "info": info}
+        if replace:
+            # the picked song is the anchor: what was queued after it is dropped so
+            # the next tracks are *this* build, not the mix it happened to sit in
+            self.queue.clear_ahead()
         self.queue.extend(_spread(fresh, cap=2))
         self._note(f"station ready: {len(fresh)} tracks around {label}")
         self._start_if_idle(len(fresh))
