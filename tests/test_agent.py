@@ -359,10 +359,12 @@ class SpeechTests(unittest.TestCase):
                                 self.assertEqual(wf.getsampwidth(), 2)
                                 self.assertEqual(wf.getnchannels(), 1)
                             out.unlink(missing_ok=True)
-        # first frame is the Live setup with the voice; second is the text input
+        # first frame is the Live setup with the voice; second is the text input.
+        # For gemini-3.1 the modality + voice sit at the top of the setup message.
         self.assertEqual(sent[0]["setup"]["model"], "models/gemini-3.1-flash-live-preview")
-        self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
-                         ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
+        self.assertEqual(sent[0]["setup"]["responseModalities"], ["AUDIO"])
+        self.assertEqual(sent[0]["setup"]["speechConfig"]["voiceConfig"]
+                         ["prebuiltVoiceConfig"]["voiceName"], "Despina")
         self.assertEqual(sent[1]["realtimeInput"]["text"], "hello")
 
     def test_live_synth_writes_a_container_as_is(self):

@@ -402,8 +402,12 @@ def _ws_read_frame(sock) -> tuple[int, bytes]:
     return opcode, payload
 
 
-def _ws_connect(url: str, key: str, timeout: float = 30.0) -> socket.socket:
-    """Open + handshake a wss:// connection; returns the wrapped socket."""
+def _ws_connect(url: str, timeout: float = 30.0) -> socket.socket:
+    """Open + handshake a wss:// connection; returns the wrapped socket.
+
+    The API key rides in the URL query (`?key=...`), exactly as the Live API
+    get-started example does; the WebSocket upgrade does not take a key header.
+    """
     u = urllib.parse.urlparse(url)
     host, port = u.hostname, (u.port or (443 if u.scheme == "wss" else 80))
     path = (u.path or "/") + (("?" + u.query) if u.query else "")
@@ -417,8 +421,7 @@ def _ws_connect(url: str, key: str, timeout: float = 30.0) -> socket.socket:
            f"Upgrade: websocket\r\n"
            f"Connection: Upgrade\r\n"
            f"Sec-WebSocket-Key: {nonce}\r\n"
-           f"Sec-WebSocket-Version: 13\r\n"
-           f"x-goog-api-key: {key}\r\n\r\n")
+           f"Sec-WebSocket-Version: 13\r\n\r\n")
     sock.sendall(req.encode())
     head = b""
     while b"\r\n\r\n" not in head:
@@ -507,14 +510,18 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
         return False
     sock = None
     try:
-        sock = _ws_connect(_live_url(), config.LLM_API_KEY)
+        sock = _ws_connect(_live_url())
         _info(f"gemini (live): connected, model={model}, voice={voice_name()}")
-        _ws_send_frame(sock, 1, json.dumps({
-            "setup": {"model": "models/" + model,
-                      "generationConfig": {
-                          "responseModalities": ["AUDIO"],
-                          "speechConfig": {"voiceConfig": {
-                              "prebuiltVoiceConfig": {"voiceName": voice_name()}}}}}}).encode())
+        # For the Gemini 3.1 Live native-audio model the modality and voice config
+        # sit on the setup message itself (not inside generationConfig); the Google
+        # get-started-websocket example for this model is the authority here.
+        setup = {"setup": {
+            "model": "models/" + model,
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {"voiceConfig": {
+                "prebuiltVoiceConfig": {"voiceName": voice_name()}}},
+        }}
+        _ws_send_frame(sock, 1, json.dumps(setup).encode())
         # wait for the handshake to settle before sending content
         while True:
             opcode, data = _ws_read_frame(sock)
