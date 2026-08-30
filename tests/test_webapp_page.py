@@ -155,6 +155,17 @@ class PageShapeTests(unittest.TestCase):
             self.assertIn("</svg>", svg, name)
             self.assertNotIn("@@", svg, name)
 
+    def test_the_ai_dj_chat_panel_is_present_and_posts_text(self):
+        body = self.html.split("<body>", 1)[1]
+        for ident in ("chat-open", "chat", "chat-log", "chat-in", "chat-send", "chat-sub"):
+            self.assertIn(f'id="{ident}"', body, f"the chat is missing {ident}")
+        # messages land as text, never as HTML from the server (the DJ reply could
+        # contain markup-shaped text)
+        self.assertIn('"msg " + cls', self.js)
+        self.assertNotIn("chat-log\").innerHTML", self.js)
+        # the send path is the /api/chat round-trip
+        self.assertIn("post(\"/api/chat\", {q})", self.js)
+
     def test_every_icon_the_markup_asks_for_exists(self):
         # `svg("play")`, ICONS.play, ICONS["play"], the icon a menu item asks for,
         # and every `@@token@@` in the markup. The helper's own definition

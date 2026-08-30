@@ -43,6 +43,8 @@ ICONS = {
                    '1.6-1.3l1-3.4h4.3a2.1 2.1 0 0 0 2-2.7L15.3 5.6A2 2 0 0 0 13.4 4H6.5z'
                    'M5 6h1.6L9 12.7 8 16l-1.2-.9 1.1-4.1H5V6zm11 9.5v-1.7h1.5V6h1.6v7.8z" '
                    'fill="none" stroke="currentColor" stroke-width="1.6"/></svg>'),
+    "chat": ('<svg viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-4 4v-4H4a2 2 0 0 '
+             '1-2-2V6a2 2 0 0 1 2-2m0 2v9h3v2.5L9.5 15H20V6z"/></svg>'),
     "queue": ('<svg viewBox="0 0 24 24"><path d="M4 6h11v2H4zM4 11h11v2H4zM4 16h7v2H4zM18 '
               '10v6.2a2.6 2.6 0 1 1-1.6-2.4V10z"/></svg>'),
     "shuffle": ('<svg viewBox="0 0 24 24"><path d="M3 6h4.5l9 12H21v-2h-3l-2.6-3.5 1.5-2H21V8'
@@ -547,6 +549,28 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
 .row .ar{display:none}.right .vol input{width:60px} .app.wide .detail{width:min(400px,100%)}}
 @media (max-width:760px){.center{gap:2px}.player{grid-template-columns:1fr auto}
 .right .iconbtn:nth-child(-n+2){display:none}.quick{grid-template-columns:1fr}}
+/* the AI DJ chat: a glass drawer that slides over the app from the left, so it
+   never competes with the three-panel grid for column width. */
+.chat{position:fixed;top:12px;left:12px;bottom:80px;width:380px;max-width:92vw;
+z-index:40;display:flex;flex-direction:column;gap:10px;background:rgba(18,18,18,.94);
+border:1px solid var(--edge);border-radius:16px;padding:14px;
+box-shadow:0 20px 70px rgba(0,0,0,.6);backdrop-filter:blur(10px)}
+.chat[hidden]{display:none}
+.chat-head{display:flex;align-items:center;gap:8px}
+.chat-head b{font-size:15px}
+.chat-head .sub{flex:1;color:var(--muted);font-size:12px;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.chat-log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:4px 2px}
+.chat-log .msg{max-width:86%;white-space:pre-wrap;line-height:1.35;font-size:13px;
+padding:8px 10px;border-radius:12px}
+.chat-log .msg.user{align-self:flex-end;background:var(--accent);color:#000}
+.chat-log .msg.dj{align-self:flex-start;background:var(--card);border:1px solid var(--edge)}
+.chat-log .msg.err{color:var(--error);border:1px solid var(--error);background:transparent}
+.chat-log .typing{color:var(--muted);font-size:12px;align-self:flex-start}
+.chat-in{display:flex;gap:8px}
+.chat-in input{flex:1;min-width:0;background:var(--input);border:1px solid var(--edge);
+color:var(--text);border-radius:10px;padding:9px 10px;font-size:13px}
+.chat-in button{flex-shrink:0}
 """
 
 BODY = """
@@ -579,6 +603,7 @@ BODY = """
      autocomplete="off" spellcheck="false"></label>
    <div class="topright">
     <span class="pill" id="jobpill" hidden>building</span>
+    <button class="pill" id="chat-open" title="Talk to the AI DJ">@@chat@@<span>Talk</span></button>
     <button class="pill" id="engine" data-view="library" title="How this mix is planned">brain</button>
     <button class="avatar" id="open-settings" title="DJ settings">DJ</button>
    </div>
@@ -625,6 +650,8 @@ BODY = """
       autocomplete="off" spellcheck="false"></label>
      <label class="setrow"><span>Model</span><input id="in-model" type="text"
       placeholder="gemini-3.5-flash" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>DJ chat model</span><input id="in-live" type="text"
+      placeholder="gemini-3.1-flash-live-preview" autocomplete="off" spellcheck="false"></label>
      <div class="acts">
       <button class="btn prim" id="savebtn">@@check@@<span>Save</span></button>
       <button class="btn ghost" data-action="test_brain">@@sparkle@@<span>Test the planner</span></button>
@@ -725,6 +752,19 @@ BODY = """
  </div>
 </footer>
 <div class="toast" id="toast"></div>
+<div class="chat" id="chat" hidden>
+ <div class="chat-head">
+  <b>AI DJ</b>
+  <span class="sub" id="chat-sub">offline</span>
+  <button class="iconbtn" id="chat-close" title="Hide the DJ">@@close@@</button>
+ </div>
+ <div class="chat-log" id="chat-log"></div>
+ <form class="chat-in" id="chat-form">
+  <input id="chat-in" placeholder="Ask the DJ, or 'play some sad lofi'"
+   autocomplete="off" spellcheck="false" maxlength="400">
+  <button class="btn prim" id="chat-send" type="submit">@@sparkle@@<span>Send</span></button>
+ </form>
+</div>
 """
 
 JS = r"""
@@ -1551,11 +1591,13 @@ function drawSettings(s){
   const fillIn = (node, v) => { if (node && document.activeElement !== node) node.value = v; };
   fillIn($("in-base"), st.base || "");
   fillIn($("in-model"), st.model || "");
-  $("unkeybtn").hidden = !st.has_key;
-  $("engine2").textContent = st.has_key
+  fillIn($("in-live"), st.live_model || "");
+  $("unkeybtn").hidden = !st.key_set;
+  $("engine2").textContent = st.key_set
     ? "Planning goes through " + (st.model || "the default model") + " at " +
-      (st.base || "generativelanguage.googleapis.com") + ". The key is only ever sent back as "
-      + (st.key_hint || "a mask") + "."
+      (st.base || "generativelanguage.googleapis.com") + "; the DJ chat uses "
+      + (st.live_model || "a live model") + ". The key is only ever sent back as "
+      + (st.key_mask || "a mask") + "."
     : "No key saved, so a small offline parser plans the searches. Paste a Gemini key (or a " +
       "local model URL) and the DJ writes its own query plan instead - it still never touches " +
       "a Spotify API.";
@@ -1635,6 +1677,7 @@ function draw(s){
   region("drawRecents", () => drawRecents(s));
   region("drawLog", () => drawLog(s));
   region("drawEmptyActs", () => drawEmptyActs(s));
+  region("drawChat", () => drawChat(s));
   region("upnext-visibility", () => {
     // the queue is its own right-side panel now; the sidebar chips only filter what
     // the queue *holds* (drawUpNext), so it is never hidden by them
@@ -1642,6 +1685,57 @@ function draw(s){
   });
   if (S.broken) { S.broken = ""; const p = $("jobpill"); if (p) p.classList.remove("warn"); }
 }
+
+/* ---------- the AI DJ chat ---------- */
+const _chat = {busy:false, opened:false, seeded:false};
+function chatBubble(cls, text){
+  const l = $("chat-log"), m = el("div", "msg " + cls, text);
+  l.appendChild(m); l.scrollTop = l.scrollHeight; return m;
+}
+function chatHint(text){
+  const l = $("chat-log"), m = el("div", "hint", text);
+  l.appendChild(m); l.scrollTop = l.scrollHeight; return m;
+}
+function chatToggle(open){
+  _chat.opened = open === undefined ? !_chat.opened : open;
+  $("chat").hidden = !_chat.opened;
+  if (_chat.opened) $("chat-in").focus();
+}
+async function chatSend(ev){
+  if (ev) ev.preventDefault();
+  const inp = $("chat-in"), q = inp.value.trim();
+  if (!q || _chat.busy) return;
+  inp.value = ""; _chat.busy = true;
+  const send = $("chat-send"); if (send) send.disabled = true;
+  chatBubble("user", q);
+  const t = chatBubble("typing", "the DJ is thinking…");
+  try {
+    const j = await post("/api/chat", {q});
+    t.remove();
+    chatBubble("dj", j.reply || "…");
+    if (j.state) draw(j.state);
+  } catch (e) {
+    t.remove();
+    chatBubble("err", (e && e.message) ? e.message : "the DJ did not reply");
+  } finally {
+    _chat.busy = false;
+    const snd = $("chat-send"); if (snd) snd.disabled = false;
+  }
+}
+function drawChat(s){
+  const sub = $("chat-sub"), btn = $("chat-open");
+  const dj = (s && s.dj) || {};
+  if (dj.key_set && dj.model) { sub.textContent = "· " + dj.model; if (btn) btn.classList.remove("warn"); }
+  else if (dj.key_set) { sub.textContent = "ready"; if (btn) btn.classList.remove("warn"); }
+  else { sub.textContent = "set a Gemini key in Settings"; if (btn) btn.classList.add("warn"); }
+}
+$("chat-open").addEventListener("click", () => {
+  chatToggle(true);
+  if (!_chat.seeded) { _chat.seeded = true;
+    chatHint("I'm your DJ. Ask for a song or a mood, or tell me to skip, like, pause…"); }
+});
+$("chat-close").addEventListener("click", () => chatToggle(false));
+$("chat-form").addEventListener("submit", chatSend);
 
 /* ---------- search ---------- */
 async function runSearch(){
@@ -1724,7 +1818,8 @@ $("unkeybtn").addEventListener("click", async () => {
   catch (e) { toast(e.message); }
 });
 $("savebtn").addEventListener("click", async () => {
-  const f = {base: $("in-base").value.trim(), model: $("in-model").value.trim()};
+  const f = {base: $("in-base").value.trim(), model: $("in-model").value.trim(),
+             live: $("in-live").value.trim()};
   const k = $("in-key").value.trim();
   if (k) f.key = k;
   try {

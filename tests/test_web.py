@@ -113,7 +113,7 @@ class BuildStateTests(unittest.TestCase):
         for key in ("now", "up_next", "queued", "position", "duration", "paused",
                     "auto", "volume", "backend", "idle", "idle_note", "why", "request",
                     "queries", "engine_note", "cache_note", "foot", "log", "search",
-                    "loved", "vibe"):
+                    "loved", "vibe", "dj"):
             self.assertIn(key, s, key)
 
     def test_json_encodes_it(self):
@@ -710,12 +710,16 @@ class ActionTests(unittest.TestCase):
         self.assertTrue(web.mask("AIzaSyS3cr3tKey123").startswith("AIz"))
         self.assertEqual(web.mask("short"), "·····")
         self.assertNotIn("S3cr3tKey", json.dumps({"m": web.mask("AIzaSyS3cr3tKey123")}))
+        # the DJ chat lives model is reported so the page can say which one is on
+        self.assertIn("live_model", view)
 
         with mock.patch("web.config.save_llm_config") as save:
             code, payload = web.save_settings({"model": ["gemini-3.6-flash"],
+                                               "live": ["gemini-live-test"],
                                                "key": ["  spaced  "]})
         self.assertEqual(code, 200)
         self.assertEqual(save.call_args.kwargs["LLM_MODEL"], "gemini-3.6-flash")
+        self.assertEqual(save.call_args.kwargs["LIVE_MODEL"], "gemini-live-test")
         self.assertEqual(save.call_args.kwargs["LLM_API_KEY"], "spaced", "trimmed")
         self.assertNotIn("spaced", json.dumps(payload))
         self.assertEqual(payload["note"], "saved")
@@ -926,6 +930,45 @@ class ActionTests(unittest.TestCase):
                      "seek", "auto"):
             self.assertIn(f'"{verb}":', text, verb)
             self.assertIn(verb, web.ACTIONS, verb)
+
+
+class ChatEndpointTests(unittest.TestCase):
+    """POST /api/chat: one message in, one DJ reply out, tools already applied."""
+
+    def setUp(self):
+        self.ctx = web.Context(fake_dj(), volume=42)
+
+    def test_an_empty_message_is_400(self):
+        code, payload = web.chat_endpoint(self.ctx, {"q": ["   "]})
+        self.assertEqual(code, 400)
+        self.assertIn("type something", payload["error"])
+
+    def test_no_key_is_503_with_a_hint(self):
+        with mock.patch.object(web.agent_mod, "api_key", return_value=""):
+            code, payload = web.chat_endpoint(self.ctx, {"q": ["hi"]})
+        self.assertEqual(code, 503)
+        self.assertIn("key", payload["error"].lower())
+
+    def test_the_reply_rides_back_and_state_is_attached(self):
+        class FakeAgent:
+            def chat(self, text):
+                return "Here's a sad lofi mix for you."
+
+        with mock.patch.object(web, "get_agent", return_value=FakeAgent()):
+            code, payload = web.chat_endpoint(self.ctx, {"q": ["sad lofi"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["reply"], "Here's a sad lofi mix for you.")
+        self.assertIn("dj", payload)   # the skin uses this to say which model is on
+
+    def test_a_turn_failure_is_500_not_a_crash(self):
+        class BadAgent:
+            def chat(self, text):
+                raise RuntimeError("the socket fell over")
+
+        with mock.patch.object(web, "get_agent", return_value=BadAgent()):
+            code, payload = web.chat_endpoint(self.ctx, {"q": ["hi"]})
+        self.assertEqual(code, 500)
+        self.assertIn("socket fell over", payload["error"])
 
 
 class QueueRowActionTests(unittest.TestCase):

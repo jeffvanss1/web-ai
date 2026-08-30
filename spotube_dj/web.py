@@ -36,6 +36,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import agent as agent_mod
 import config
 import covers
 import player as player_mod
@@ -197,6 +198,8 @@ def settings_view() -> dict:
             "base": str(config.LLM_BASE_URL or data.get("LLM_BASE_URL") or ""),
             "model": str(data.get("LLM_MODEL") or config.LLM_MODEL
                          or config.GEMINI_DEFAULT_MODEL),
+            "live_model": str(data.get("LIVE_MODEL") or config.LIVE_MODEL
+                              or config.GEMINI_DEFAULT_LIVE_MODEL),
             "engine": brain.configured_engine(),
             "note": brain.why_offline()}
 
@@ -230,6 +233,42 @@ def engine_pill(info: dict) -> str:
         if head:
             return head[:34]
     return note[:34]
+
+
+def get_agent(ctx) -> "agent_mod.DJAgent":
+    """One AI-DJ agent per server process, created on first chat and cached."""
+    a = getattr(ctx, "agent", None)
+    if a is None:
+        a = ctx.agent = agent_mod.DJAgent(ctx)
+    return a
+
+
+def dj_chat_status() -> dict:
+    """For the skin: is the DJ chat usable, and on which model."""
+    key = agent_mod.api_key()
+    return {"key_set": bool(key),
+            "model": agent_mod.live_model(),
+            "can_chat": bool(key)}
+
+
+def chat_endpoint(ctx, fields: dict) -> tuple[int, dict]:
+    """
+    POST /api/chat. One message in, one reply out (the Live API is a round-trip).
+
+    The reply is the assistant's text. Whatever tools it called already ran
+    against the live DJ, so the next /api/state poll shows the result. A missing
+    key or missing websockets package is a 503 the skin can render as a hint.
+    """
+    text = str((fields.get("q") or [""])[0]).strip()
+    if not text:
+        return 400, {"error": "type something to the DJ"}
+    try:
+        reply = get_agent(ctx).chat(text)
+    except agent_mod.LiveUnavailable as exc:
+        return 503, {"error": str(exc)}
+    except Exception as exc:                     # a turn failing is not a server crash
+        return 500, {"error": f"the DJ could not reply: {exc.__class__.__name__}: {exc}"}
+    return 200, {"reply": reply, "dj": dj_chat_status()}
 
 
 def find_track(ctx, tid: str) -> dict | None:
@@ -371,6 +410,7 @@ def build_state(ctx) -> dict:
         "idle_note": why,
         "why": why,
         "vibe": str((dj.info or {}).get("vibe") or ""),   # "lofi tuesday night"
+        "dj": dj_chat_status(),                            # can the AI DJ talk?
         "request": str(st.get("request") or ""),
         "queries": list(st.get("queries") or []),
         "engine_note": engine_note(dj.info),
@@ -1292,6 +1332,8 @@ def save_settings(fields: dict) -> tuple[int, dict]:
         vals["LLM_BASE_URL"] = one("base")
     if "model" in fields:
         vals["LLM_MODEL"] = one("model")
+    if "live" in fields:
+        vals["LIVE_MODEL"] = one("live")
     if one("clear_key") == "1":
         vals["LLM_API_KEY"] = ""
     elif one("key"):
@@ -1496,7 +1538,7 @@ HTML_HEADERS = {
 
 
 ROUTES = ("/", "/api/state", "/api/stream", "/api/action", "/api/search",
-          "/api/settings", "/art/<file>")
+          "/api/settings", "/api/chat", "/art/<file>")
 
 
 def not_found_payload() -> dict:
@@ -1666,6 +1708,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(code, payload)
         elif path == "/api/settings":
             code, payload = save_settings(fields)      # fields, not _fields(): see below
+            self._json(code, payload)
+        elif path == "/api/chat":
+            code, payload = chat_endpoint(self.ctx, fields)
+            if code == 200:
+                payload["state"] = with_art(build_state(self.ctx), self.ctx)
             self._json(code, payload)
         else:
             self._json(HTTPStatus.NOT_FOUND, not_found_payload())

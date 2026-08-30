@@ -426,6 +426,28 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
 .row .ar{display:none}.right .vol input{width:60px} .app.wide .detail{width:min(400px,100%)}}
 @media (max-width:760px){.center{gap:2px}.player{grid-template-columns:1fr auto}
 .right .iconbtn:nth-child(-n+2){display:none}.quick{grid-template-columns:1fr}}
+/* the AI DJ chat: a glass drawer that slides over the app from the left, so it
+   never competes with the three-panel grid for column width. */
+.chat{position:fixed;top:12px;left:12px;bottom:80px;width:380px;max-width:92vw;
+z-index:40;display:flex;flex-direction:column;gap:10px;background:rgba(18,18,18,.94);
+border:1px solid var(--edge);border-radius:16px;padding:14px;
+box-shadow:0 20px 70px rgba(0,0,0,.6);backdrop-filter:blur(10px)}
+.chat[hidden]{display:none}
+.chat-head{display:flex;align-items:center;gap:8px}
+.chat-head b{font-size:15px}
+.chat-head .sub{flex:1;color:var(--muted);font-size:12px;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.chat-log{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:4px 2px}
+.chat-log .msg{max-width:86%;white-space:pre-wrap;line-height:1.35;font-size:13px;
+padding:8px 10px;border-radius:12px}
+.chat-log .msg.user{align-self:flex-end;background:var(--accent);color:#000}
+.chat-log .msg.dj{align-self:flex-start;background:var(--card);border:1px solid var(--edge)}
+.chat-log .msg.err{color:var(--error);border:1px solid var(--error);background:transparent}
+.chat-log .typing{color:var(--muted);font-size:12px;align-self:flex-start}
+.chat-in{display:flex;gap:8px}
+.chat-in input{flex:1;min-width:0;background:var(--input);border:1px solid var(--edge);
+color:var(--text);border-radius:10px;padding:9px 10px;font-size:13px}
+.chat-in button{flex-shrink:0}
 </style></head><body>
 <div class="app" id="app">
  <aside class="side panel">
@@ -456,6 +478,7 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
      autocomplete="off" spellcheck="false"></label>
    <div class="topright">
     <span class="pill" id="jobpill" hidden>building</span>
+    <button class="pill" id="chat-open" title="Talk to the AI DJ"><svg viewBox="0 0 24 24"><path d="M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-4 4v-4H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v9h3v2.5L9.5 15H20V6z"/></svg><span>Talk</span></button>
     <button class="pill" id="engine" data-view="library" title="How this mix is planned">brain</button>
     <button class="avatar" id="open-settings" title="DJ settings">DJ</button>
    </div>
@@ -502,6 +525,8 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
       autocomplete="off" spellcheck="false"></label>
      <label class="setrow"><span>Model</span><input id="in-model" type="text"
       placeholder="gemini-3.5-flash" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>DJ chat model</span><input id="in-live" type="text"
+      placeholder="gemini-3.1-flash-live-preview" autocomplete="off" spellcheck="false"></label>
      <div class="acts">
       <button class="btn prim" id="savebtn"><svg viewBox="0 0 24 24"><path d="M9.6 16.2 5.4 12 4 13.4l5.6 5.6 12-12L20.2 6z"/></svg><span>Save</span></button>
       <button class="btn ghost" data-action="test_brain"><svg viewBox="0 0 24 24"><path d="M11 2.6 12.7 7 17 8.7 12.7 10.4 11 14.8 9.3 10.4 5 8.7 9.3 7zM18 14l1.1 2.9 2.9 1.1-2.9 1.1L18 22l-1.1-2.9-2.9-1.1 2.9-1.1z"/></svg><span>Test the planner</span></button>
@@ -602,7 +627,20 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
  </div>
 </footer>
 <div class="toast" id="toast"></div>
-<script>const ICONS={"prev": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 5h2v14H7zM19 5v14L9.5 12z\"/></svg>", "next": "<svg viewBox=\"0 0 24 24\"><path d=\"M15 5h2v14h-2zM5 5v14l9.5-7z\"/></svg>", "play": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 4.5v15L20 12z\"/></svg>", "pause": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 5h3.4v14H7zM13.6 5H17v14h-3.4z\"/></svg>", "stop": "<svg viewBox=\"0 0 24 24\"><rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/></svg>", "heart": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 20.6 3.4 12.4A5 5 0 0 1 12 6.2a5 5 0 0 1 8.6 6.2z\"/></svg>", "library": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h2.6v16H4zM8.4 4H11v16H8.4zM13.2 4.3l2.5.7-3.4 15.6-2.5-.7z\"/></svg>", "heart_o": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 18.9 5 12.2a3.6 3.6 0 0 1 5.1-5.1l1.9 1.8 1.9-1.8A3.6 3.6 0 0 1 19 12.2z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg>", "thumb_down": "<svg viewBox=\"0 0 24 24\"><path d=\"M6.5 4H5a2 2 0 0 0-1.4.6A2 2 0 0 0 3 6v5a2 2 0 0 0 2 2h2.3l-1 3.9A1.7 1.7 0 0 0 8 18.7a1.7 1.7 0 0 0 1.6-1.3l1-3.4h4.3a2.1 2.1 0 0 0 2-2.7L15.3 5.6A2 2 0 0 0 13.4 4H6.5zM5 6h1.6L9 12.7 8 16l-1.2-.9 1.1-4.1H5V6zm11 9.5v-1.7h1.5V6h1.6v7.8z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"/></svg>", "queue": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h11v2H4zM4 11h11v2H4zM4 16h7v2H4zM18 10v6.2a2.6 2.6 0 1 1-1.6-2.4V10z\"/></svg>", "shuffle": "<svg viewBox=\"0 0 24 24\"><path d=\"M3 6h4.5l9 12H21v-2h-3l-2.6-3.5 1.5-2H21V8h-4.5l-1.4 1.9L6.9 6H3zM3 16h3.9l1.5-2 2.6 3.5L6.9 18H3zM17 4l3 3-3 3z\"/></svg>", "repeat": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 6.5h9V4l4 3.8-4 3.8V9.3H6v-2h1V6.5zM17 17.5H8v2.5l-4-3.8 4-3.8v2.3h10v2zM6 14.7h1v2H6z\"/></svg>", "repeat_one": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 6.5h9V4l4 3.8-4 3.8V9.3H6v-2h1V6.5zM17 17.5H8v2.5l-4-3.8 4-3.8v2.3h10v2zM11.6 12.4h1.3v5.2h-1.1l-1.3-.8v-1h1.1z\"/></svg>", "search": "<svg viewBox=\"0 0 24 24\"><path d=\"M10.5 3a7.5 7.5 0 1 0 4.6 13.5l4.3 4.3 1.4-1.4-4.3-4.3A7.5 7.5 0 0 0 10.5 3m0 2a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11\" fill=\"currentColor\" stroke=\"none\"/></svg>", "open": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3v2h5.6L10 12.6 11.4 14 19 6.4V12h2V3zM5 5v14h14v-4h-2v2H7V7h2V5z\"/></svg>", "mix": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 5h2v14H4zM18 5h2v14h-2zM9.5 7l5 5-5 5z\"/></svg>", "vol": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 9v6h4l5 4V5L8 9zM16 8.5a4 4 0 0 1 0 7v-2a2 2 0 0 0 0-3zM18.5 6a7 7 0 0 1 0 12v-2.1a4.9 4.9 0 0 0 0-7.8z\"/></svg>", "vol_mute": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 9v6h4l5 4V5L8 9zM15.4 9.6 16.8 8l5 5-1.4 1.4zM20.4 8 21.8 9.4l-5 5-1.4-1.4z\"/></svg>", "dot": "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"5\"/></svg>", "home": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3.1 2.8 11l1.3 1.5L5 11.8V21h5v-6h4v6h5v-9.2l.9.7 1.3-1.5z\"/></svg>", "plus": "<svg viewBox=\"0 0 24 24\"><path d=\"M11 4.5h2V11h6.5v2H13v6.5h-2V13H4.5v-2H11z\"/></svg>", "chev_l": "<svg viewBox=\"0 0 24 24\"><path d=\"M15.4 4.6 7.9 12l7.5 7.4 1.5-1.5L10.8 12l6.1-5.9z\"/></svg>", "chev_r": "<svg viewBox=\"0 0 24 24\"><path d=\"M8.6 4.6 16.1 12l-7.5 7.4-1.5-1.5 6.1-5.9-6.1-5.9z\"/></svg>", "close": "<svg viewBox=\"0 0 24 24\"><path d=\"M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z\"/></svg>", "expand": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h6.5v2H6v4.5H4zM20 4v6.5h-2V6h-4.5V4zM4 13.5h2V18h4.5v2H4zM20 13.5V20h-6.5v-2H18v-4.5z\"/></svg>", "clock": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 2a7 7 0 1 1 0 14 7 7 0 0 1 0-14M11 7v5.6l4.2 2.4 1-1.7-3.2-1.8V7z\"/></svg>", "dots": "<svg viewBox=\"0 0 24 24\"><circle cx=\"5.5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"18.5\" cy=\"12\" r=\"1.6\"/></svg>", "sparkle": "<svg viewBox=\"0 0 24 24\"><path d=\"M11 2.6 12.7 7 17 8.7 12.7 10.4 11 14.8 9.3 10.4 5 8.7 9.3 7zM18 14l1.1 2.9 2.9 1.1-2.9 1.1L18 22l-1.1-2.9-2.9-1.1 2.9-1.1z\"/></svg>", "lyrics": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3m-6 8a6 6 0 0 0 5 5.9V20H8v2h8v-2h-3v-3.1A6 6 0 0 0 18 11h-2a4 4 0 0 1-8 0z\"/></svg>", "devices": "<svg viewBox=\"0 0 24 24\"><path d=\"M3 5h12v8H3zm2 2v4h8V7zm10 2h6v9h-6zm2 1.6v5.8h2.8V8.6z\"/></svg>", "sort": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h16v2H4zm0 5h11v2H4zm0 5h7v2H4z\"/></svg>", "check": "<svg viewBox=\"0 0 24 24\"><path d=\"M9.6 16.2 5.4 12 4 13.4l5.6 5.6 12-12L20.2 6z\"/></svg>", "verified": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 2.2l2.3 1.9 3-.1.8 2.9 2.4 1.8-1.1 2.8 1.1 2.8-2.4 1.8-.8 2.9-3-.1L12 21.8l-2.3-1.9-3 .1-.8-2.9L3.5 15.3l1.1-2.8-1.1-2.8 2.4-1.8.8-2.9 3 .1z\"/><path d=\"M10.8 15.4 7.6 12.2 9 10.8l1.8 1.8 4.2-4.2 1.4 1.4z\" fill=\"#121212\"/></svg>"};
+<div class="chat" id="chat" hidden>
+ <div class="chat-head">
+  <b>AI DJ</b>
+  <span class="sub" id="chat-sub">offline</span>
+  <button class="iconbtn" id="chat-close" title="Hide the DJ"><svg viewBox="0 0 24 24"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg></button>
+ </div>
+ <div class="chat-log" id="chat-log"></div>
+ <form class="chat-in" id="chat-form">
+  <input id="chat-in" placeholder="Ask the DJ, or 'play some sad lofi'"
+   autocomplete="off" spellcheck="false" maxlength="400">
+  <button class="btn prim" id="chat-send" type="submit"><svg viewBox="0 0 24 24"><path d="M11 2.6 12.7 7 17 8.7 12.7 10.4 11 14.8 9.3 10.4 5 8.7 9.3 7zM18 14l1.1 2.9 2.9 1.1-2.9 1.1L18 22l-1.1-2.9-2.9-1.1 2.9-1.1z"/></svg><span>Send</span></button>
+ </form>
+</div>
+<script>const ICONS={"prev": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 5h2v14H7zM19 5v14L9.5 12z\"/></svg>", "next": "<svg viewBox=\"0 0 24 24\"><path d=\"M15 5h2v14h-2zM5 5v14l9.5-7z\"/></svg>", "play": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 4.5v15L20 12z\"/></svg>", "pause": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 5h3.4v14H7zM13.6 5H17v14h-3.4z\"/></svg>", "stop": "<svg viewBox=\"0 0 24 24\"><rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/></svg>", "heart": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 20.6 3.4 12.4A5 5 0 0 1 12 6.2a5 5 0 0 1 8.6 6.2z\"/></svg>", "library": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h2.6v16H4zM8.4 4H11v16H8.4zM13.2 4.3l2.5.7-3.4 15.6-2.5-.7z\"/></svg>", "heart_o": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 18.9 5 12.2a3.6 3.6 0 0 1 5.1-5.1l1.9 1.8 1.9-1.8A3.6 3.6 0 0 1 19 12.2z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg>", "thumb_down": "<svg viewBox=\"0 0 24 24\"><path d=\"M6.5 4H5a2 2 0 0 0-1.4.6A2 2 0 0 0 3 6v5a2 2 0 0 0 2 2h2.3l-1 3.9A1.7 1.7 0 0 0 8 18.7a1.7 1.7 0 0 0 1.6-1.3l1-3.4h4.3a2.1 2.1 0 0 0 2-2.7L15.3 5.6A2 2 0 0 0 13.4 4H6.5zM5 6h1.6L9 12.7 8 16l-1.2-.9 1.1-4.1H5V6zm11 9.5v-1.7h1.5V6h1.6v7.8z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"/></svg>", "chat": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-4 4v-4H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v9h3v2.5L9.5 15H20V6z\"/></svg>", "queue": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h11v2H4zM4 11h11v2H4zM4 16h7v2H4zM18 10v6.2a2.6 2.6 0 1 1-1.6-2.4V10z\"/></svg>", "shuffle": "<svg viewBox=\"0 0 24 24\"><path d=\"M3 6h4.5l9 12H21v-2h-3l-2.6-3.5 1.5-2H21V8h-4.5l-1.4 1.9L6.9 6H3zM3 16h3.9l1.5-2 2.6 3.5L6.9 18H3zM17 4l3 3-3 3z\"/></svg>", "repeat": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 6.5h9V4l4 3.8-4 3.8V9.3H6v-2h1V6.5zM17 17.5H8v2.5l-4-3.8 4-3.8v2.3h10v2zM6 14.7h1v2H6z\"/></svg>", "repeat_one": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 6.5h9V4l4 3.8-4 3.8V9.3H6v-2h1V6.5zM17 17.5H8v2.5l-4-3.8 4-3.8v2.3h10v2zM11.6 12.4h1.3v5.2h-1.1l-1.3-.8v-1h1.1z\"/></svg>", "search": "<svg viewBox=\"0 0 24 24\"><path d=\"M10.5 3a7.5 7.5 0 1 0 4.6 13.5l4.3 4.3 1.4-1.4-4.3-4.3A7.5 7.5 0 0 0 10.5 3m0 2a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11\" fill=\"currentColor\" stroke=\"none\"/></svg>", "open": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3v2h5.6L10 12.6 11.4 14 19 6.4V12h2V3zM5 5v14h14v-4h-2v2H7V7h2V5z\"/></svg>", "mix": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 5h2v14H4zM18 5h2v14h-2zM9.5 7l5 5-5 5z\"/></svg>", "vol": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 9v6h4l5 4V5L8 9zM16 8.5a4 4 0 0 1 0 7v-2a2 2 0 0 0 0-3zM18.5 6a7 7 0 0 1 0 12v-2.1a4.9 4.9 0 0 0 0-7.8z\"/></svg>", "vol_mute": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 9v6h4l5 4V5L8 9zM15.4 9.6 16.8 8l5 5-1.4 1.4zM20.4 8 21.8 9.4l-5 5-1.4-1.4z\"/></svg>", "dot": "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"5\"/></svg>", "home": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3.1 2.8 11l1.3 1.5L5 11.8V21h5v-6h4v6h5v-9.2l.9.7 1.3-1.5z\"/></svg>", "plus": "<svg viewBox=\"0 0 24 24\"><path d=\"M11 4.5h2V11h6.5v2H13v6.5h-2V13H4.5v-2H11z\"/></svg>", "chev_l": "<svg viewBox=\"0 0 24 24\"><path d=\"M15.4 4.6 7.9 12l7.5 7.4 1.5-1.5L10.8 12l6.1-5.9z\"/></svg>", "chev_r": "<svg viewBox=\"0 0 24 24\"><path d=\"M8.6 4.6 16.1 12l-7.5 7.4-1.5-1.5 6.1-5.9-6.1-5.9z\"/></svg>", "close": "<svg viewBox=\"0 0 24 24\"><path d=\"M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z\"/></svg>", "expand": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h6.5v2H6v4.5H4zM20 4v6.5h-2V6h-4.5V4zM4 13.5h2V18h4.5v2H4zM20 13.5V20h-6.5v-2H18v-4.5z\"/></svg>", "clock": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 2a7 7 0 1 1 0 14 7 7 0 0 1 0-14M11 7v5.6l4.2 2.4 1-1.7-3.2-1.8V7z\"/></svg>", "dots": "<svg viewBox=\"0 0 24 24\"><circle cx=\"5.5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"18.5\" cy=\"12\" r=\"1.6\"/></svg>", "sparkle": "<svg viewBox=\"0 0 24 24\"><path d=\"M11 2.6 12.7 7 17 8.7 12.7 10.4 11 14.8 9.3 10.4 5 8.7 9.3 7zM18 14l1.1 2.9 2.9 1.1-2.9 1.1L18 22l-1.1-2.9-2.9-1.1 2.9-1.1z\"/></svg>", "lyrics": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3m-6 8a6 6 0 0 0 5 5.9V20H8v2h8v-2h-3v-3.1A6 6 0 0 0 18 11h-2a4 4 0 0 1-8 0z\"/></svg>", "devices": "<svg viewBox=\"0 0 24 24\"><path d=\"M3 5h12v8H3zm2 2v4h8V7zm10 2h6v9h-6zm2 1.6v5.8h2.8V8.6z\"/></svg>", "sort": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h16v2H4zm0 5h11v2H4zm0 5h7v2H4z\"/></svg>", "check": "<svg viewBox=\"0 0 24 24\"><path d=\"M9.6 16.2 5.4 12 4 13.4l5.6 5.6 12-12L20.2 6z\"/></svg>", "verified": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 2.2l2.3 1.9 3-.1.8 2.9 2.4 1.8-1.1 2.8 1.1 2.8-2.4 1.8-.8 2.9-3-.1L12 21.8l-2.3-1.9-3 .1-.8-2.9L3.5 15.3l1.1-2.8-1.1-2.8 2.4-1.8.8-2.9 3 .1z\"/><path d=\"M10.8 15.4 7.6 12.2 9 10.8l1.8 1.8 4.2-4.2 1.4 1.4z\" fill=\"#121212\"/></svg>"};
 const VM={"moods": [{"label": "Deep focus", "q": "mellow instrumental beats for deep focus"}, {"label": "Chill evening", "q": "warm soul and soft rock for a chill evening"}, {"label": "Late night", "q": "quiet neo soul and jazz for late at night"}, {"label": "Workout", "q": "high energy workout music, drums and bass"}, {"label": "Throwback", "q": "70s 80s classics, no remixes"}, {"label": "Rainy day", "q": "slow acoustic songs for a rainy day"}, {"label": "Party", "q": "upbeat funk and disco party tracks"}, {"label": "Road trip", "q": "classic rock road trip singalong"}], "views": ["home", "search", "library", "history"], "nav": [{"view": "home", "icon": "home", "label": "Home"}, {"view": "search", "icon": "search", "label": "Search"}, {"view": "library", "icon": "library", "label": "Your Library"}, {"view": "history", "icon": "clock", "label": "Recently played"}], "greeting": [[5, 12, "Good morning"], [12, 18, "Good afternoon"], [18, 24, "Good evening"], [0, 5, "Still up?"]]};
 
 "use strict";
@@ -1428,11 +1466,13 @@ function drawSettings(s){
   const fillIn = (node, v) => { if (node && document.activeElement !== node) node.value = v; };
   fillIn($("in-base"), st.base || "");
   fillIn($("in-model"), st.model || "");
-  $("unkeybtn").hidden = !st.has_key;
-  $("engine2").textContent = st.has_key
+  fillIn($("in-live"), st.live_model || "");
+  $("unkeybtn").hidden = !st.key_set;
+  $("engine2").textContent = st.key_set
     ? "Planning goes through " + (st.model || "the default model") + " at " +
-      (st.base || "generativelanguage.googleapis.com") + ". The key is only ever sent back as "
-      + (st.key_hint || "a mask") + "."
+      (st.base || "generativelanguage.googleapis.com") + "; the DJ chat uses "
+      + (st.live_model || "a live model") + ". The key is only ever sent back as "
+      + (st.key_mask || "a mask") + "."
     : "No key saved, so a small offline parser plans the searches. Paste a Gemini key (or a " +
       "local model URL) and the DJ writes its own query plan instead - it still never touches " +
       "a Spotify API.";
@@ -1512,6 +1552,7 @@ function draw(s){
   region("drawRecents", () => drawRecents(s));
   region("drawLog", () => drawLog(s));
   region("drawEmptyActs", () => drawEmptyActs(s));
+  region("drawChat", () => drawChat(s));
   region("upnext-visibility", () => {
     // the queue is its own right-side panel now; the sidebar chips only filter what
     // the queue *holds* (drawUpNext), so it is never hidden by them
@@ -1519,6 +1560,57 @@ function draw(s){
   });
   if (S.broken) { S.broken = ""; const p = $("jobpill"); if (p) p.classList.remove("warn"); }
 }
+
+/* ---------- the AI DJ chat ---------- */
+const _chat = {busy:false, opened:false, seeded:false};
+function chatBubble(cls, text){
+  const l = $("chat-log"), m = el("div", "msg " + cls, text);
+  l.appendChild(m); l.scrollTop = l.scrollHeight; return m;
+}
+function chatHint(text){
+  const l = $("chat-log"), m = el("div", "hint", text);
+  l.appendChild(m); l.scrollTop = l.scrollHeight; return m;
+}
+function chatToggle(open){
+  _chat.opened = open === undefined ? !_chat.opened : open;
+  $("chat").hidden = !_chat.opened;
+  if (_chat.opened) $("chat-in").focus();
+}
+async function chatSend(ev){
+  if (ev) ev.preventDefault();
+  const inp = $("chat-in"), q = inp.value.trim();
+  if (!q || _chat.busy) return;
+  inp.value = ""; _chat.busy = true;
+  const send = $("chat-send"); if (send) send.disabled = true;
+  chatBubble("user", q);
+  const t = chatBubble("typing", "the DJ is thinking…");
+  try {
+    const j = await post("/api/chat", {q});
+    t.remove();
+    chatBubble("dj", j.reply || "…");
+    if (j.state) draw(j.state);
+  } catch (e) {
+    t.remove();
+    chatBubble("err", (e && e.message) ? e.message : "the DJ did not reply");
+  } finally {
+    _chat.busy = false;
+    const snd = $("chat-send"); if (snd) snd.disabled = false;
+  }
+}
+function drawChat(s){
+  const sub = $("chat-sub"), btn = $("chat-open");
+  const dj = (s && s.dj) || {};
+  if (dj.key_set && dj.model) { sub.textContent = "· " + dj.model; if (btn) btn.classList.remove("warn"); }
+  else if (dj.key_set) { sub.textContent = "ready"; if (btn) btn.classList.remove("warn"); }
+  else { sub.textContent = "set a Gemini key in Settings"; if (btn) btn.classList.add("warn"); }
+}
+$("chat-open").addEventListener("click", () => {
+  chatToggle(true);
+  if (!_chat.seeded) { _chat.seeded = true;
+    chatHint("I'm your DJ. Ask for a song or a mood, or tell me to skip, like, pause…"); }
+});
+$("chat-close").addEventListener("click", () => chatToggle(false));
+$("chat-form").addEventListener("submit", chatSend);
 
 /* ---------- search ---------- */
 async function runSearch(){
@@ -1601,7 +1693,8 @@ $("unkeybtn").addEventListener("click", async () => {
   catch (e) { toast(e.message); }
 });
 $("savebtn").addEventListener("click", async () => {
-  const f = {base: $("in-base").value.trim(), model: $("in-model").value.trim()};
+  const f = {base: $("in-base").value.trim(), model: $("in-model").value.trim(),
+             live: $("in-live").value.trim()};
   const k = $("in-key").value.trim();
   if (k) f.key = k;
   try {
