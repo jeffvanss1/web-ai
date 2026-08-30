@@ -354,7 +354,7 @@ class SpeechTests(unittest.TestCase):
             with mock.patch.object(djvoice, "tts_model",
                                    return_value="gemini-3.1-flash-live-preview"):
                 with mock.patch.object(djvoice, "_ws_connect", return_value=FakeSock()):
-                    with mock.patch.object(djvoice, "_ws_read_frame",
+                    with mock.patch.object(djvoice, "_ws_read_message",
                                            side_effect=lambda *a: next(fake_iter)):
                         with mock.patch.object(djvoice, "_ws_send_frame",
                                                side_effect=fake_send):
@@ -398,7 +398,7 @@ class SpeechTests(unittest.TestCase):
                                    return_value="gemini-3.1-flash-live-preview"):
                 with mock.patch.object(djvoice, "_ws_connect",
                                        return_value=type("S", (), {"close": lambda s: None})()):
-                    with mock.patch.object(djvoice, "_ws_read_frame",
+                    with mock.patch.object(djvoice, "_ws_read_message",
                                            side_effect=lambda *a: next(fake_iter)):
                         with mock.patch.object(djvoice, "_ws_send_frame",
                                                side_effect=fake_send):
@@ -410,6 +410,32 @@ class SpeechTests(unittest.TestCase):
                          ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
         self.assertEqual(sent[1]["setup"]["generationConfig"]["speechConfig"]
                          ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "kore")
+
+    def test_live_synth_timeout_does_not_swap_voice(self):
+        # A setup that times out (server connects but never sends setupComplete) is
+        # NOT a voice problem - so the fallback voice must NOT be tried. The user
+        # kept hearing a different voice because we swapped it on timeout too.
+        import djvoice
+        import socket as _sock, tempfile
+        from pathlib import Path
+        sent = []
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(djvoice, "tts_model",
+                                   return_value="gemini-3.1-flash-live-preview"):
+                with mock.patch.object(djvoice, "_ws_connect",
+                                       return_value=type("S", (), {"close": lambda s: None})()):
+                    # the server accepts the socket but never replies -> read times out
+                    with mock.patch.object(djvoice, "_ws_read_message",
+                                           side_effect=_sock.timeout("read timed out")):
+                        with mock.patch.object(djvoice, "_ws_send_frame",
+                                               side_effect=lambda *a, **k: sent.append(json.loads(a[2]))):
+                            out = Path(tempfile.mkstemp(suffix=".wav")[1])
+                            self.assertFalse(djvoice._gemini_live_synth("hello", out))
+                            out.unlink(missing_ok=True)
+        # exactly one setup was sent (Despina), and no fallback voice attempt
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
+                         ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
 
     def test_live_synth_writes_a_container_as_is(self):
         # the Live model may return ogg/opus rather than PCM; those bytes are
@@ -431,7 +457,7 @@ class SpeechTests(unittest.TestCase):
                                    return_value="gemini-3.1-flash-live-preview"):
                 with mock.patch.object(djvoice, "_ws_connect",
                                        return_value=type("S", (), {"close": lambda s: None})()):
-                    with mock.patch.object(djvoice, "_ws_read_frame",
+                    with mock.patch.object(djvoice, "_ws_read_message",
                                            side_effect=lambda *a: next(fake_iter)):
                         with mock.patch.object(djvoice, "_ws_send_frame"):
                             out = Path(tempfile.mkstemp(suffix=".wav")[1])

@@ -402,6 +402,41 @@ def _ws_read_frame(sock) -> tuple[int, bytes]:
     return opcode, payload
 
 
+def _ws_read_message(sock) -> tuple[int, bytes]:
+    """Read one complete WebSocket message, reassembling continuation frames.
+
+    Returns (opcode, payload) where `opcode` is the first (message-typing) frame's
+    opcode (0x1 text, 0x2 binary, 0x8 close, 0x9 ping, 0xA pong). Continuation
+    frames (opcode 0) are reassembled into `payload`. Pings/pongs are surfaced to
+    the caller (who answers pings) rather than swallowed, so the DJ log can show
+    whether the server is alive even when it never completes `setup`.
+    """
+    first_opcode = None
+    buf = b""
+    while True:
+        b1, b2 = _ws_read_exact(sock, 2)
+        opcode = b1 & 0x0F
+        fin = bool(b1 & 0x80)
+        masked = bool(b2 & 0x80)
+        length = b2 & 0x7F
+        if length == 126:
+            length = int.from_bytes(_ws_read_exact(sock, 2), "big")
+        elif length == 127:
+            length = int.from_bytes(_ws_read_exact(sock, 8), "big")
+        key = _ws_read_exact(sock, 4) if masked else b""
+        payload = _ws_read_exact(sock, length)
+        if masked:
+            payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+        if opcode == 0:                                  # continuation
+            if first_opcode is not None:
+                buf += payload
+        else:
+            first_opcode = opcode
+            buf = payload
+        if fin:
+            return first_opcode, buf
+
+
 def _ws_close_reason(payload: bytes) -> str:
     """Turn a WebSocket close frame payload into a readable status + reason."""
     if not payload:
@@ -412,6 +447,16 @@ def _ws_close_reason(payload: bytes) -> str:
     except Exception:
         return f"unparseable close payload {payload!r}"
     return (f"status {code}" + (f" '{reason}'" if reason else " (no reason)"))
+
+
+def _frame_repr(opcode: int, data: bytes) -> str:
+    """A short human-readable description of one WS frame, for the log."""
+    names = {0: "continuation", 1: "text", 2: "binary", 8: "close", 9: "ping", 10: "pong"}
+    name = names.get(opcode, "opcode-%d" % opcode)
+    preview = ""
+    if opcode in (1, 2):
+        preview = " " + repr(data[:60])
+    return f"{name} ({len(data)} bytes){preview}"
 
 
 def _decode_ws_message(data: bytes):
@@ -476,7 +521,9 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            opcode, data = _ws_read_frame(sock)
+            opcode, data = _ws_read_message(sock)
+        except socket.timeout:
+            break
         except Exception as e:
             _info(f"gemini (live): socket read failed: {e.__class__.__name__}: {e}")
             return audio, rate, compressed, False
@@ -484,6 +531,7 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
             _info("gemini (live): server sent close -> " + _ws_close_reason(data))
             return audio, rate, compressed, True
         if opcode == 9:                                   # ping -> pong
+            _info("gemini (live): <- ping (server alive)")
             try:
                 _ws_send_frame(sock, 10, data)
             except Exception:
@@ -531,45 +579,66 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
 _LIVE_FALLBACK_VOICE = "kore"
 
 
-def _live_setup(sock, setup: dict, timeout: float = 15.0) -> bool:
+def _live_setup(sock, setup: dict, timeout: float = 10.0) -> str:
     """Send one Live `setup` and wait for `setupComplete`.
 
-    Returns True only once the server answers setupComplete; otherwise logs the
-    exact reason (close status/reason, goAway, non-JSON frame, or a timeout) and
-    returns False, so the caller can try another setup on a fresh connection.
+    Returns a status string: "ok" (setupComplete), "reject" (the server closed or
+    sent goAway during setup - a genuine refusal of the config), "timeout" (the
+    connection was accepted but the server never completed setup), or "error".
+    The caller treats "reject" as a config/voice problem worth retrying differently,
+    and "timeout"/"error" as a session that never became ready (usually an API-key
+    or model-access issue, not a voice problem).
     """
     _ws_send_frame(sock, 1, json.dumps({"setup": setup}).encode())
-    _info("gemini (live): setup:: " + json.dumps(setup)[:300])
+    _info("gemini (live): setup:: " + json.dumps(setup)[:320])
     deadline = time.monotonic() + timeout
+    status = "timeout"
     while time.monotonic() < deadline:
         try:
-            opcode, data = _ws_read_frame(sock)
+            opcode, data = _ws_read_message(sock)
         except socket.timeout:
-            _info(f"gemini (live): server never sent setupComplete within {timeout:.0f}s")
-            return False
+            break
+        except EOFError:
+            _info("gemini (live): socket closed before setupComplete")
+            status = "reject"
+            break
         except Exception as e:
             _info(f"gemini (live): setup read failed: {e.__class__.__name__}: {e}")
-            return False
+            status = "error"
+            break
+        _info("gemini (live): <- " + _frame_repr(opcode, data))
         if opcode == 8:                                   # close
             _info("gemini (live): server closed during setup -> " +
                   _ws_close_reason(data))
-            return False
+            status = "reject"
+            break
+        if opcode == 9:                                   # ping -> pong
+            try:
+                _ws_send_frame(sock, 10, data)
+            except Exception:
+                pass
+            continue
+        if opcode == 10:                                  # pong
+            continue
         if opcode == 1:
             decoded = _decode_ws_message(data)
             if decoded is None:
-                _info("gemini (live): setup-phase non-JSON text frame " +
-                      repr(data)[:200])
+                _info("gemini (live): setup-phase non-JSON text " + repr(data)[:200])
                 continue
             msg, _raw = decoded
             if "setupComplete" in msg:
                 _info("gemini (live): setupComplete")
-                return True
+                status = "ok"
+                break
             if "goAway" in msg:
                 _info(f"gemini (live): goAway -> {msg.get('goAway')}")
-                return False
+                status = "reject"
+                break
             _info("gemini (live): setup-phase message " + json.dumps(msg)[:300])
-    _info(f"gemini (live): server never sent setupComplete within {timeout:.0f}s")
-    return False
+        # binary / continuation / anything else: logged above, keep waiting
+    if status == "timeout":
+        _info(f"gemini (live): server never sent setupComplete within {timeout:.0f}s")
+    return status
 
 
 def _send_text_turn(sock, text: str) -> tuple[bytes, int, bool, bool]:
@@ -611,51 +680,53 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
         # The api/live reference is authoritative: `responseModalities` and
         # `speechConfig` both sit **inside** `generationConfig` on the setup
         # message. (A quickstart snippet puts responseModalities at the top of
-        # setup, but the real server rejects that with 1007.) No systemInstruction:
-        # the line is already written as text and we only want it voiced as-is.
+        # setup, but the real server rejects that with 1007.) `outputAudioTranscription`
+        # is part of the worked config for this model. No systemInstruction: the line
+        # is already written as text and we only want it voiced as-is.
         return {
             "model": "models/" + model,
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
+                "outputAudioTranscription": {},
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
                     "voiceName": v}}},
             },
         }
 
-    def attempt(v: str) -> tuple[bool, bool]:
+    def attempt(v: str) -> tuple[bool, str]:
         """Run a full connect+setup+turn on a fresh connection.
 
-        Returns (spoke_ok, setup_rejected). setup_rejected is True when the server
-        closed/refused during setup (a real config problem), distinct from "setup
-        OK but no audio came back".
+        Returns (spoke_ok, status). `status` is the setup outcome from
+        `_live_setup` ("ok"/"reject"/"timeout"/"error"); when the setup succeeds it
+        is "ok". The caller only swaps the voice when status == "reject".
         """
         sock = None
         label = "voice=%s" % v
-        setup_ok = False
+        status = "error"
         try:
             sock = _ws_connect(_live_url())
             _info(f"gemini (live): connected, model={model}, {label}")
-            setup_ok = _live_setup(sock, setup_for(v))
-            if not setup_ok:
-                return False, True
+            status = _live_setup(sock, setup_for(v))
+            if status != "ok":
+                return False, status
         except Exception as e:
             _info(f"gemini (live): connect/setup failed ({label}): "
                   f"{e.__class__.__name__}: {e}")
-            return False, True
+            return False, "error"
         finally:
             # a failed setup left an unneeded connection; close it before returning
-            if not setup_ok and sock is not None:
+            if status != "ok" and sock is not None:
                 try:
                     sock.close()
                 except Exception:
                     pass
         try:
-            if not setup_ok or sock is None:
-                return False, True
+            if sock is None:
+                return False, "error"
             audio, rate, compressed, _finished = _send_text_turn(sock, text)
         except Exception as e:
             _info(f"gemini (live): turn failed ({label}): {e.__class__.__name__}: {e}")
-            return False, False
+            return False, "error"
         finally:
             try:
                 sock.close()
@@ -663,7 +734,7 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
                 pass
         if not audio:
             _info(f"gemini (live): setup OK but no audio came back ({label})")
-            return False, False
+            return False, "ok"
         if compressed:
             # a container (ogg/opus/mp3) is written as-is; mpv sniffs the content
             # and does not care that the temp name happens to end in .wav
@@ -671,25 +742,34 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
             ok = path.exists() and path.stat().st_size > 0
             _info(f"gemini (live): spoke with voice {v}, wrote {len(audio)} bytes "
                   f"of audio container")
-            return ok, False
+            return ok, "ok"
         _pcm_to_wav(audio, rate, path)
         ok = path.exists() and path.stat().st_size > 0
         _info(f"gemini (live): spoke with voice {v}, {len(audio)} PCM bytes "
               f"@ {rate} Hz ({path.stat().st_size if ok else 0} bytes wav)")
-        return ok, False
+        return ok, "ok"
 
     # 1. Use exactly the configured voice. Never pre-emptively substitute it.
-    spoke, _setup_rejected = attempt(voice)
+    spoke, status = attempt(voice)
     if spoke:
         return True
     # 2. Only if the server actually refused the configured voice during setup do we
     #    retry on a fresh connection with a voice guaranteed to be available, so the
-    #    DJ still speaks at all. A successful setup with no audio is NOT a voice
-    #    problem, so we do not change the voice for it (espeak handles that case).
-    if _setup_rejected and voice.lower() != _LIVE_FALLBACK_VOICE:
-        spoke, _ = attempt(_LIVE_FALLBACK_VOICE)
+    #    DJ still speaks at all. A successful setup with no audio (status "ok") is
+    #    NOT a voice problem, so we do not change the voice for it; and a timeout/error
+    #    means the session never became ready, not that the voice is wrong.
+    if status == "reject" and voice.lower() != _LIVE_FALLBACK_VOICE:
+        spoke, status = attempt(_LIVE_FALLBACK_VOICE)
         if spoke:
             return True
+        if status != "ok":
+            _info("gemini (live): the server refused setup even with the fallback voice")
+            return False
+    if status in ("timeout", "error"):
+        _info(f"gemini (live): the Live session never became ready for {model} "
+              f"(setup was {status}). The most common cause is that the API key or "
+              f"project does not have access to this preview model (or the Live API "
+              f"is not enabled for it) - it is not a voice problem.")
     _info(f"gemini (live): could not speak with voice {voice} - falling back")
     return False
 
