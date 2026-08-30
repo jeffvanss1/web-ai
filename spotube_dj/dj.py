@@ -1023,6 +1023,17 @@ class DJ:
                                        "query": t.get("query", "")})
                 self._note(f"playing: {self._label(t)}"
                            + ("  [from cache]" if t.get("from_cache") else ""))
+                # the DJ says why this song is playing and what's next, out loud,
+                # over the music. It's a nicety (it degrades to silence if there is
+                # no TTS/player), so a fault here must never stop the song. The
+                # line is captured synchronously; the synth/play happens on a
+                # background thread so it cannot stall the engine.
+                if not self.headless and self.player:
+                    try:
+                        import djvoice
+                        djvoice.speak_for(self)
+                    except Exception:
+                        pass
                 # while this one plays, the next two go onto disk - at the *front* of
                 # the lane. Appending behind rows from the end of the set is what made
                 # an active skipper wait: the row they were about to hear was 14th in

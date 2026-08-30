@@ -113,7 +113,7 @@ class BuildStateTests(unittest.TestCase):
         for key in ("now", "up_next", "queued", "position", "duration", "paused",
                     "auto", "volume", "backend", "idle", "idle_note", "why", "request",
                     "queries", "engine_note", "cache_note", "foot", "log", "search",
-                    "loved", "vibe", "dj_line"):
+                    "loved", "vibe", "dj_line", "voice"):
             self.assertIn(key, s, key)
 
     def test_json_encodes_it(self):
@@ -228,6 +228,26 @@ class AutoplayTests(unittest.TestCase):
         self.assertIn("autoplay on", payload["note"])
         code, payload = web.run_action(self.ctx, "autoplay", {})
         self.assertIn("autoplay off", payload["note"])
+
+    def test_action_voice_turns_the_spoken_dj_on_and_off(self):
+        self.dj.state["voice"] = True          # the persisted default
+        self.assertIn("voice", web.build_state(self.ctx))
+        self.assertTrue(web.build_state(self.ctx)["voice"])
+        code, payload = web.run_action(self.ctx, "voice", {"on": ["off"]})
+        self.assertEqual(code, 200)
+        self.assertIn("off", payload["note"])
+        self.assertFalse(self.dj.state["voice"])
+        self.assertFalse(web.build_state(self.ctx)["voice"])
+        code, payload = web.run_action(self.ctx, "voice", {"on": ["on"]})
+        self.assertEqual(code, 200)
+        self.assertIn("talk", payload["note"])
+        self.assertTrue(self.dj.state["voice"])
+
+    def test_action_voice_flips_without_a_value(self):
+        self.dj.state["voice"] = True
+        code, payload = web.run_action(self.ctx, "voice", {})
+        self.assertEqual(code, 200)
+        self.assertFalse(self.dj.state["voice"], "default on should flip to off")
         self.assertFalse(self.dj.state["autoplay"])
 
     def test_a_nonsense_value_is_not_a_settings_change(self):

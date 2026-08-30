@@ -2,7 +2,7 @@
 The DJ narrator: a Spotify-DJ-style announcer that says why a song is playing
 and what is coming next.
 
-This is *not* a chat and *not* a voice call. It is a short, always-on line the
+It is *not* a chat box and *not* a network AI. It is a short, always-on line the
 skin shows alongside the Now Playing card, refreshed on every track:
 
     "Now playing Radiohead. Why: you asked for 'chill lofi'; it's one of your
@@ -13,6 +13,10 @@ from-your-likes pick, the station seed, the planner's reason, the Daylist vibe)
 and the front of the queue. There is no WebSocket and no Gemini key required, so
 it cannot fail with a dropped connection, and nothing is invented that the mixer
 did not record.
+
+The same line can be *spoken* aloud on each new track (see `spotube_dj.djvoice`)
+so the DJ reads "why this song / what's next" over the music, like Spotify DJ.
+`dj_speech` produces the voice-friendly sentence; `narrate` the on-screen one.
 """
 
 from __future__ import annotations
@@ -44,9 +48,8 @@ def _current_why(dj, info: dict, np: dict) -> str:
     return "; ".join(parts)
 
 
-def dj_snapshot(ctx) -> dict:
-    """A compact read of the set the DJ is hosting, for the narrator and tests."""
-    dj = ctx.dj
+def snapshot_of(dj) -> dict:
+    """A compact read of the set the DJ is hosting, from the DJ object itself."""
     np = dj.current or {}
     info = dj.info or {}
     upnext: list[dict] = []
@@ -74,6 +77,46 @@ def dj_snapshot(ctx) -> dict:
         "liked_artists": liked_artists,
         "moods": moods,
     }
+
+
+def dj_snapshot(ctx) -> dict:
+    """A compact read of the set the DJ is hosting, for the narrator and tests.
+
+    Accepts either the Context the web layer passes, or a bare DJ object, so a
+    caller that only has a DJ (e.g. the spoken-voice trigger) can use it too.
+    """
+    return snapshot_of(getattr(ctx, "dj", ctx))
+
+
+def dj_speech(dj) -> str:
+    """A spoken-friendly DJ announcement: why now + what's next, read aloud.
+
+    differs from `narrate` in that it is built for a text-to-speech voice, not an
+    on-screen card: no "Why:" label, no parentheses, artist and title separated by
+    a comma so a synthesizer reads them as two nouns rather than a "minus" sign.
+    """
+    snap = snapshot_of(dj)
+    now = str(snap.get("now") or "").strip()
+    if not now or now.lower() == "nothing playing":
+        return ""                       # nothing to announce; stay quiet
+    artist, sep, title = now.partition(" - ")
+    bits = [f"Now playing {artist}," if sep else f"Now playing {now}."]
+    if sep and title:
+        bits.append(f"{title}.")
+    why = str(snap.get("why") or "").strip()
+    if why:
+        why = why[0].upper() + why[1:]          # a spoken sentence starts with a capital
+        bits.append(f"{why}.")
+    vibe = str(snap.get("vibe") or "").strip()
+    if vibe:
+        bits.append(f"It's part of the {vibe} set.")
+    nxt = str(snap.get("next") or "").strip()
+    if nxt:
+        a, s2, t = nxt.partition(" - ")
+        bits.append(f"Up next {a}," if s2 else f"Up next {nxt}.")
+        if s2 and t:
+            bits.append(f"{t}.")
+    return " ".join(bits)
 
 
 def narrate(snap: dict) -> str:

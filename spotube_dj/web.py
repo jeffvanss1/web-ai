@@ -374,6 +374,7 @@ def build_state(ctx) -> dict:
         "paused": bool(st.get("paused")),
         "auto": bool(st.get("auto")),
         "autoplay": bool((dj.state or {}).get("autoplay")),
+        "voice": bool((dj.state or {}).get("voice", True)),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
         "idle": idle,
@@ -1032,6 +1033,25 @@ def action_autoplay(ctx, fields: dict) -> str:
             else "autoplay off - press Play or type a mood first")
 
 
+def action_voice(ctx, fields: dict) -> str:
+    """Turn the spoken DJ on/off. Persisted with autoplay/volume/repeat."""
+    raw = str((fields.get("on") or [""])[0]).strip().lower()
+    cur = bool((ctx.dj.state or {}).get("voice", True))
+    if raw in _ON:
+        want = True
+    elif raw in _OFF:
+        want = False
+    elif raw in ("", "toggle", "flip"):
+        want = not cur
+    else:
+        return (f"{raw[:12]!r} is not on or off - the DJ voice is already "
+                f"{'on' if cur else 'off'}")
+    ctx.dj.state["voice"] = want
+    config.save_state(ctx.dj.state)
+    return ("the DJ will talk about the songs now" if want
+            else "the DJ voice is off - it only shows the line")
+
+
 def action_open(ctx, fields: dict) -> str:
     """
     Hand the current track to a real client: Spotube or the browser.
@@ -1257,6 +1277,7 @@ ACTIONS = {
     "unlike": lambda c, f: _do(c.dj.unlike, "unloved"),
     "auto": action_auto,
     "autoplay": action_autoplay,
+    "voice": action_voice,
     "seek": action_seek,
     "volume": action_volume,
     "request": action_request,

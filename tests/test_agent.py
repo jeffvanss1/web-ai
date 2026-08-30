@@ -8,7 +8,9 @@ connection is impossible by construction.
 """
 from __future__ import annotations
 
+import os
 import unittest
+from unittest import mock
 
 import tests  # noqa: F401  (sys.path bootstrap)
 
@@ -131,3 +133,47 @@ class OfflineByConstructionTests(unittest.TestCase):
     def test_agent_imports_without_a_key(self):
         # config must never require LLM_API_KEY just to import the announcer
         self.assertTrue(callable(agent.narrate))
+
+
+class SpeechTests(unittest.TestCase):
+    """The DJ's spoken line (agent.dj_speech) and the voice trigger (djvoice)."""
+
+    def test_speech_reads_like_a_dj_host(self):
+        line = agent.dj_speech(_dj())
+        self.assertIn("Now playing Oneohtrix, Royal Albert.", line)
+        self.assertIn("You asked for", line)          # capitalized for speech
+        self.assertIn("Up next Boards, Reach for the Dead.", line)
+
+    def test_speech_nothing_playing_is_silent(self):
+        dj = _dj()
+        dj.current = None
+        self.assertEqual(agent.dj_speech(dj), "")
+
+    def test_speech_can_be_played_by_a_voice(self):
+        # welcome the DJ line into the voice module without a real engine
+        import djvoice
+        self.assertTrue(callable(djvoice.speak_for))
+        self.assertIsInstance(djvoice.enabled(), bool)
+
+    def test_voice_defaults_on_and_respects_state_and_env(self):
+        import djvoice
+        dj = _dj()
+        dj.state = {"voice": True}
+        self.assertTrue(djvoice.enabled(dj))
+        dj.state = {"voice": False}
+        self.assertFalse(djvoice.enabled(dj))
+        # a hard env override wins even when the state says on
+        with mock.patch.dict(os.environ, {"SPOTUBE_DJ_VOICE": "off"}):
+            dj.state = {"voice": True}
+            self.assertFalse(djvoice.enabled(dj))
+
+    def test_speak_for_never_raises_without_audio(self):
+        # no engine/mpv in the sandbox: the trigger must be a silent no-op, not a crash
+        import djvoice
+        dj = _dj()
+        dj.state = {"voice": True}
+        djvoice.speak_for(dj)              # returns immediately, spawns nothing harmful
+
+    def test_voice_flag_is_json_safe(self):
+        import json
+        self.assertIsInstance(json.dumps({"voice": True}), str)

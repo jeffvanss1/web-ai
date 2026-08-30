@@ -437,6 +437,13 @@ font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)
 margin-bottom:4px}
 .djline .djtag::before{content:"";width:8px;height:8px;border-radius:50%;
 background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.djline .lh{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.djline .lh .djtag{margin-bottom:0}
+.djvoice{margin-left:auto;display:inline-flex;align-items:center;gap:5px;
+font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--edge);
+background:var(--card);color:var(--muted);cursor:pointer}
+.djvoice.on{color:var(--accent);border-color:var(--accent)}
+.djvoice svg{width:13px;height:13px}
 </style></head><body>
 <div class="app" id="app">
  <aside class="side panel">
@@ -554,7 +561,11 @@ background:var(--accent);box-shadow:0 0 8px var(--accent)}
     <div class="dartist" id="np-by" hidden></div>
    </div>
    <div class="djline" id="djline">
-    <span class="djtag">the DJ</span>
+    <div class="lh">
+     <span class="djtag">the DJ</span>
+     <button class="djvoice on" id="djvoice" data-action="voice"
+      title="The DJ reads each song out loud"><svg viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9zM16 8.5a4 4 0 0 1 0 7v-2a2 2 0 0 0 0-3zM18.5 6a7 7 0 0 1 0 12v-2.1a4.9 4.9 0 0 0 0-7.8z"/></svg><span id="djvoicet">on</span></button>
+    </div>
     <div class="djtxt" id="djtext">Nothing playing yet - tell me a song or a mood.</div>
    </div>
    <div class="acts">
@@ -1546,6 +1557,14 @@ function drawDJ(s){
   const line = (s && s.dj_line) || "";
   if (line) t.textContent = line;
   else t.textContent = "Nothing playing yet - tell me a song or a mood.";
+  // the voice toggle: on by default, reflects the server's persisted `voice` flag
+  const v = $("djvoice");
+  if (v) {
+    const on = s && s.voice;
+    v.classList.toggle("on", !!on);
+    const vt = $("djvoicet");
+    if (vt) vt.textContent = on ? "on" : "off";
+  }
 }
 
 /* ---------- search ---------- */
