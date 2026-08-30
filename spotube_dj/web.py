@@ -485,8 +485,10 @@ class Context:
         # metadata lookups run on ONE worker, not a thread per unseen id: a 40-row
         # queue used to spawn 40 subprocesses at once (each a yt-dlp metadata call),
         # which is the kind of burst that makes a laptop fan scream and a server fall
-        # over. One paced lane keeps it stable; `_meta_inflight` still dedupes.
-        self._meta_queue: queue.Queue = queue.Queue()
+        # over. One paced lane keeps it stable; `_meta_inflight` still dedupes. The
+        # queue is bounded so a feed that outruns the lane (say, a 200-row album page
+        # that wants Credits for every row) drops old asks instead of growing memory.
+        self._meta_queue: queue.Queue = queue.Queue(maxsize=64)
         self._meta_started = False            # the lane starts on first need
         self._subs: list[queue.Queue] = []
         self._lock = threading.Lock()
@@ -554,7 +556,11 @@ class Context:
                 return dict(self._meta[vid])
             if vid not in self._meta_inflight:
                 self._meta_inflight.add(vid)
-                self._meta_queue.put_nowait(vid)
+                try:
+                    self._meta_queue.put_nowait(vid)
+                except queue.Full:
+                    self._meta_inflight.discard(vid)   # full: retry next tick
+                    return {}
                 if not self._meta_started:
                     self._meta_started = True
                     threading.Thread(target=self._meta_loop, daemon=True).start()
