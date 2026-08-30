@@ -201,6 +201,29 @@ def _start(ctx, target) -> None:
 
 
 # ------------------------------------------------------------- snapshot
+def _current_why(dj, info: dict, np: dict) -> str:
+    """A factual reason for the current song, from what the mixer actually did."""
+    if not np:
+        return ""                       # nothing playing, so no "why this song"
+    parts: list[str] = []
+    req = str(dj.request or "").strip()
+    if req:
+        parts.append(f"you asked for {req!r}")
+    station = str(getattr(dj, "station", "") or "").strip()
+    if station:
+        parts.append(f"it's around the {station} station")
+    if np.get("mixed"):
+        parts.append("it's one of your picks (from your likes)")
+    why = str(info.get("why") or "").strip()
+    if why:
+        # the planner/offline reason already reads like a reason ("90s trip hop, dark")
+        parts.append(why)
+    vibe = str(info.get("vibe") or "").strip()
+    if not parts and vibe:
+        parts.append(f"it fits the '{vibe}' set")
+    return "; ".join(parts)
+
+
 def dj_snapshot(ctx) -> dict:
     """A compact read of the set the DJ is hosting, for the system prompt and tools."""
     dj = ctx.dj
@@ -223,6 +246,7 @@ def dj_snapshot(ctx) -> dict:
         "now": (f"{np.get('artist') or '?'} - {np.get('title') or '?'}"
                 if np else "nothing playing"),
         "vibe": str(info.get("vibe") or ""),
+        "why": _current_why(dj, info, np),
         "queued": len(upnext),
         "up_next": [f"{t.get('artist') or '?'} - {t.get('title') or '?'}" for t in upnext],
         "request": str(dj.request or ""),
@@ -238,6 +262,7 @@ def build_system_prompt(snap: dict) -> str:
     """The DJ-host persona, seeded with the actual set so it talks about *your* mix."""
     now = snap.get("now") or "nothing playing"
     vibe = (snap.get("vibe") or "").strip()
+    why = (snap.get("why") or "").strip()
     queued = int(snap.get("queued") or 0)
     up = ", ".join(snap.get("up_next") or []) or "nothing queued"
     request = snap.get("request") or "none"
@@ -252,6 +277,7 @@ def build_system_prompt(snap: dict) -> str:
         "RIGHT NOW\n"
         f"- Now playing: {now}\n"
         f"- {mood_line}\n"
+        f"- Why this is playing: {why or 'the reason is not tracked yet'}\n"
         f"- In the queue: {queued} track(s) - {up}\n"
         f"- The request that built this: {request}\n"
         f"- Station: {station}\n"
@@ -262,6 +288,10 @@ def build_system_prompt(snap: dict) -> str:
         "mix (from their likes), skip, like, dislike, pause, resume, volume, get_status.\n\n"
         "RULES\n"
         "- To act, CALL a tool; only claim something after you have called it.\n"
+        "- When asked WHY a song is playing, explain from the facts: what they asked for, "
+        "the artist/mood it matches (from Loved artists / Favoured moods), whether it is one "
+        "of their picks, and the set's name. Never invent a reason - if the reason is not "
+        "tracked, say so rather than guess.\n"
         "- Short and alive. Celebrate good asks. Use the mix name when you mention the set.\n"
         "- Do not invent facts about tracks you cannot see; only what the snapshot says.\n"
         "- If you cannot tell, check get_status before promising anything.\n"

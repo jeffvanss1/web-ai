@@ -67,14 +67,26 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(snap["now"], "Radiohead - Everything In Its Right Place")
         self.assertEqual(snap["vibe"], "lofi tuesday night")
         self.assertEqual(snap["queued"], 3)
+        self.assertIn("asked for", snap["why"])     # the reason it is playing
 
-    def test_prompt_carries_the_persona_and_the_set(self):
+    def test_prompt_carries_the_persona_and_the_set_and_the_why(self):
         snap = agent.dj_snapshot(_ctx(_dj()))
         prompt = agent.build_system_prompt(snap)
         self.assertIn("DJ inside Spotube DJ", prompt)
         self.assertIn("Radiohead", prompt)
         self.assertIn("lofi tuesday night", prompt)
         self.assertIn("play (a song/artist/mood)", prompt)
+        # the DJ is told both the reason and to explain why when asked
+        self.assertIn("Why this is playing", prompt)
+        self.assertIn("When asked WHY a song is playing", prompt)
+
+    def test_the_why_names_a_mixed_pick_and_the_planner_reason(self):
+        dj = _dj()
+        dj.current = {"artist": "Boards of Canada", "title": "lofi beat", "mixed": True}
+        dj.info = {"why": "90s trip hop, dark", "vibe": "lofi tuesday night"}
+        why = agent.dj_snapshot(_ctx(dj))["why"]
+        self.assertIn("one of your picks", why)
+        self.assertIn("90s trip hop", why)
 
 
 class RunTurnTests(unittest.TestCase):
