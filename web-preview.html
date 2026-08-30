@@ -45,19 +45,29 @@ transform:scale(1.08);transition:opacity .5s ease}
 .bg2{position:absolute;inset:-14% -10%;z-index:-2;background-size:cover;
 background-position:center top;filter:blur(72px) saturate(1.9);opacity:0;
 transform:scale(1.08);transition:opacity .45s ease}
+@property --gx1{syntax:"<percentage>";inherits:false;initial-value:30%}
+@property --gy1{syntax:"<percentage>";inherits:false;initial-value:20%}
+@property --gx2{syntax:"<percentage>";inherits:false;initial-value:80%}
+@property --gy2{syntax:"<percentage>";inherits:false;initial-value:85%}
 .bg::after,.bg2::after{content:"";position:absolute;inset:-18% -14%;
-background:radial-gradient(120% 90% at 30% 20%,var(--tint) 0%,transparent 55%),
-radial-gradient(110% 80% at 80% 85%,var(--tint2) 0%,transparent 55%);
-mix-blend-mode:screen;opacity:.62;will-change:transform,filter;
-animation:tintdrift 8s ease-in-out infinite alternate}
-/* the playing colour breathes: the cover-derived tint drifts across the screen and
-   its hue wanders a touch, so the wash is alive rather than a fixed gradient.
-   8s a side - clearly moving, but still ambient rather than the page sliding under
-   the song. The wash is coloured even when idle (see backdrop), so the glow is
-   visible the whole time and the animation is never waiting on a cover. */
+background:radial-gradient(120% 90% at var(--gx1) var(--gy1),var(--tint) 0%,transparent 55%),
+radial-gradient(110% 80% at var(--gx2) var(--gy2),var(--tint2) 0%,transparent 55%);
+mix-blend-mode:screen;opacity:.62;will-change:transform,filter,--gx1,--gy1,--gx2,--gy2;
+animation:tintdrift 9s ease-in-out infinite alternate}
+/* the playing colour breathes: the cover-derived tint moves across the screen, its
+   hue cycles and the two glow centres orbit opposite each other, so the wash is
+   clearly alive rather than a fixed gradient. 9s a side - textured movement, but a
+   couple of seconds of it still reads as ambient, not the page sliding under the
+   song. The wash is coloured even when idle (see backdrop), so the glow moves the
+   whole time, never waiting on a cover. The % properties are animated directly
+   (registered above), the transform/hue add the wander. */
 @keyframes tintdrift{
-0%{transform:translate3d(-2.5%,1.5%,0) scale(1.02);filter:hue-rotate(-7deg) saturate(1.05)}
-100%{transform:translate3d(2.5%,-1.5%,0) scale(1.08);filter:hue-rotate(10deg) saturate(1.14)}}
+0%{--gx1:30%;--gy1:20%;--gx2:80%;--gy2:85%;
+transform:translate3d(-2.5%,1.5%,0) scale(1.02);filter:hue-rotate(-14deg) saturate(1.05)}
+50%{--gx1:74%;--gy1:68%;--gx2:22%;--gy2:30%;
+filter:hue-rotate(8deg) saturate(1.12)}
+100%{--gx1:24%;--gy1:82%;--gx2:70%;--gy2:22%;
+transform:translate3d(2.5%,-1.5%,0) scale(1.08);filter:hue-rotate(22deg) saturate(1.16)}}
 /* with no cover yet the wash is the two palette colours that tile would have used,
    so the page is never the flat grey it looked before a thumbnail landed. We only
    drop the cover image, not the glow: the tinted wash behind it stays and moves. */
