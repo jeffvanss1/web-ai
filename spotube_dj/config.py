@@ -129,7 +129,10 @@ def load_state() -> dict:
         "artists": {},          # artist -> weight
         "genres": {},           # genre -> weight
         "volume": 70,
-        "autoplay": True,
+        # autoplay: start a mix and play on open. Off by default - the web skin
+        # waits for the listener to press Play or search ("even i dont start the
+        # button yet"), and one tap turns it back on.
+        "autoplay": False,
         "repeat": "off",        # off | all | one
         "shuffle": False,
         "last_request": "",

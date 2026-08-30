@@ -150,6 +150,21 @@ _OFFICIAL_TITLE = re.compile(r"\b(?:official\s+(?:video|audio|visualizer|"
 
 _TOP_CHANNEL = re.compile(r"\s[-–]\s*topic$", re.I)
 
+# Someone else's *recording* of an existing song - the thing an Apple Music queue
+# never shows. Not the artist's own release, so a mood mix that picks it up is
+# "whatever youtuber doing remix of that songs or doing cover of the original".
+# These words are only refused for a row that is NOT the artist's own (a YTM Song
+# row or a Topic channel): an official remix by the artist is that single's
+# release, and "Live Forever" is a song called that - same discipline the live
+# rules follow.
+_NON_ORIGINAL = re.compile(
+    r"\b(?:cover\s+(?:version|song|of|by|of\s+the|songs)|covered\s+by|"
+    r"someone(?:'s|\u2019s)\s+cover|covers?\s+(?:of|version)|"
+    r"tribute\s+(?:to|band|album)|remix(?:ed|es|ing)?|remake|"
+    r"reimagined|reimagining|reworke?d?|reinterpretation|reinterpreted|"
+    r"re-recorde?d?|re-recording|rewrite|alternative\s+(?:version|take)|"
+    r"alt\s+version|originally\s+performed|track\s+cover|karaoke\s+version)\b", re.I)
+
 # Film/broadcast vocabulary. Each of these is also a song word ("Fight",
 # "Battle"), so it only means "not a song" in a title formatted like a clip
 # listing - a pipe, a year in brackets, a scene number, the words movie/film.
@@ -348,6 +363,14 @@ def decide(entry: dict) -> dict:
         kind, reasons = NOTAUDIO, ["a clip from a film"]
 
     # ---- provenance ----------------------------------------------------------
+    # An *original recording* is a YTM Song row or the artist's own Topic channel;
+    # a fan re-upload of someone else's song ("cover", "remix") is what the queue
+    # was being polluted by. It is refused outright now, but only when it is clearly
+    # not the artist's own - an official remix single by the artist still shows.
+    if kind == TRACK and not entry.get("official") \
+            and not _TOP_CHANNEL.search(ch0) and _NON_ORIGINAL.search(title):
+        kind, reasons = NOTAUDIO, ["someone else's cover/remix, not the original"]
+
     # On plain YouTube search the surface is *video*: a fight scene from a movie
     # and a band's official audio sit in the same result list, and no keyword
     # list fixes that reliably. So demand something that says "music upload" -

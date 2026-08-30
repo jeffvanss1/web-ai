@@ -55,6 +55,7 @@ TICK = 0.7
 def row_view(t: dict, *, note: str = "", liked: bool | None = None) -> dict:
     """One queue/search row, as the page draws it (never a raw internal dict)."""
     t = t or {}
+    thumb = str(t.get("thumbnail") or "")
     out = {
         "id": str(t.get("id") or ""),
         "title": str(t.get("title") or "?"),
@@ -63,8 +64,11 @@ def row_view(t: dict, *, note: str = "", liked: bool | None = None) -> dict:
         "dur": vm.mmss(t.get("duration") or 0) if t.get("duration") else "",
         "found": str(t.get("query") or ""),        # which search turned this up
         "cached": bool(t.get("cached") or t.get("from_cache")),
-        "art": "",                       # the 40px list slot, filled by the lane
-        "art_card": "",                  # and the 190px grid slot, same thread
+        # the row's own cover is shown immediately (a search/album/discography row
+        # carries one); the artwork lane still upgrades it to the cached album art
+        # when that lands, and to nothing smarter if the row has no url
+        "art": thumb if thumb.startswith("http") else "",
+        "art_card": thumb if thumb.startswith("http") else "",
         # a page row may carry its own badge (a discography entry's year, an album
         # track's record name); an explicit `note` from the caller wins, else use it
         "note": note or (str(t.get("note") or "") if isinstance(t.get("note"), str)
@@ -341,6 +345,12 @@ def build_state(ctx) -> dict:
     ctx.request_art(lib_loved + lib_recents, "row", limit=60)
     if np:
         ctx.request_art([np], "big", limit=1)
+    # the in-app album/artist page: warm the covers too, so an album tracklist or a
+    # discography is dressed rather than a column of initial tiles
+    if isinstance(ctx.page, dict) and ctx.page.get("rows"):
+        pg_rows = [x for x in ctx.page["rows"] if (x or {}).get("id")]
+        ctx.request_art(pg_rows, "card", limit=60)
+        ctx.request_art(pg_rows, "row", limit=60)
     return {
         "now": now,
         "up_next": rows,
@@ -349,6 +359,7 @@ def build_state(ctx) -> dict:
         "duration": float(st.get("duration") or 0),
         "paused": bool(st.get("paused")),
         "auto": bool(st.get("auto")),
+        "autoplay": bool((dj.state or {}).get("autoplay")),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
         "idle": idle,
@@ -415,6 +426,8 @@ def with_art(state: dict, ctx) -> dict:
     lib = state.get("library")
     if isinstance(lib, dict):
         lists += [lib.get(key) or [] for key in ("loved", "recents")]
+    if isinstance(state.get("page"), dict):
+        lists.append(state["page"].get("rows") or [])
     for rows in lists:
         for t in rows:
             if not isinstance(t, dict):
@@ -925,6 +938,31 @@ def action_auto(ctx, fields: dict) -> str:
     return "keep mixing: on" if want else "keep mixing: off"
 
 
+def action_autoplay(ctx, fields: dict) -> str:
+    """
+    Whether opening the app should start a mix and play, or wait for a press.
+
+    The complaint was "when the first start the queue start mixing and playing even
+    i dont start the button yet". One tap stops that; the setting is persisted in
+    the same state file as volume/repeat, so it sticks across reloads.
+    """
+    raw = str((fields.get("on") or [""])[0]).strip().lower()
+    cur = bool((ctx.dj.state or {}).get("autoplay"))
+    if raw in _ON:
+        want = True
+    elif raw in _OFF:
+        want = False
+    elif raw in ("", "toggle", "flip"):
+        want = not cur
+    else:
+        return (f"{raw[:12]!r} is not on or off - autoplay is already "
+                f"{'on' if cur else 'off'}")
+    ctx.dj.state["autoplay"] = want
+    config.save_state(ctx.dj.state)
+    return ("autoplay on - it starts a mix on open" if want
+            else "autoplay off - press Play or type a mood first")
+
+
 def action_open(ctx, fields: dict) -> str:
     """
     Hand the current track to a real client: Spotube or the browser.
@@ -1148,6 +1186,7 @@ ACTIONS = {
     "like": action_like,
     "unlike": lambda c, f: _do(c.dj.unlike, "unloved"),
     "auto": action_auto,
+    "autoplay": action_autoplay,
     "seek": action_seek,
     "volume": action_volume,
     "request": action_request,
@@ -1697,11 +1736,13 @@ def serve(dj, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
         # page already showing results, not open it and wait for a click
         start_search(ctx, search_for)
     if request or playlist:
+        # an explicit --request / --playlist IS the user pressing a button; play it
         ctx.job = threading.Thread(
             target=lambda: _first_mix(dj, request, playlist, count), daemon=True)
         ctx.job.start()
-    elif _has_profile():
-        # open the app, hear music: the profile is a perfectly good request
+    elif bool((dj.state or {}).get("autoplay")) and _has_profile():
+        # autoplay is off by default: opening the app must not start a mix and play
+        # before the listener asks. With it on, the profile is a fine request.
         ctx.job = threading.Thread(target=lambda: _auto_open(dj), daemon=True)
         ctx.job.start()
     bound = getattr(httpd, "display_host", host)

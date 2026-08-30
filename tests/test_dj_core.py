@@ -24,6 +24,7 @@ PKG_DIR = tests.PKG
 
 import brain
 import config
+import filters
 import providers as prov
 import taste
 import dj as dj_mod
@@ -789,6 +790,68 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual([t["id"] for t in out], ["good"])
 
 
+class OriginTests(unittest.TestCase):
+    """
+    "filter only the original songs appear" - a cover or a remix of a song is not
+    the recording a mood mix is for. decide() refuses a non-original title outright
+    (an official remix single by the artist still shows), and yt_search drops a fan
+    re-upload once the artist's own row is present, so the queue and the search tab
+    both read like Apple Music rather than a reaction channel.
+    """
+
+    @staticmethod
+    def _official(vid, title="Smells Like Teen Spirit"):
+        return {"id": vid, "title": title, "artist": "Nirvana", "channel": "Nirvana",
+                "official": True, "duration": 302, "url": "u"}
+
+    @staticmethod
+    def _fan(vid, title="Smells Like Teen Spirit", channel="ScottishTeeVee"):
+        return {"id": vid, "title": title, "artist": "", "channel": channel,
+                "official": False, "duration": 286, "url": "u"}
+
+    def test_prefer_originals_keeps_only_the_artist_when_any_exists(self):
+        rows = [self._official("o1"), self._fan("f1"),
+                {"id": "o2", "title": "Come as You Are", "artist": "Nirvana",
+                 "channel": "Nirvana - Topic", "duration": 219, "url": "u"}]
+        got = prov._prefer_originals(rows)
+        self.assertEqual([t["id"] for t in got], ["o1", "o2"],
+                         "a fan re-upload survived when the original was present")
+        # with no original at all, the fan rows are kept rather than going silent
+        solo = [self._fan("f1"), self._fan("f2", title="Come as You Are")]
+        self.assertEqual([t["id"] for t in prov._prefer_originals(solo)], ["f1", "f2"])
+
+    def test_cover_and_remix_by_a_fan_are_refused_but_an_official_one_is_not(self):
+        for title in ("Smells Like Teen Spirit (cover by Delicious Rock)",
+                      "Smells Like Teen Spirit - Remix",
+                      "Wonderwall (Acoustic Cover)",
+                      "Song (Reimagined)"):
+            with self.subTest(title=title):
+                v = filters.decide({"title": title, "duration": 250,
+                                    "channel": "Some Fan"})
+                self.assertEqual(v["kind"], filters.NOTAUDIO, title)
+        # an official remix single by the artist is a release, not a bootleg
+        official = filters.decide({"title": "Smells Like Teen Spirit (Remix)",
+                                   "duration": 250, "channel": "Nirvana",
+                                   "official": True})
+        self.assertEqual(official["kind"], filters.TRACK)
+
+    def test_yt_search_drops_a_fan_upload_when_the_original_answer_is_there(self):
+        fan, official = self._fan("fan1"), self._official("off1")
+        with mock.patch.object(prov, "ytm_enabled", return_value=True), \
+             mock.patch.object(prov, "ytm_search", return_value=[fan, official]):
+            rows = prov.yt_search("nirvana songs", limit=8)
+        self.assertEqual([t["id"] for t in rows], ["off1"],
+                         "the fan re-upload outranked the artist's own recording")
+
+    def test_yt_search_keeps_fan_uploads_when_no_original_exists(self):
+        fan1, fan2 = self._fan("fan1"), self._fan("fan2", title="Come as You Are")
+        with mock.patch.object(prov, "ytm_enabled", return_value=True), \
+             mock.patch.object(prov, "ytm_search", return_value=[fan1, fan2]):
+            rows = prov.yt_search("a very obscure local band", limit=8)
+        self.assertEqual(set(t["id"] for t in rows), {"fan1", "fan2"},
+                         "no original was found; the uploads are still music")
+
+
 class BrowseTests(unittest.TestCase):
     """
     The deep Artist / Album page data comes off YouTube Music's *browse* endpoint,
@@ -904,6 +967,47 @@ class BrowseTests(unittest.TestCase):
         with mock.patch.object(prov, "_http_json", side_effect=fake):
             albums = prov.ytm_artist_discography("Portishead")
         self.assertEqual(albums, [])
+
+    def test_discography_prefers_albums_over_the_singles_shelf(self):
+        # an artist page lists Albums then Singles & EPs; "why its show all single"
+        # was the singles dominating - so albums are the discography, singles only
+        # when an artist never cut an album
+        page = {"contents": {"sectionListRenderer": {"contents": [
+            {"musicShelfRenderer": {"contents": [
+                {"musicTwoRowItemRenderer": {
+                    "title": {"runs": [{"text": "The Singles EP"}]},
+                    "subtitle": {"runs": [{"text": "Single • Portishead • 1998"}]},
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "B_single"}}}},
+                {"musicTwoRowItemRenderer": {
+                    "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails":
+                        [{"url": "https://i.ytimg.com/vi/dummy/hqdefault.jpg",
+                          "width": 544, "height": 544}]}}},
+                    "title": {"runs": [{"text": "Dummy"}]},
+                    "subtitle": {"runs": [{"text": "Album • Portishead • 1994"}]},
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "B_album"}}}},
+            ]}}]}}}
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse=page)
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            rows = prov.ytm_artist_discography("Portishead")
+        self.assertEqual([r["title"] for r in rows], ["Dummy"],
+                         "the singles shelf outranked the album")
+        self.assertEqual(rows[0]["browse_id"], "B_album")
+        self.assertEqual(rows[0]["release_year"], 1994)
+        self.assertTrue(rows[0]["thumbnail"].startswith("http"),
+                        "the discography entry carries the album cover")
+
+    def test_discography_falls_back_to_singles_for_an_artist_with_no_album(self):
+        page = {"contents": {"sectionListRenderer": {"contents": [
+            {"musicShelfRenderer": {"contents": [
+                {"musicTwoRowItemRenderer": {
+                    "title": {"runs": [{"text": "Only Single"}]},
+                    "subtitle": {"runs": [{"text": "Single • Artist • 2020"}]},
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "B1"}}}},
+            ]}}]}}}
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse=page)
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            rows = prov.ytm_artist_discography("Portishead")
+        self.assertEqual([r["title"] for r in rows], ["Only Single"])
 
     def test_clean_artist_strips_the_query_trailing_words(self):
         self.assertEqual(prov._clean_artist("Portishead songs"), "Portishead")

@@ -908,7 +908,21 @@ function rowNode(t, i, opts){
   const a = el("div", "tile"); art(a, t, 40); r.appendChild(a);
   const ti = el("div", "ti", t.title || "?"); r.appendChild(ti);
   const ar = el("div", "ar");
-  ar.appendChild(el("span", null, t.artist || t.channel || "unknown artist"));
+  const who = t.artist || t.channel || "";
+  // the artist is a live link to the in-app artist page, wherever the row shows
+  // (search results, a page, a queue row) - not a dead line of text
+  if (who) {
+    const name = el("button", "plink", who);
+    name.title = "Songs by this artist";
+    name.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setView("page");
+      act("open_artist", {artist: who});
+    });
+    ar.appendChild(name);
+  } else {
+    ar.appendChild(el("span", null, "unknown artist"));
+  }
   if (t.note) ar.appendChild(el("span", "badge", t.note));
   r.appendChild(ar);
   r.appendChild(el("div", "du", t.dur || (opts.ts || "")));
@@ -1558,6 +1572,9 @@ $("b-more").addEventListener("click", (e) => {
   if (s.paused) items.push({label: "Resume", icon: "play", fn: () => act("resume")});
   else items.push({label: "Pause", icon: "pause", fn: () => act("pause")});
   items.push({label: "This is not for me", icon: "next", fn: () => act("skip")});
+  items.push({label: (s.autoplay ? "Autoplay on open: on" : "Autoplay on open: off"),
+              icon: (s.autoplay ? "check" : "sparkle"),
+              fn: () => act("autoplay", {on: s.autoplay ? "off" : "on"})});
   items.push({label: "Unlove this song", icon: "heart_o", fn: () => act("unlike")});
   if (s.station) items.push({label: "Leave the station", icon: "close",
                              fn: () => act("clear_station")});

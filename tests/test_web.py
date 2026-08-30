@@ -76,6 +76,29 @@ class RowViewTests(unittest.TestCase):
         self.assertNotIn("liked", web.row_view(track(1)))
         self.assertTrue(web.row_view(track(1), liked=True)["liked"])
 
+    def test_a_row_with_a_cover_shows_it_immediately(self):
+        # an album tracklist / discography row carries its own art, so it must not
+        # wait for the artwork lane (that was "album page rows show no cover")
+        r = web.row_view({"id": "x", "title": "Dummy", "artist": "Portishead",
+                          "thumbnail": "https://i.ytimg.com/vi/x/hqdefault.jpg"})
+        self.assertTrue(r["art"].startswith("http"))
+        self.assertTrue(r["art_card"].startswith("http"))
+
+    def test_a_page_row_carries_its_album_identity(self):
+        # the front-end needs `kind`/`album`/`browse_id` to open a discography row on
+        # a click and to know it is an album, not a playable song
+        r = web.row_view({"id": "", "title": "Dummy", "artist": "Portishead",
+                          "kind": "album", "album": "Dummy", "browse_id": "B1",
+                          "release_year": 1994, "note": "1994 · album"})
+        self.assertEqual(r["kind"], "album")
+        self.assertEqual(r["album"], "Dummy")
+        self.assertEqual(r["browse_id"], "B1")
+        self.assertEqual(r["release_year"], 1994)
+        self.assertEqual(r["note"], "1994 · album")
+
+    def test_a_row_without_a_cover_has_blank_not_broken_art(self):
+        self.assertEqual(web.row_view({"id": "x", "title": "t"})["art"], "")
+
 
 class BuildStateTests(unittest.TestCase):
     def setUp(self):
@@ -158,6 +181,55 @@ class BuildStateTests(unittest.TestCase):
 
     def test_loved_rows_is_a_list_even_with_no_history(self):
         self.assertIsInstance(web.build_state(self.ctx)["loved"], list)
+
+
+class AutoplayTests(unittest.TestCase):
+    """'when the first start the queue start mixing and playing even i dont start
+    the button yet': opening the app must not play before a press. The switch is
+    persisted like volume/repeat and exposed on the page."""
+
+    def setUp(self):
+        self.dj = fake_dj()
+        self.ctx = web.Context(self.dj)
+        self.dj.state["autoplay"] = False
+
+    def test_it_does_not_auto_open_when_off(self):
+        import inspect
+        src = inspect.getsource(web.serve)
+        self.assertIn("autoplay", src, "serve() gates the opening mix on autoplay")
+
+    def test_action_autoplay_turns_it_on_and_off(self):
+        code, _ = web.run_action(self.ctx, "autoplay", {"on": ["on"]})
+        self.assertEqual(code, 200)
+        self.assertTrue(self.dj.state["autoplay"])
+        code, _ = web.run_action(self.ctx, "autoplay", {"on": ["off"]})
+        self.assertEqual(code, 200)
+        self.assertFalse(self.dj.state["autoplay"])
+
+    def test_action_autoplay_flips_without_a_value(self):
+        code, payload = web.run_action(self.ctx, "autoplay", {})
+        self.assertEqual(code, 200)
+        self.assertTrue(self.dj.state["autoplay"])
+        self.assertIn("autoplay on", payload["note"])
+        code, payload = web.run_action(self.ctx, "autoplay", {})
+        self.assertIn("autoplay off", payload["note"])
+        self.assertFalse(self.dj.state["autoplay"])
+
+    def test_a_nonsense_value_is_not_a_settings_change(self):
+        code, payload = web.run_action(self.ctx, "autoplay", {"on": ["maybe"]})
+        self.assertEqual(code, 200)
+        self.assertFalse(self.dj.state["autoplay"], "garbage must not flip autoplay")
+        self.assertIn("is not on or off", payload["note"])
+
+    def test_build_state_exposes_autoplay(self):
+        self.dj.state["autoplay"] = True
+        self.assertTrue(web.build_state(self.ctx)["autoplay"])
+
+    def test_configured_default_is_off(self):
+        # the core fix: a fresh install starts quiet, not with a mix already playing
+        missing = Path(tempfile.mkdtemp()) / "state.json"
+        with mock.patch.object(config, "STATE_FILE", missing):
+            self.assertFalse(config.load_state()["autoplay"])
 
 
 class MetaLookupTests(unittest.TestCase):
@@ -987,11 +1059,18 @@ class OpenPageTests(unittest.TestCase):
         def slow(q, limit=20, **k):
             first.wait(3)
             return [track(1)]
-        with mock.patch("web.prov.yt_search", side_effect=slow):
+        with mock.patch("web.prov.yt_search", side_effect=slow) as ys:
             web.start_page(self.ctx, "artist", "old", "Old")
             web.start_page(self.ctx, "album", "fake album", "Fake")
             first.set()
             self.assertTrue(self.wait())
+            # both workers run through the search fallback (browse gives nothing in
+            # the sandbox); wait for the older one too so it cannot still be calling
+            # yt_search after `with` restores the real function and leak onto the
+            # next test's mock
+            deadline = time.monotonic() + 3
+            while ys.call_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
         self.assertEqual(self.ctx.page["title"], "Fake", "the newer page wins")
 
     def test_open_album_falls_back_to_artist_page_when_no_album(self):
