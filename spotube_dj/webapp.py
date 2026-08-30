@@ -386,9 +386,13 @@ color:var(--muted);font-weight:700}
 .why{background:rgba(0,0,0,.42);border-radius:8px;padding:11px 12px;font-size:13px;
 line-height:1.55;color:#e8e8e8}
 .why b{color:var(--text)}
+/* Credits sits over a blurred cover that is usually near-black, so a faint grey
+   label ("album", "released") disappears into it. Make every line white so the
+   block reads on any background; the values stay a touch softer than the labels
+   so the pair is still legible as label-vs-value rather than one white wall. */
 .kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 14px;font-size:13px}
-.kv dt{color:var(--faint)}
-.kv dd{margin:0;color:var(--text);overflow-wrap:anywhere}
+.kv dt{color:var(--text);font-weight:600}
+.kv dd{margin:0;color:#fff;overflow-wrap:anywhere;opacity:.92}
 .mini{display:flex;flex-direction:column;gap:2px}
 .mini .m{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:10px;align-items:center;
 padding:5px 6px;border-radius:6px;font-size:13px}
@@ -407,8 +411,9 @@ text-transform:none;margin-left:2px}
    room for the song and a single actions column - the same shape Spotify's queue
    uses, where the title is the thing a person scans for. The title gets the lion's
    share (2.4fr) and the artist a quarter of it, so a song name reads without being
-   chopped a few characters in. */
-#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:8px}
+   chopped a few characters in; the column gap is a little wider so the title is
+   not mashing into the artist's name. */
+#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:14px}
 #upnext .row .n{display:none}
 #upnext .row .du{color:var(--muted);font-size:12px;text-align:right}
 #upnext .row .fab{right:44px}
