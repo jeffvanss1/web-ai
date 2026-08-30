@@ -427,17 +427,23 @@ def _decode_ws_message(data: bytes):
 
 
 def _ws_connect(url: str, timeout: float = 30.0) -> socket.socket:
-    """Open + handshake a wss:// connection; returns the wrapped socket.
+    """Open + handshake a websocket connection; returns the wrapped socket.
 
-    The API key rides in the URL query (`?key=...`), exactly as the Live API
-    get-started example does; the WebSocket upgrade does not take a key header.
+    TLS is applied only for a `wss://` scheme (the Live endpoint, production);
+    a `ws://` URL connects in plaintext, which is how the integration tests run
+    the client against a local mock server. The API key rides in the URL query
+    (`?key=...`), exactly as the Live API get-started example does; the WebSocket
+    upgrade does not take a key header.
     """
     u = urllib.parse.urlparse(url)
     host, port = u.hostname, (u.port or (443 if u.scheme == "wss" else 80))
     path = (u.path or "/") + (("?" + u.query) if u.query else "")
-    ctx = ssl.create_default_context()
     raw = socket.create_connection((host, port), timeout=timeout)
-    sock = ctx.wrap_socket(raw, server_hostname=host)
+    if u.scheme == "wss":
+        ctx = ssl.create_default_context()
+        sock = ctx.wrap_socket(raw, server_hostname=host)
+    else:
+        sock = raw
     sock.settimeout(timeout)
     nonce = base64.b64encode(os.urandom(16)).decode()
     req = (f"GET {path} HTTP/1.1\r\n"

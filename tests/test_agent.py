@@ -9,7 +9,13 @@ no-audio no-op, all offline (the network calls are mocked).
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import os
+import socket
+import struct
+import threading
 import unittest
 from unittest import mock
 
@@ -445,7 +451,6 @@ class SpeechTests(unittest.TestCase):
         # the RFC 6455 framing the Live client uses: masked client text, unmasked
         # server payload, ping opcode - all decoded by the same reader
         import djvoice
-        import socket
         a, b = socket.socketpair()
         try:
             msg = '{"setup":{"model":"m"}}'
@@ -459,3 +464,170 @@ class SpeechTests(unittest.TestCase):
         finally:
             a.close()
             b.close()
+
+
+# --- a tiny mock of the Gemini Live API over a real socket --------------------
+# Drives the *actual* client (djvoice._gemini_live_synth) end-to-end: a real
+# 101 WebSocket upgrade, real framed JSON, then setupComplete + PCM, or a real
+# close frame for an unwanted voice. This proves the network path, the framing,
+# the close-reason decode and the safe-voice fallback all work - without a key.
+_WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def _mock_read_frame(sock):
+    def exact(n):
+        buf = b""
+        while len(buf) < n:
+            c = sock.recv(n - len(buf))
+            if not c:
+                raise EOFError
+            buf += c
+        return buf
+    b1, b2 = exact(2)
+    opcode = b1 & 0x0F
+    masked = bool(b2 & 0x80)
+    length = b2 & 0x7F
+    if length == 126:
+        length = int.from_bytes(exact(2), "big")
+    elif length == 127:
+        length = int.from_bytes(exact(8), "big")
+    key = exact(4) if masked else b""
+    payload = exact(length)
+    if masked:
+        payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+    return opcode, payload
+
+
+def _mock_send_frame(sock, opcode, payload):
+    length = len(payload)
+    head = bytearray([0x80 | (opcode & 0x0F)])
+    if length < 126:
+        head.append(length)
+    elif length < 65536:
+        head.append(126)
+        head += length.to_bytes(2, "big")
+    else:
+        head.append(127)
+        head += length.to_bytes(8, "big")
+    sock.sendall(bytes(head) + payload)
+
+
+def _setup_voice(setup: dict) -> str:
+    """Pull the configured voice name from either setup shape."""
+    s = setup.get("setup") or {}
+    cc = (s.get("generationConfig") or {}).get("speechConfig") or {}
+    top = s.get("speechConfig") or {}
+    vc = (cc or top).get("voiceConfig") or {}
+    return (vc.get("prebuiltVoiceConfig") or {}).get("voiceName") or ""
+
+
+def _mock_handle(conn, reject_despina):
+    try:
+        head = b""
+        while b"\r\n\r\n" not in head:
+            c = conn.recv(1)
+            if not c:
+                return
+            head += c
+        key = ""
+        for line in head.decode("latin1").split("\r\n"):
+            if line.lower().startswith("sec-websocket-key:"):
+                key = line.split(":", 1)[1].strip()
+        accept = base64.b64encode(hashlib.sha1((key + _WS_GUID).encode()).digest()).decode()
+        conn.sendall(("HTTP/1.1 101 Switching Protocols\r\n"
+                      "Upgrade: websocket\r\n"
+                      "Connection: Upgrade\r\n"
+                      f"Sec-WebSocket-Accept: {accept}\r\n\r\n").encode())
+        op, payload = _mock_read_frame(conn)
+        setup = json.loads(payload)
+        voice = _setup_voice(setup)
+        if reject_despina and voice.lower() == "despina":
+            _mock_send_frame(conn, 8, struct.pack("!H", 4003) + b"voice not supported")
+            return
+        _mock_send_frame(conn, 1, b'{"setupComplete":{}}')
+        _mock_read_frame(conn)                       # the client's text turn
+        pcm = b"\x00\x00\x01\x00" * 100
+        b64 = base64.b64encode(pcm).decode()
+        _mock_send_frame(conn, 1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":'
+                                   '{"data":"%s","mimeType":"audio/L16;codec=pcm;rate=24000"}}]}}}'
+                                   % b64).encode())
+        _mock_send_frame(conn, 1, b'{"serverContent":{"turnComplete":true}}')
+    except Exception:
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+class _MockLiveServer:
+    def __init__(self, reject_despina=False):
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind(("127.0.0.1", 0))
+        self.srv.listen(5)
+        self.port = self.srv.getsockname()[1]
+        self._stop = threading.Event()
+        def run():
+            self.srv.settimeout(0.5)
+            while not self._stop.is_set():
+                try:
+                    conn, _ = self.srv.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                threading.Thread(target=_mock_handle,
+                                 args=(conn, reject_despina), daemon=True).start()
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return (f"ws://127.0.0.1:{self.port}/ws/google.ai.generativelanguage.v1beta."
+                f"GenerativeService.BidiGenerateContent?key=x")
+
+    def close(self):
+        self._stop.set()
+        try:
+            self.srv.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        self.srv.close()
+
+
+class LiveSocketIntegrationTests(unittest.TestCase):
+    """Drive the real Live client against a local mock server, on real sockets."""
+
+    def _run(self, reject_despina: bool):
+        import djvoice
+        import tempfile
+        from pathlib import Path
+        server = _MockLiveServer(reject_despina=reject_despina)
+        out = Path(tempfile.mkstemp(suffix=".wav")[1])
+        try:
+            with mock.patch.object(config, "LLM_API_KEY", "x"):
+                with mock.patch.object(djvoice, "tts_model",
+                                       return_value="gemini-3.1-flash-live-preview"):
+                    with mock.patch.object(djvoice, "_live_url",
+                                           return_value=server.url):
+                        ok = djvoice._gemini_live_synth("hello", out)
+            self.assertTrue(ok)
+            self.assertGreater(out.stat().st_size, 0)
+            import wave as wave_mod
+            with wave_mod.open(str(out), "rb") as wf:
+                self.assertEqual(wf.getframerate(), 24000)
+                self.assertEqual(wf.getsampwidth(), 2)
+                self.assertEqual(wf.getnchannels(), 1)
+        finally:
+            out.unlink(missing_ok=True)
+            server.close()
+
+    def test_live_synth_speaks_over_a_real_socket(self):
+        self._run(reject_despina=False)
+
+    def test_live_synth_falls_back_on_rejected_voice_over_a_real_socket(self):
+        # Despina is rejected by the mock (short Live voice roster), so the
+        # client reconnects with the Live-safe voice and still speaks.
+        self._run(reject_despina=True)
