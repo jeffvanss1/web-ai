@@ -22,11 +22,14 @@ background-clip:padding-box;border-radius:8px}
 .app{display:grid;grid-template-columns:300px minmax(0,1fr) 360px;gap:10px;min-height:0;
 position:relative}
 /* a liquid-glass card: a translucent shell with a soft edge and an inner highlight,
-   so the blurred cover behind it reads as frosted glass rather than a flat box */
-.panel{background:linear-gradient(165deg,rgba(34,34,40,.78),rgba(16,16,20,.92));
-border:1px solid rgba(255,255,255,.055);border-radius:var(--r);min-height:0;
+   so the blurred cover behind it reads as frosted glass. The right panel must NEVER
+   read as a transparent box over content - the report "give a transparent box" was
+   the panel's own backdrop letting the middle column bleed through - so it gets a
+   real, mostly-opaque base that keeps the frosted look without the see-through. */
+.panel{background:linear-gradient(165deg,rgba(30,30,36,.94),rgba(14,14,17,.97));
+border:1px solid rgba(255,255,255,.07);border-radius:var(--r);min-height:0;
 position:relative;isolation:isolate;overflow:hidden;
-box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 24px 70px rgba(0,0,0,.55);
+box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 24px 70px rgba(0,0,0,.55);
 backdrop-filter:blur(30px) saturate(1.35)}
 
 /* ---- the blurred cover: the one thing a terminal skin could never do ---- */
@@ -234,7 +237,17 @@ overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.6);background:var(--input)}
 word-break:break-word}
 .dartist{display:flex;align-items:center;gap:6px;color:var(--text);font-size:14px;font-weight:600}
 .dartist svg{width:15px;height:15px;color:#3ea4f5}
-.dbody{overflow-y:auto;padding:0 16px 18px;flex:1;min-height:0}
+/* the Now Playing artist as a link to the in-app artist page: a button, but one
+   that reads as the name, and only grows a line on hover so it never shouts */
+.plink{font:inherit;color:var(--text);padding:0;border-bottom:1px solid transparent;
+transition:border-color .12s}
+.plink:hover{color:#fff;border-bottom-color:rgba(255,255,255,.4)}
+/* the right panel's content is one safe scroll container: `overflow-y:auto` plus a
+   definite height (flex:1;min-height:0) so it always scrolls inside the panel and
+   never walks the page. A thin visible scrollbar keeps it obvious you can get back
+   up to Now Playing, which is what "I can't scroll up anymore" was about. */
+.dbody{overflow-y:auto;overflow-x:hidden;padding:0 16px 18px;flex:1;min-height:0;
+scrollbar-width:thin;overscroll-behavior:contain}
 .sect{margin-top:16px}
 /* the panel's microcopy is read against a blurred cover, so it gets a real colour
    and a wider track instead of the faint grey that disappeared behind the art */
@@ -471,6 +484,14 @@ minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
     <div class="rows" id="recents"></div>
     <h2>The queue as the DJ built it</h2>
     <div class="logbox" id="log2"></div>
+   </section>
+   <section id="view-page" hidden>
+    <div class="greet">
+     <span id="page-title">Loading</span>
+     <button class="btn ghost" id="page-back" title="Back to Now Playing"><svg viewBox="0 0 24 24"><path d="M15.4 4.6 7.9 12l7.5 7.4 1.5-1.5L10.8 12l6.1-5.9z"/></svg><span>Back</span></button>
+    </div>
+    <div class="sub" id="page-sub"></div>
+    <div class="rows" id="page-rows"></div>
    </section>
   </div>
    </div>
@@ -943,8 +964,12 @@ function trackRow2(t){
 /* ---------- views ---------- */
 function setView(name, push){
   if (name === S.view) return;
-  ((VM && VM.views) || ["home"]).forEach((v) => {
-    $("view-" + v).hidden = v !== name;
+  // "page" is a dynamic view (album / artist) not in the static NAV list, so it is
+  // toggled alongside the fixed ones.
+  const views = ((VM && VM.views) || ["home"]).concat(["page"]);
+  views.forEach((v) => {
+    const elv = $("view-" + v);
+    if (elv) elv.hidden = v !== name;
   });
   S.view = name;
   if (push !== false) { S.hist = S.hist.slice(0, S.hix + 1); S.hist.push(name); S.hix = S.hist.length - 1; }
@@ -1056,7 +1081,15 @@ function drawDetail(s){
   const by = $("np-by");
   redraw(by, sigOf([np.title || "", np.artist || "", np.channel || "", tick]), (b) => {
     if (!np.title) return;
-    b.appendChild(el("span", null, np.artist || np.channel || "unknown artist"));
+    // the artist is a live link to the in-app artist page, not a dead line of text
+    const name = el("button", "plink", np.artist || np.channel || "unknown artist");
+    name.title = "Songs by this artist";
+    name.addEventListener("click", (e) => {
+      e.stopPropagation();
+      setView("page");
+      act("open_artist", {artist: np.artist || np.channel || ""});
+    });
+    b.appendChild(name);
     if (tick) b.appendChild(svg("verified"));
   });
   by.hidden = !np.title;
@@ -1185,6 +1218,27 @@ function drawResults(s){
     rows.forEach((t, i) => b.appendChild(rowNode(t, i, {})));
   });
 }
+function drawPage(s){
+  const p = s.page || null;
+  if (!p) return;
+  const title = $("page-title"), sub = $("page-sub"), box = $("page-rows");
+  if (!title || !box) return;
+  setText(title, p.title || (p.kind === "artist" ? "Artist" : "Album"));
+  setText(sub, p.sub || (p.pending ? "" : p.note || ""));
+  if (p.pending) {
+    redraw(box, "pending", (b) => b.appendChild(
+      el("div", "empty", "looking that up...")));
+    return;
+  }
+  const rows = p.rows || [];
+  redraw(box, sigOf([rows, p.kind, p.note]), (b) => {
+    if (!rows.length) {
+      b.appendChild(el("div", "empty", p.note || "no tracks back for that yet"));
+      return;
+    }
+    rows.forEach((t, i) => b.appendChild(rowNode(t, i, {})));
+  });
+}
 function drawTaste(s){
   const t = s.taste || {};
   const box = $("taste");
@@ -1301,6 +1355,7 @@ function draw(s){
   region("drawDetail", () => drawDetail(s));
   region("drawPlayer", () => drawPlayer(s));
   region("drawResults", () => drawResults(s));
+  region("drawPage", () => drawPage(s));
   region("drawTaste", () => drawTaste(s));
   region("drawSettings", () => drawSettings(s));
   region("drawRecents", () => drawRecents(s));
@@ -1338,7 +1393,11 @@ $("lib-sort").addEventListener("click", () => {
 $("detail-close").addEventListener("click", () => $("app").classList.remove("wide"));
 $("np-album").addEventListener("click", () => {
   const np = (S.state || {}).now || {};
-  if (np.album_url) act("open", {url: np.album_url});
+  // open the album as an in-app page (it needs the album + artist names, which the
+  // metadata fetch already put on the track). If the album is still resolving, the
+  // action falls back to "songs by <artist>" rather than dead-clicking.
+  setView("page");
+  act("open_album", {album: np.album || "", artist: np.artist || ""});
 });
 $("open-settings").addEventListener("click", () => setView("library"));
 $("engine").addEventListener("click", () => setView("library"));
@@ -1349,6 +1408,7 @@ $("nav-fwd").addEventListener("click", () => {
   if (S.hix < S.hist.length - 1) { S.hix++; setView(S.hist[S.hix], false); }
 });
 $("mixbtn").addEventListener("click", () => act("mix"));
+$("page-back").addEventListener("click", () => setView("home"));
 $("b-more").addEventListener("click", (e) => {
   // the menu the transport bar ends with: the verbs that are real but not a button
   // wide (pause vs resume, "not for me", unlove, leaving a station) belong here
@@ -1365,14 +1425,22 @@ $("b-more").addEventListener("click", (e) => {
   items.push({label: "Stop everything", icon: "stop", bad: true, fn: () => act("stop")});
   menu($("b-more"), items);
 });
+/* the queue now lives in the right Now Playing panel. A toggle, not a one-shot
+   scroll-into-view: `scrollIntoView` walks *every* scrollable ancestor, so on a
+   narrow window it jumped the page to the bottom and left the panel stranded with
+   no way back up. This scrolls only the panel's own `.dbody`; the second press
+   brings you back up to Now Playing. The panel itself is always opaque and its
+   content always scrolls, so there is never a transparent dead box. */
 $("b-queue").addEventListener("click", () => {
-  // the queue now lives in the right Now Playing panel, like the apps this layout
-  // is borrowed from. On a window narrow enough that the panel is tucked away, this
-  // first reveals it; then it brings the Queue heading into view. There is no
-  // second list to drift out of sync - one queue, one home.
-  if (window.matchMedia("(max-width:1300px)").matches) $("app").classList.add("wide");
-  const n = $("uph");
-  if (n && n.scrollIntoView) n.scrollIntoView({behavior:"smooth", block:"start"});
+  const dbody = $("detail") && $("detail").querySelector(".dbody");
+  const q = $("uph");
+  if (!dbody || !q) return;
+  const narrow = window.matchMedia("(max-width:1300px)").matches;
+  // pressing the queue button again while it is showing scrolls back up to the top
+  if (S._qback) { S._qback = false; dbody.scrollTo({top: 0, behavior: "smooth"}); return; }
+  if (narrow) $("app").classList.add("wide");
+  dbody.scrollTo({top: Math.max(0, q.offsetTop - 10), behavior: "smooth"});
+  S._qback = true;
 });
 $("unkeybtn").addEventListener("click", async () => {
   try { draw((await post("/api/settings", {clear_key:"1"})).state); toast("key removed"); }

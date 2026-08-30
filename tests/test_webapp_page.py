@@ -156,7 +156,9 @@ class IdContractTests(unittest.TestCase):
 
     def test_unreferenced_sections_would_be_dead_weight(self):
         have = set(re.findall(r'id="view-([a-z]+)"', self.html))
-        self.assertEqual(have, set(vm.VIEWS),
+        # "page" is the dynamic album/artist view: reachable via setView("page"),
+        # but not a permanent nav destination, so it is the one allowed extra.
+        self.assertEqual(have, set(vm.VIEWS) | {"page"},
                          "the page has a section no view can reach, or a view with no section")
 
 

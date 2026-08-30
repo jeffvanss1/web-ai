@@ -949,6 +949,79 @@ class SearchTests(unittest.TestCase):
         self.assertIn("429", self.ctx.search["note"])
 
 
+class OpenPageTests(unittest.TestCase):
+    """
+    The in-app album / artist page: start_page builds it off the trusted search
+    endpoint, the latest open wins, and /api/state exposes it for the `page` view.
+    """
+
+    def setUp(self):
+        self.ctx = web.Context(fake_dj())
+        self.bcast: list[str] = []
+        self._real = self.ctx.broadcast
+        self.ctx.broadcast = self.bcast.append
+
+    def wait(self, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not (self.ctx.page or {}).get("pending", False):
+                return True
+            time.sleep(0.01)
+        return False
+
+    def tearDown(self):
+        self.ctx.broadcast = self._real
+
+    def test_start_page_builds_rows_and_clears_pending(self):
+        with mock.patch("web.prov.yt_search", return_value=[track(7), track(8)]) as ys:
+            web.start_page(self.ctx, "artist", "Radiohead songs", "Radiohead")
+            self.assertTrue(self.wait())
+        ys.assert_called_once()
+        self.assertEqual(self.ctx.page["kind"], "artist")
+        self.assertEqual(self.ctx.page["title"], "Radiohead")
+        self.assertEqual(len(self.ctx.page["rows"]), 2)
+        self.assertEqual(self.ctx.page["rows"][0]["title"], "Track 7")
+
+    def test_a_newer_page_open_discards_an_older_one(self):
+        first = threading.Event()
+        def slow(q, limit=20, **k):
+            first.wait(3)
+            return [track(1)]
+        with mock.patch("web.prov.yt_search", side_effect=slow):
+            web.start_page(self.ctx, "artist", "old", "Old")
+            web.start_page(self.ctx, "album", "fake album", "Fake")
+            first.set()
+            self.assertTrue(self.wait())
+        self.assertEqual(self.ctx.page["title"], "Fake", "the newer page wins")
+
+    def test_open_album_falls_back_to_artist_songs_when_no_album(self):
+        with mock.patch("web.start_page") as sp, \
+             mock.patch("web.prov.yt_search", return_value=[]):
+            code, payload = web.run_action(self.ctx, "open_album",
+                                           {"album": [""], "artist": ["Portishead"]})
+        self.assertEqual(code, 200)
+        self.assertIn("songs by Portishead", payload["note"])
+        sp.assert_called_once()
+        self.assertEqual(sp.call_args[0][1], "artist", "falls back to an artist page")
+
+    def test_open_artist_delegates_to_start_page(self):
+        with mock.patch("web.start_page") as sp, \
+             mock.patch("web.prov.yt_search", return_value=[]):
+            code, payload = web.run_action(self.ctx, "open_artist",
+                                           {"artist": ["Nirvana"]})
+        self.assertEqual(code, 200)
+        self.assertIn("showing songs by Nirvana", payload["note"])
+        sp.assert_called_once()
+
+    def test_build_state_exposes_the_page(self):
+        self.ctx.page = {"kind": "album", "title": "Dummy",
+                         "sub": "Portishead", "rows": [web.row_view(track(1))],
+                         "pending": False, "note": ""}
+        s = web.build_state(self.ctx)
+        self.assertEqual(s["page"]["title"], "Dummy")
+        self.assertEqual(s["page"]["kind"], "album")
+
+
 class TraversalTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="art-"))

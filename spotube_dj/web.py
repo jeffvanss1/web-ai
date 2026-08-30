@@ -359,6 +359,7 @@ def build_state(ctx) -> dict:
                    "q": str(ctx.search.get("q") or ""),
                    "note": str(ctx.search.get("note") or ""),
                    "rows": [row_view(t) for t in (ctx.search.get("rows") or [])]},
+        "page": dict(ctx.page) if ctx.page else None,
         "loved": loved_rows(state=prof),
         "station": str(st.get("station") or ""),
         "repeat": str(st.get("repeat") or "off"),
@@ -429,6 +430,10 @@ class Context:
         self.dj = dj
         self.volume = int(volume)
         self.search = {"pending": False, "q": "", "rows": [], "note": ""}
+        # the in-app album/artist page: filled on a background thread the same way
+        # search is, so opening "See album" or an artist never holds the socket.
+        self.page = None            # {"kind","title","sub","rows","pending",...} or None
+        self._page_seq = 0
         self._search_seq = 0                  # which search is allowed to land
         self.job = None                       # the thread building a mix
         self._job_lock = threading.Lock()     # who is allowed to start the next one
@@ -1054,6 +1059,49 @@ def _clear_station(ctx) -> str:
     return "station label cleared"
 
 
+def _clean_name(s: str) -> str:
+    return " ".join(str(s or "").split()).strip()
+
+
+def action_open_album(ctx, fields: dict) -> str:
+    """
+    Open the album/record behind the playing track as an in-app page.
+
+    The album name comes from the track's own metadata (already fetched for Credits);
+    this searches "<album> <artist>" on the trusted Music endpoint and presents the
+    rows as a page. If no album is known yet, fall back to a plain "song" search so
+    the button always does something rather than silently doing nothing.
+    """
+    album = _clean_name((fields.get("album") or [""])[0])
+    artist = _clean_name((fields.get("artist") or [""])[0])
+    if not album:
+        # no album metadata yet: treat it as a search for the current track's artist
+        if artist:
+            start_page(ctx, "artist", f"{artist} songs", artist,
+                       "songs by this artist")
+            return f"showing songs by {artist}"
+        return "no album or artist to show for the current track"
+    title = album
+    sub = artist or "album"
+    start_page(ctx, "album", f"{album} {artist}".strip(), title, sub)
+    return f"showing album '{album}'" + (f" by {artist}" if artist else "")
+
+
+def action_open_artist(ctx, fields: dict) -> str:
+    """
+    Open an artist as an in-app page: "Songs by <artist>" on the Music endpoint.
+
+    This is the clickable artist name in Now Playing - what the user asked for when
+    they said "the artist page you didnt make it". It uses the same reliable search
+    that the Search tab uses, so it works without a separate browse endpoint.
+    """
+    artist = _clean_name((fields.get("artist") or [""])[0])
+    if not artist:
+        return "no artist to show"
+    start_page(ctx, "artist", f"{artist} songs", artist, "songs by this artist")
+    return f"showing songs by {artist}"
+
+
 def action_test_brain(ctx, fields: dict) -> str:
     """
     Ask the configured brain one question, on a thread.
@@ -1102,6 +1150,8 @@ ACTIONS = {
     "remove_queue": action_row_remove,
     "dislike": action_row_dislike,
     "open": action_open,
+    "open_album": action_open_album,
+    "open_artist": action_open_artist,
     "test_brain": action_test_brain,
     "clear_station": lambda c, f: _clear_station(c),
     "shuffle": action_shuffle,
@@ -1182,6 +1232,48 @@ def do_search(ctx, text: str) -> tuple[int, dict]:
     start_search(ctx, text)
     return HTTPStatus.OK, {"search": {"pending": True, "q": text, "rows": [], "note": ""},
                            "note": "searching - the results land in the Search tab"}
+
+
+def start_page(ctx, kind: str, query: str, title: str, sub: str = "") -> None:
+    """
+    Build the in-app Artist / Album page on a thread.
+
+    A page is a hand onto the *same* trusted search endpoint the Search tab uses, so
+    it works offline-friendly and never depends on fragile InnerTube browse parsing:
+    "Songs by <artist>" for an artist, "<album> <artist>" for an album. The result
+    goes in `ctx.page`, which /api/state exposes and the `page` view renders. Only
+    the latest open wins (a second click during a lookup discards the first), exactly
+    like search.
+    """
+    with ctx._lock:
+        ctx._page_seq += 1
+        mine = ctx._page_seq
+    ctx.page = {"kind": kind, "title": title, "sub": sub, "rows": [],
+                "pending": True, "note": ""}
+    ctx.broadcast(json.dumps({"page": dict(ctx.page)}))
+
+    def job():
+        try:
+            rows = prov.yt_search(query, limit=20)
+        except Exception as e:
+            rows, note = [], (f"lookup failed: {e.__class__.__name__}"
+                              + (f": {e}" if str(e) else ""))
+        else:
+            note = ("" if rows else
+                    "no tracks came back for that - try a better-known artist or album")
+        for t in rows or []:
+            try:
+                ctx.art.put_nowait(t)
+            except queue.Full:
+                pass
+        if mine != ctx._page_seq:
+            return                     # a newer page was opened; drop this one
+        ctx.page = {"kind": kind, "title": title, "sub": sub,
+                    "rows": [row_view(t) for t in (rows or [])],
+                    "pending": False, "note": note}
+        ctx.broadcast(json.dumps({"page": dict(ctx.page)}))
+
+    threading.Thread(target=job, daemon=True).start()
 
 
 def start_search(ctx, text: str) -> None:
