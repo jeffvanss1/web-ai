@@ -360,12 +360,48 @@ class SpeechTests(unittest.TestCase):
                                 self.assertEqual(wf.getnchannels(), 1)
                             out.unlink(missing_ok=True)
         # first frame is the Live setup with the voice; second is the text input.
-        # For gemini-3.1 the modality + voice sit at the top of the setup message.
+        # The api/live reference puts speechConfig under generationConfig while
+        # responseModalities sits at the top of setup (quickstart style).
         self.assertEqual(sent[0]["setup"]["model"], "models/gemini-3.1-flash-live-preview")
         self.assertEqual(sent[0]["setup"]["responseModalities"], ["AUDIO"])
-        self.assertEqual(sent[0]["setup"]["speechConfig"]["voiceConfig"]
-                         ["prebuiltVoiceConfig"]["voiceName"], "Despina")
+        self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
+                         ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
         self.assertEqual(sent[1]["realtimeInput"]["text"], "hello")
+
+    def test_live_synth_falls_back_to_a_safe_voice_when_one_is_rejected(self):
+        import djvoice
+        import base64, json, tempfile
+        from pathlib import Path
+        pcm = b"\x00\x00\x01\x00" * 100
+        b64 = base64.b64encode(pcm).decode()
+        frames = [
+            (8, b""),                                  # variant 1 rejected (server close)
+            (1, b'{"setupComplete":{}}'),              # variant 2 accepted
+            (1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
+                 '"mimeType":"audio/L16;codec=pcm;rate=24000"}}]}}}' % b64).encode()),
+            (1, b'{"serverContent":{"turnComplete":true}}'),
+        ]
+        sent = []
+        fake_iter = iter(frames)
+        def fake_send(sock, opcode, payload, mask=True):
+            sent.append(json.loads(payload))
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(djvoice, "tts_model",
+                                   return_value="gemini-3.1-flash-live-preview"):
+                with mock.patch.object(djvoice, "_ws_connect",
+                                       return_value=type("S", (), {"close": lambda s: None})()):
+                    with mock.patch.object(djvoice, "_ws_read_frame",
+                                           side_effect=lambda *a: next(fake_iter)):
+                        with mock.patch.object(djvoice, "_ws_send_frame",
+                                               side_effect=fake_send):
+                            out = Path(tempfile.mkstemp(suffix=".wav")[1])
+                            self.assertTrue(djvoice._gemini_live_synth("hello", out))
+                            out.unlink(missing_ok=True)
+        # variant 1 used the configured voice, variant 2 a Live-safe one (kore)
+        self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
+                         ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
+        self.assertEqual(sent[1]["setup"]["generationConfig"]["speechConfig"]
+                         ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "kore")
 
     def test_live_synth_writes_a_container_as_is(self):
         # the Live model may return ogg/opus rather than PCM; those bytes are

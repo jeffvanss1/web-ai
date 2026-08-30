@@ -402,6 +402,30 @@ def _ws_read_frame(sock) -> tuple[int, bytes]:
     return opcode, payload
 
 
+def _ws_close_reason(payload: bytes) -> str:
+    """Turn a WebSocket close frame payload into a readable status + reason."""
+    if not payload:
+        return "no status (empty close frame)"
+    try:
+        code = int.from_bytes(payload[:2], "big")
+        reason = payload[2:].decode("utf-8", "replace").strip()
+    except Exception:
+        return f"unparseable close payload {payload!r}"
+    return (f"status {code}" + (f" '{reason}'" if reason else " (no reason)"))
+
+
+def _decode_ws_message(data: bytes):
+    """Return (message_dict, raw_text) for an opcode-1 text frame, else None."""
+    try:
+        txt = data.decode("utf-8")
+    except Exception:
+        return None
+    try:
+        return json.loads(txt), txt
+    except Exception:
+        return None
+
+
 def _ws_connect(url: str, timeout: float = 30.0) -> socket.socket:
     """Open + handshake a wss:// connection; returns the wrapped socket.
 
@@ -451,7 +475,7 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
             _info(f"gemini (live): socket read failed: {e.__class__.__name__}: {e}")
             return audio, rate, compressed, False
         if opcode == 8:                                   # close
-            _info("gemini (live): closed before the turn finished")
+            _info("gemini (live): server sent close -> " + _ws_close_reason(data))
             return audio, rate, compressed, True
         if opcode == 9:                                   # ping -> pong
             try:
@@ -492,6 +516,81 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
     return audio, rate, compressed, False
 
 
+# The Live API's prebuiltVoiceConfig is a *smaller* roster than the full TTS voice
+# list. The Live/ADK docs call out Puck, Charon, Kore, Fenrir, Aoede, Leda, Orus,
+# Zephyr; voices like Despina are only on the synchronous generateContent TTS
+# endpoint. We try the user's configured voice first and, if the server closes
+# during setup (i.e. it rejected the voice/config), retry on a fresh connection
+# with a Live-safe voice, so the DJ still speaks instead of silently falling back.
+_LIVE_SAFE_VOICES = ("puck", "charon", "kore", "fenrir", "aoede", "leda", "orus",
+                    "zephyr")
+_DJ_SYSTEM_INSTRUCTION = ("You are the Spotube DJ: a warm, quick-witted radio host. "
+                          "Keep every spoken line to one or two short, natural, "
+                          "upbeat sentences.")
+
+_LIVE_DEFAULT_SAFE_VOICE = "kore"
+
+
+def _live_setup(sock, setup: dict, timeout: float = 15.0) -> bool:
+    """Send one Live `setup` and wait for `setupComplete`.
+
+    Returns True only once the server answers setupComplete; otherwise logs the
+    exact reason (close status/reason, goAway, non-JSON frame, or a timeout) and
+    returns False, so the caller can try another setup on a fresh connection.
+    """
+    _ws_send_frame(sock, 1, json.dumps({"setup": setup}).encode())
+    _info("gemini (live): setup:: " + json.dumps(setup)[:260])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            opcode, data = _ws_read_frame(sock)
+        except socket.timeout:
+            _info(f"gemini (live): setup not answered within {timeout:.0f}s "
+                  "(no setupComplete)")
+            return False
+        except Exception as e:
+            _info(f"gemini (live): setup read failed: {e.__class__.__name__}: {e}")
+            return False
+        if opcode == 8:                                   # close
+            _info("gemini (live): server closed during setup -> " +
+                  _ws_close_reason(data))
+            return False
+        if opcode == 1:
+            decoded = _decode_ws_message(data)
+            if decoded is None:
+                _info("gemini (live): setup-phase non-JSON text frame " +
+                      repr(data)[:200])
+                continue
+            msg, _raw = decoded
+            if "setupComplete" in msg:
+                _info("gemini (live): setupComplete")
+                return True
+            if "goAway" in msg:
+                _info(f"gemini (live): goAway -> {msg.get('goAway')}")
+                return False
+            _info("gemini (live): setup-phase message " + json.dumps(msg)[:300])
+    _info(f"gemini (live): setup not answered within {timeout:.0f}s "
+          "(no setupComplete)")
+    return False
+
+
+def _send_text_turn(sock, text: str) -> tuple[bytes, int, bool, bool]:
+    """Send the line (realtimeInput, then clientContent as a backstop) and collect."""
+    for attempt in ({"realtimeInput": {"text": text}},
+                    {"clientContent": {"turns": [{"role": "user",
+                                                  "parts": [{"text": text}]}],
+                                       "turnComplete": True}}):
+        try:
+            _ws_send_frame(sock, 1, json.dumps(attempt).encode())
+        except Exception as e:
+            _info(f"gemini (live): send failed: {e.__class__.__name__}: {e}")
+            return b"", 24000, False, False
+        audio, rate, compressed, finished = _live_collect(sock, timeout=12.0, rate=24000)
+        if audio or finished:
+            return audio, rate, compressed, finished
+    return b"", 24000, False, False
+
+
 def _gemini_live_synth(text: str, path: Path) -> bool:
     """Ask the Gemini Live native-audio model to speak `text` over the WebSocket.
 
@@ -508,78 +607,75 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
     model = tts_model()
     if not _is_live_model(model):
         return False
-    sock = None
-    try:
-        sock = _ws_connect(_live_url())
-        _info(f"gemini (live): connected, model={model}, voice={voice_name()}")
-        # For the Gemini 3.1 Live native-audio model the modality and voice config
-        # sit on the setup message itself (not inside generationConfig); the Google
-        # get-started-websocket example for this model is the authority here.
-        setup = {"setup": {
-            "model": "models/" + model,
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {"voiceConfig": {
-                "prebuiltVoiceConfig": {"voiceName": voice_name()}}},
-        }}
-        _ws_send_frame(sock, 1, json.dumps(setup).encode())
-        # wait for the handshake to settle before sending content
-        while True:
-            opcode, data = _ws_read_frame(sock)
-            if opcode == 8:                                   # close
-                _info("gemini (live): closed before setupComplete")
-                sock.close()
-                return False
-            if opcode == 1:
-                msg = json.loads(data)
-                if "setupComplete" in msg:
-                    _info("gemini (live): setupComplete")
-                    break
-                if "goAway" in msg:
-                    _info(f"gemini (live): goAway -> {msg.get('goAway')}")
+    voice = voice_name() or _LIVE_DEFAULT_SAFE_VOICE
+    safe = voice.lower() if voice.lower() in _LIVE_SAFE_VOICES else _LIVE_DEFAULT_SAFE_VOICE
+    # The Google get-started-websocket example for this model puts responseModalities
+    # at the top of setup and adds systemInstruction; the api/live reference puts
+    # speechConfig under generationConfig. We try a couple of the documented shapes,
+    # in order, each on a fresh connection, so a rejected config can't stop the DJ.
+    base = {"model": "models/" + model, "responseModalities": ["AUDIO"],
+            "systemInstruction": {"parts": [{"text": _DJ_SYSTEM_INSTRUCTION}]}}
+    variants = []
+    # 1. modality top-level, voice under generationConfig (api/live reference).
+    v1 = dict(base)
+    v1["generationConfig"] = {"speechConfig": {"voiceConfig": {
+        "prebuiltVoiceConfig": {"voiceName": voice}}}}
+    variants.append(("voice under generationConfig (%s)" % voice, v1))
+    # 2. same, but a Live-safe voice, in case the configured voice isn't accepted Live.
+    if safe != voice.lower():
+        v2 = dict(base)
+        v2["generationConfig"] = {"speechConfig": {"voiceConfig": {
+            "prebuiltVoiceConfig": {"voiceName": safe}}}}
+        variants.append(("voice under generationConfig, safe voice (%s)" % safe, v2))
+    # 3. quickstart-style: voice at the top of setup (no generationConfig wrapper).
+    v3 = dict(base)
+    v3["speechConfig"] = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
+    variants.append(("voice at top of setup (%s)" % voice, v3))
+
+    for label, setup in variants:
+        sock = None
+        try:
+            sock = _ws_connect(_live_url())
+            _info(f"gemini (live): connected, model={model}, voice={voice_name()}"
+                  f" ({label})")
+            if not _live_setup(sock, setup):
+                try:
                     sock.close()
-                    return False
-                _info("gemini (live): setup-phase message " + json.dumps(msg)[:200])
-        # Gemini 3.1 Live wants real-time text via realtimeInput, not clientContent.
-        # Older Live models use clientContent with turnComplete; try realtimeInput
-        # first and, if it yields nothing, re-send as a clientContent turn as a backstop.
-        audio, rate, compressed = None, 24000, False
-        for attempt in ({"realtimeInput": {"text": text}},
-                        {"clientContent": {"turns": [{"role": "user",
-                                                      "parts": [{"text": text}]}],
-                                           "turnComplete": True}}):
-            if audio:
-                break
-            _ws_send_frame(sock, 1, json.dumps(attempt).encode())
-            audio, rate, compressed, finished = _live_collect(sock, timeout=12.0, rate=rate)
-            if finished:
-                break
+                except Exception:
+                    pass
+                continue
+        except Exception as e:
+            _info(f"gemini (live): connect/setup failed ({label}): "
+                  f"{e.__class__.__name__}: {e}")
+            try:
+                if sock is not None:
+                    sock.close()
+            except Exception:
+                pass
+            continue
+        audio, rate, compressed, _finished = _send_text_turn(sock, text)
         try:
             sock.close()
         except Exception:
             pass
         if not audio:
-            _info("gemini (live): no audio came back (tried realtimeInput and clientContent)")
-            return False
+            _info(f"gemini (live): no audio came back ({label})")
+            continue
         if compressed:
             # a container (ogg/opus/mp3) is written as-is; mpv sniffs the content
             # and does not care that the temp name happens to end in .wav
             path.write_bytes(audio)
             ok = path.exists() and path.stat().st_size > 0
-            _info(f"gemini (live): spoke, wrote {len(audio)} bytes of audio container")
+            _info(f"gemini (live): spoke via {label}, wrote {len(audio)} bytes "
+                  f"of audio container")
             return ok
         _pcm_to_wav(audio, rate, path)
         ok = path.exists() and path.stat().st_size > 0
-        _info(f"gemini (live): spoke, {len(audio)} PCM bytes @ {rate} Hz "
+        _info(f"gemini (live): spoke via {label}, {len(audio)} PCM bytes @ {rate} Hz "
               f"({path.stat().st_size if ok else 0} bytes wav)")
         return ok
-    except Exception as e:
-        _info(f"gemini (live) failed: {e.__class__.__name__}: {e}")
-        try:
-            if sock is not None:
-                sock.close()
-        except Exception:
-            pass
-        return False
+    _info("gemini (live): every setup variant was rejected - falling back")
+    return False
 
 
 def _pcm_to_wav(pcm: bytes, rate: int, path: Path) -> None:
