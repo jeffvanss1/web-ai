@@ -671,3 +671,47 @@ class ThumbSizeTests(unittest.TestCase):
         for slot in ("row", "card", "big"):
             self.assertEqual(self.thumbs.source_of(caa, slot)[1],
                              "https://coverartarchive.org/r/123/front-500")
+
+    def test_the_first_fetch_caches_the_hd_rung(self):
+        # "only cache the HD cover": the first picture a song earns is stored at the
+        # biggest rung (512px), and every slot reuses it - no low-res + HD pair
+        d = Path(self.thumbs.cache_dir())
+        d.mkdir(parents=True, exist_ok=True)
+        seen = []
+        real = self.thumbs._store
+        def fake_store(url, out, px):
+            seen.append((url, str(out), px))
+            out.write_bytes(b"\xff\xd8\xff" + b"0" * 400)
+            return str(out)
+        self.thumbs._store = fake_store
+        try:
+            path = self.thumbs.get({"id": "hdfirst"}, "row")
+            self.assertIn("-512.", str(path), path)
+            self.assertEqual(seen[0][2], 512)
+            self.assertIn("maxresdefault", seen[0][0], "the HD rung is the source")
+        finally:
+            self.thumbs._store = real
+            for f in d.glob("hdfirst-*"):
+                f.unlink(missing_ok=True)
+
+    def test_a_cdn_that_refuses_falls_back_to_the_video_frame(self):
+        # a google CDN album-art URL the lane cannot fetch must not leave the row a
+        # tinted initial: the video id always has a ytimg frame, so store that.
+        d = Path(self.thumbs.cache_dir())
+        d.mkdir(parents=True, exist_ok=True)
+        real = self.thumbs._store
+        def fake_store(url, out, px):
+            if "googleusercontent" in url or "coverartarchive" in url:
+                return None                   # the CDN refuses
+            out.write_bytes(b"\xff\xd8\xff" + b"0" * 400)
+            return str(out)
+        self.thumbs._store = fake_store
+        try:
+            t = {"id": "vidf", "thumbnail": "https://lh3.googleusercontent.com/x=w544-h544"}
+            path = self.thumbs.get(t, "row")
+            self.assertTrue(path and path.endswith((".jpg", ".png")), path)
+            self.assertIn("vidf", path, "the same song's frame is stored")
+        finally:
+            self.thumbs._store = real
+            for f in d.glob("vidf-*"):
+                f.unlink(missing_ok=True)

@@ -193,7 +193,12 @@ def download_url(url: str, track: dict, size: str = "row",
     any_file = _any_cached(vid)
     if any_file:
         return any_file
-    return _store(url, path_for(vid, size, tag), SIZES.get(size, SIZES["row"]))
+    path = _store(url, path_for(vid, size, tag), SIZES.get(size, SIZES["row"]))
+    if path:
+        return path
+    # the archive (or a CDN) refused this one; the video id always has a frame.
+    frame = _frame_url(vid, size)
+    return _store(frame, path_for(vid, size, "yt"), SIZES.get(size, SIZES["row"]))
 
 
 def have(track: dict, size: str = "row") -> bool:
@@ -208,6 +213,19 @@ def have(track: dict, size: str = "row") -> bool:
     if not vid:
         return False
     return bool(_any_cached(vid))
+
+
+def _frame_url(vid: str, size: str = "row") -> str:
+    """A YouTube frame URL for a video id - the fallback that always exists.
+
+    A row's thumbnail is often a CDN the lane or the browser cannot reach (a
+    googleusercontent album-art URL, or a signed copy). A video id is not so
+    fickle: YouTube serves its frame rung for any real upload, so this is what a
+    row gets when its own picture will not load.
+    """
+    px = SIZES.get(size, SIZES["row"])
+    name = "mqdefault.jpg" if px <= 96 else "maxresdefault.jpg"
+    return f"https://i.ytimg.com/vi/{vid}/{name}"
 
 
 def get(track: dict, size: str = "row") -> str | None:
@@ -236,9 +254,20 @@ def get(track: dict, size: str = "row") -> str | None:
     any_file = _any_cached(vid)
     if any_file:
         return any_file
-    if not url:
-        return None
-    return _store(url, path_for(vid, size, tag), SIZES.get(size, SIZES["row"]))
+    # "only cache the HD cover": on the first fetch, store the single biggest rung
+    # (512px) so a song's one cover is the sharpest image it will ever need; every
+    # slot reuses it from then on. If the HD rung does not exist, _store steps down
+    # the ladder on its own.
+    px = SIZES["big"]
+    big_url = art_url(track, "big")
+    path = _store(big_url or url, path_for(vid, "big", rung_of(big_url or url)), px)
+    if path:
+        return path
+    # the row's own thumbnail can be a CDN the lane (or the view) cannot reach.
+    # A video id always has a YouTube frame - try that as the same-origin cover so a
+    # row is never a bare initial just because one host refused it.
+    frame = _frame_url(vid, size)
+    return _store(frame, path_for(vid, size, "yt"), SIZES.get(size, SIZES["row"]))
 
 
 def _px_of(path) -> int:
