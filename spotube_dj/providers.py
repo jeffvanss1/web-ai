@@ -609,6 +609,43 @@ def _ytm_card_info(row: dict) -> tuple[str, str, str]:
     return title.strip(), subtitle.strip(), bid
 
 
+def _ytm_image_candidates(node: dict) -> list[tuple[int, str]]:
+    """
+    Every (area, url) in an InnerTube thumbnail subtree.
+
+    `musicTwoRowItemRenderer.thumbnail` has been spelled `musicThumbnailRenderer`,
+    `videoThumbnailRenderer`, a single `{url,width,height}` object, or the older
+    `sources` list across the years. Reading one shape is exactly why a discography
+    entry or an album row came back with no cover - the art was there, in a branch
+    the parser was not looking at.
+    """
+    out: list[tuple[int, str]] = []
+    if not isinstance(node, dict):
+        return out
+    def area(c):
+        try:
+            return int(c.get("width") or 0) * int(c.get("height") or 0)
+        except (TypeError, ValueError):
+            return 0
+    url = node.get("url")
+    if isinstance(url, str) and url.startswith("http") and "ytimg" in url:
+        out.append((area(node), url))
+    for key in ("thumbnails", "sources"):
+        for c in node.get(key) or []:
+            if not isinstance(c, dict):
+                continue
+            u = c.get("url")
+            if isinstance(u, str) and u.startswith("http") and "ytimg" in u:
+                out.append((area(c), u))
+            out += _ytm_image_candidates(c)
+    for key in ("thumbnail", "musicThumbnailRenderer", "videoThumbnailRenderer",
+                "musicTwoRowItemRenderer", "musicMultiSelectItemRenderer"):
+        sub = node.get(key)
+        if isinstance(sub, dict):
+            out += _ytm_image_candidates(sub)
+    return out
+
+
 def _ytm_card_thumb(row: dict) -> str:
     """
     The artwork of a `musicTwoRowItemRenderer` card (an album / artist result).
@@ -617,17 +654,12 @@ def _ytm_card_thumb(row: dict) -> str:
     cover, so a discography entry and the album page can show it right away instead
     of a coloured initial until the cover lane catches up.
     """
-    node = ((row.get("thumbnail") or {}).get("musicThumbnailRenderer") or {})
-    node = node.get("thumbnail") or {}
-    cands = [c for c in (list(node.get("thumbnails") or [])
-                         + list(node.get("sources") or []))
-             if isinstance(c, dict) and str(c.get("url") or "").startswith("http")]
+    cands = _ytm_image_candidates(row.get("thumbnail") or {})
     if not cands:
         return ""
-    best = max(cands, key=lambda c: (int(c.get("width") or 0)
-                                     * int(c.get("height") or 0)))
+    best = max(cands, key=lambda c: c[0])
     # strip the signed query back so the URL is stable to cache/reuse
-    return str(best.get("url") or "").split("?", 1)[0]
+    return str(best[1]).split("?", 1)[0]
 
 
 def _year_in(text) -> int | None:

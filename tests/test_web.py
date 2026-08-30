@@ -322,6 +322,21 @@ class ArtStampingTests(unittest.TestCase):
         self.assertEqual(s["up_next"][0]["art_card"], "/art/next2.png",
                          "the grid tile needs the 256px file")
 
+    def test_with_art_keeps_a_cover_the_row_brought(self):
+        # a discography / album row arrives with the album's real art already in
+        # `art`/`art_card`; stamping the lane's video frame on top trades a real
+        # album cover for a smaller, blurrier picture the moment the lane reaches it
+        self.ctx._hrefs = {"vid0": {"row": "/art/frame.jpg", "card": "/art/frame2.jpg"}}
+        s = web.build_state(self.ctx)
+        row = dict(s["up_next"][0])
+        row["art"] = "https://i.ytimg.com/cover.jpg"
+        row["art_card"] = "https://i.ytimg.com/cover-card.jpg"
+        s["up_next"][0] = row
+        web.with_art(s, self.ctx)
+        self.assertEqual(s["up_next"][0]["art"], "https://i.ytimg.com/cover.jpg",
+                         "an existing album cover must not be replaced by a frame")
+        self.assertEqual(s["up_next"][0]["art_card"], "https://i.ytimg.com/cover-card.jpg")
+
     def test_a_hero_never_upscale_a_row_thumbnail(self):
         # the old behaviour, written down as a test so it cannot come back: with
         # only a row file on disk the hero shows the gradient and initials, because
@@ -1916,6 +1931,20 @@ class ArtLaneTests(unittest.TestCase):
         self.ctx._seen_art.add(("v3", "row"))
         self.assertEqual(self.ctx.request_art([{"id": "v3"}], "row"), 0,
                          "work the lane has drawn is not work to repeat")
+
+    def test_a_row_that_carries_its_own_cover_is_not_queued_for_a_frame(self):
+        # album tracklists / discography rows arrive with the album's real art in
+        # `thumbnail`; asking the lane to fetch a 72px video frame for them spends
+        # the lane on a poorer picture while genuinely bare rows wait
+        tracks = [{"id": "v1", "thumbnail": "https://i.ytimg.com/cover.jpg"},
+                  {"id": "v2", "thumbnail": ""},
+                  {"id": "v3"}]
+        self.assertEqual(self.ctx.request_art(tracks, "row"), 2)
+        got = []
+        while not self.ctx.art.empty():
+            got.append(self.ctx.art.get_nowait())
+        self.assertEqual([g[0]["id"] for g in got], ["v2", "v3"],
+                         "a row that already has a cover must not be queued")
 
     def test_only_the_visible_rows_are_warmed(self):
         tracks = [{"id": f"v{i}"} for i in range(60)]

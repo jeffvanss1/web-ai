@@ -100,6 +100,23 @@ class PageShapeTests(unittest.TestCase):
         self.assertIn(".scrim{", css, "the backdrop has nothing darkening it")
         self.assertIn("backgroundImage", self.js, "nothing ever sets the backdrop image")
 
+    def test_the_playing_color_drifts_slowly_instead_of_holding_still(self):
+        # the cover-derived tint should be alive, not a fixed gradient: a slow
+        # keyframes animation moves the wash across the page and wanders its hue
+        css = re.search(r"<style>([\s\S]*)</style>", self.html).group(1)
+        self.assertIn("@keyframes tintdrift", css,
+                      "the backdrop has no slow colour drift animation")
+        self.assertIn("animation:tintdrift", css,
+                      "the backdrop layer never runs the tint animation")
+        self.assertIn("hue-rotate(", css,
+                      "the animation does not wander the hue of the playing colour")
+        # "slow" is a stated requirement: a 1-2s loop reads as a busy page, a 20s+ one as ambient
+        m = re.search(r"animation:tintdrift\s+([\d.]+)s", css)
+        self.assertIsNotNone(m, "the tint animation has no duration")
+        self.assertGreaterEqual(float(m.group(1)), 8,
+                                f"the tint animation cycles every {m.group(1)}s "
+                                "- far too fast to feel ambient")
+
     def test_the_cache_pill_is_never_squeezed_into_an_ellipsis(self):
         # it said "0 stored, 0 d…" because flex let the icons beside it take the
         # room; a number that cannot be read is worse than no number

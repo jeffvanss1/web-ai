@@ -166,10 +166,19 @@ transform:scale(1.08);transition:opacity .5s ease}
 .bg2{position:absolute;inset:-14% -10%;z-index:-2;background-size:cover;
 background-position:center top;filter:blur(72px) saturate(1.9);opacity:0;
 transform:scale(1.08);transition:opacity .45s ease}
-.bg::after,.bg2::after{content:"";position:absolute;inset:0;
+.bg::after,.bg2::after{content:"";position:absolute;inset:-18% -14%;
 background:radial-gradient(120% 90% at 30% 20%,var(--tint) 0%,transparent 55%),
 radial-gradient(110% 80% at 80% 85%,var(--tint2) 0%,transparent 55%);
-mix-blend-mode:screen;opacity:.5}
+mix-blend-mode:screen;opacity:.5;will-change:transform,filter;
+animation:tintdrift 22s ease-in-out infinite alternate}
+/* the playing colour breathes: the cover-derived tint slowly drifts across the
+   screen and its hue wanders a touch, so the wash is alive rather than a fixed
+   gradient. Slow on purpose - a few seconds of this should feel ambient, not like
+   the page is moving under the song. Grey (idle, no cover) has no hue, so the
+   effect only shows once a cover is actually supplying colour. */
+@keyframes tintdrift{
+0%{transform:translate3d(-2.5%,1.5%,0) scale(1.02);filter:hue-rotate(-7deg) saturate(1.05)}
+100%{transform:translate3d(2.5%,-1.5%,0) scale(1.08);filter:hue-rotate(10deg) saturate(1.14)}}
 /* with no cover yet the wash is the two palette colours that tile would have used,
    so the page is never the flat grey it looked before a thumbnail landed */
 .bg.flat,.bg2.flat{background-image:none!important;opacity:.4}

@@ -433,6 +433,12 @@ def with_art(state: dict, ctx) -> dict:
             if not isinstance(t, dict):
                 continue
             for slot, size in (("art", "row"), ("art_card", "card")):
+                # a row that already has its own cover (the album art, from the row's
+                # thumbnail) keeps it: the lane's video frame is a *smaller, worse*
+                # picture, and stamping it here is why a good album cover could be
+                # replaced by a 72px frame the moment the lane got to that row
+                if str(t.get(slot) or "").startswith("http"):
+                    continue
                 href = ctx.art_href(t.get("id") or "", size)
                 if href:
                     t[slot] = href
@@ -567,7 +573,14 @@ class Context:
             for t in tracks:
                 if wanted >= limit:
                     break
-                vid = str((t or {}).get("id") or "") if isinstance(t, dict) else ""
+                t = t if isinstance(t, dict) else {}
+                # a row that already carries its own cover (an album tracklist or a
+                # discography row - the album card's art) is dressed already: asking
+                # the lane to fetch a video frame for it spends the lane on a poorer
+                # picture and makes the genuinely bare rows wait longer
+                if str(t.get("thumbnail") or "").startswith("http"):
+                    continue
+                vid = str(t.get("id") or "")
                 if not vid or (vid, size) in self._seen_art:
                     continue
                 if self._slots(vid).get(size) or (vid, size) in self._want_art:
@@ -820,11 +833,16 @@ def action_play_row(ctx, fields: dict) -> str:
     q.insert_at(q.pos, dict(t))
     ctx.dj.next(force=True)
     # "what if i chose a song? the songs next to it build around it" - a plain pick
-    # of a song now anchors the queue: the upcoming rows are replaced by a tight
-    # build around this exact song (radio/similar-to), not left as whatever mix the
-    # song happened to sit in. Build runs off the socket's thread, the picked song
-    # already plays.
+    # of a song anchors the queue: the upcoming rows are replaced by a tight build
+    # around this exact song (radio/similar-to), not left as whatever mix the song
+    # happened to sit in. The anchor is set *now* (so the station-aware refill keeps
+    # coming back to it even if a build is already running), then the set is built
+    # off the socket's thread.
     label = f"{t.get('artist') or t.get('channel') or ''} - {t.get('title')}".strip(" -")
+    ctx.dj.station = label
+    ctx.dj.station_seed = {"title": t.get("title", ""),
+                           "artist": t.get("artist") or t.get("channel", ""),
+                           "url": t.get("url", "")}
     def job():
         try:
             ctx.dj.radio_from(dict(t), count=20, replace=True)
@@ -832,9 +850,9 @@ def action_play_row(ctx, fields: dict) -> str:
             ctx.dj._note(f"[warn] building around '{t.get('title')}' failed: "
                          f"{e.__class__.__name__}: {e}")
     if not ctx.start_job(job):
-        # a build is already running; the picked song still plays, and the running
-        # one will be the set that follows
-        return f"playing {t.get('title')} (a mix is already building - it will follow)"
+        # a build is already running; the picked song plays and the anchor is set, so
+        # when the queue runs low the refill still builds around it
+        return f"playing {t.get('title')} - anchored on {label or 'this'}; the set is building"
     return f"playing {t.get('title')} - building {label or 'similar'} around it"
 
 
