@@ -48,19 +48,20 @@ transform:scale(1.08);transition:opacity .45s ease}
 .bg::after,.bg2::after{content:"";position:absolute;inset:-18% -14%;
 background:radial-gradient(120% 90% at 30% 20%,var(--tint) 0%,transparent 55%),
 radial-gradient(110% 80% at 80% 85%,var(--tint2) 0%,transparent 55%);
-mix-blend-mode:screen;opacity:.5;will-change:transform,filter;
+mix-blend-mode:screen;opacity:.62;will-change:transform,filter;
 animation:tintdrift 8s ease-in-out infinite alternate}
 /* the playing colour breathes: the cover-derived tint drifts across the screen and
    its hue wanders a touch, so the wash is alive rather than a fixed gradient.
    8s a side - clearly moving, but still ambient rather than the page sliding under
-   the song. Grey (idle, no cover) has no hue, so the effect only shows once a
-   cover is actually supplying colour. */
+   the song. The wash is coloured even when idle (see backdrop), so the glow is
+   visible the whole time and the animation is never waiting on a cover. */
 @keyframes tintdrift{
 0%{transform:translate3d(-2.5%,1.5%,0) scale(1.02);filter:hue-rotate(-7deg) saturate(1.05)}
 100%{transform:translate3d(2.5%,-1.5%,0) scale(1.08);filter:hue-rotate(10deg) saturate(1.14)}}
 /* with no cover yet the wash is the two palette colours that tile would have used,
-   so the page is never the flat grey it looked before a thumbnail landed */
-.bg.flat,.bg2.flat{background-image:none!important;opacity:.4}
+   so the page is never the flat grey it looked before a thumbnail landed. We only
+   drop the cover image, not the glow: the tinted wash behind it stays and moves. */
+.bg.flat,.bg2.flat{background-image:none!important;opacity:.62}
 .scrim{position:absolute;inset:0;z-index:-1;
 background:linear-gradient(180deg,rgba(0,0,0,.26),rgba(18,18,18,.8) 42%,rgba(14,14,16,.96) 78%)}
 
@@ -291,8 +292,15 @@ text-transform:none;margin-left:2px}
    uses, where the title is the thing a person scans for. The title gets the lion's
    share (2.4fr) and the artist a quarter of it, so a song name reads without being
    chopped a few characters in; the column gap is a little wider so the title is
-   not mashing into the artist's name. */
-#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:14px}
+   not mashing into the artist's name. Each row is its own faint tile so the queue
+   reads as a list of entries against the tinted backdrop instead of text floating
+   on the blur. */
+#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:14px;
+background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);
+border-radius:10px;margin-bottom:6px;padding:7px 10px}
+#upnext .row:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.12)}
+#upnext .row .ti{font-weight:600}
+#upnext .row .ar{color:var(--muted)}
 #upnext .row .n{display:none}
 #upnext .row .du{color:var(--muted);font-size:12px;text-align:right}
 #upnext .row .fab{right:44px}
@@ -714,8 +722,12 @@ function backdrop(track, playing){
   for (const ch of String(t)) h = (h * 131 + ch.charCodeAt(0)) >>> 0;
   const pal = getComputedStyle(document.documentElement).getPropertyValue("--tiles").split(",");
   const other = pal[(h >> 5) % pal.length];
-  const tint = playing ? pal[h % pal.length] : "#1f1f1f";
-  const tint2 = playing ? pal[((h >> 3) >>> 0) % pal.length] : "#1f1f1f";
+  // the glow is colour even when nothing is playing: take the seed's own palette
+  // pair (not a static near-black), so the page is never a flat grey that swallows
+  // the tint. Playing uses the same two rungs so the wash is consistent - it only
+  // gets a real image layered on top once a cover exists.
+  const tint = pal[h % pal.length];
+  const tint2 = pal[((h >> 3) >>> 0) % pal.length];
   document.documentElement.style.setProperty("--tint", tint);
   document.documentElement.style.setProperty("--tint2", tint2);
   /* the wash underneath a still-loading (or unavailable) cover is the two palette
