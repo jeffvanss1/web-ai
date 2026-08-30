@@ -730,7 +730,13 @@ BODY = """
 JS = r"""
 "use strict";
 const S = {state:null, view:"home", filter:"all", sort:"recent", menu:null,
-           prog:{pos:0, dur:0, playing:false, at:0}, hist:[], hix:-1, q:"", vol:70,
+           prog:{pos:0, dur:0, playing:false, at:0},
+           // the initial view is the first history entry. Without it the first
+           // navigation started hist=[], so "home" was never recorded and the back
+           // button was born disabled (hix=0 after one push) - "jump to search,
+           // back does nothing". Start with home in the stack so back always has a
+           // target from the very first move.
+           hist:["home"], hix:0, q:"", vol:70,
            dragging:false, sureWipe:0};
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, txt) => {
@@ -1230,6 +1236,10 @@ function trackRow2(t){
 }
 
 /* ---------- views ---------- */
+function navSync(){
+  $("nav-back").disabled = S.hix <= 0;
+  $("nav-fwd").disabled = S.hix >= S.hist.length - 1;
+}
 function setView(name, push){
   if (name === S.view) return;
   // "page" is a dynamic view (album / artist) not in the static NAV list, so it is
@@ -1241,8 +1251,7 @@ function setView(name, push){
   });
   S.view = name;
   if (push !== false) { S.hist = S.hist.slice(0, S.hix + 1); S.hist.push(name); S.hix = S.hist.length - 1; }
-  $("nav-back").disabled = S.hix <= 0;
-  $("nav-fwd").disabled = S.hix >= S.hist.length - 1;
+  navSync();
   $("scroller").scrollTop = 0;
   drawLibrary(S.state);
 }
@@ -1848,6 +1857,7 @@ async function poll(){
   setTimeout(poll, document.hidden ? 4000 : (streamed ? 3000 : 900));
 }
 subscribe();
+navSync();                     // home is the sole entry on load: back/forward both off
 setInterval(drawProgress, 200);
 if (!window.__noPoll) poll();
 """

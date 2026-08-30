@@ -325,6 +325,15 @@ class VerbContractTests(unittest.TestCase):
         for view in re.findall(r'data-view="([a-z]+)"', self.html):
             self.assertIn(view, vm.VIEWS, f"data-view={view} has nowhere to go")
 
+    def test_the_back_button_has_a_target_from_the_first_navigation(self):
+        # the initial view must be the first history entry, or the first push leaves
+        # hist=["search"] hix=0 and nav-back is born disabled: "page loads -> search,
+        # back does nothing". The history must seed with "home" so back always works.
+        self.assertIn('hist:["home"], hix:0', self.js,
+                      "the view history does not seed with the initial view")
+        self.assertIn("navSync()", self.js,
+                      "the nav states are set at boot and after every view change")
+
 
 class SafetyTests(unittest.TestCase):
     @classmethod
