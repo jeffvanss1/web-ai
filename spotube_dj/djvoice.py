@@ -39,6 +39,30 @@ import bins
 import config
 
 
+# Optional diagnostic hook: the DJ passes its `_note` here so voice progress (and
+# any failure) shows up in the on-screen log drawer, not just in stderr. This is
+# the whole point when the voice "doesn't come out" - you can see if it was the
+# key, the socket, the audio bytes or the player, in one place.
+_log: callable | None = None
+
+
+def set_logger(fn) -> None:
+    """Route voice diagnostics to `fn(msg)` (the DJ's `_note`)."""
+    global _log
+    _log = fn
+
+
+def _info(msg: str) -> None:
+    line = f"[voice] {msg}"
+    if _log:
+        try:
+            _log(line)
+            return
+        except Exception:
+            pass
+    print(line, flush=True)
+
+
 def enabled(dj=None) -> bool:
     """Is the spoken DJ switched on?
 
@@ -114,13 +138,18 @@ def speak_for(dj) -> None:
 
 def speak_intro(dj) -> None:
     """Announce the *current* song now - used for the first track of a set."""
+    set_logger(getattr(dj, "_note", None))
     if not enabled(dj):
+        _info("voice is off (env or the DJ's on/off setting)")
         return
     try:
         import agent
         text = _creative_line(dj, agent, next_up=False)
-    except Exception:
+    except Exception as e:
+        _info(f"intro line failed: {e.__class__.__name__}: {e}")
         return
+    _info(f"announcing track now (engine={_engine() or 'none'}, "
+          f"model={tts_model()}, voice={voice_name()})")
     _queue(text)
 
 
@@ -131,9 +160,13 @@ def schedule_next(dj) -> None:
     until the current track is close to its end, then speaks. So the DJ leads
     into the next song instead of coming on late, after it has started.
     """
+    set_logger(getattr(dj, "_note", None))
     if not enabled(dj):
+        _info("voice is off (env or the DJ's on/off setting)")
         return
     threading.Thread(target=_monitor, args=(dj,), daemon=True).start()
+    _info(f"scheduled the next-song line (model={tts_model()}, "
+          f"lead={lead_secs():.0f}s before the end)")
 
 
 def _monitor(dj) -> None:
@@ -275,6 +308,7 @@ def _gemini_synth(text: str, path: Path) -> bool:
     HTTP error or a bad payload is False (the caller falls back to espeak).
     """
     if not config.LLM_API_KEY:
+        _info("gemini (generateContent): no API key")
         return False
     try:
         import brain
@@ -289,13 +323,15 @@ def _gemini_synth(text: str, path: Path) -> bool:
                        },
                    }}
         data = brain._post(url, payload, brain._gemini_headers())
-    except Exception:
+    except Exception as e:
+        _info(f"gemini (generateContent) failed: {e.__class__.__name__}: {e}")
         return False
     try:
         part = (data["candidates"][0]["content"]["parts"][0])
         inline = part.get("inlineData") or {}
         b64 = inline.get("data")
         if not b64:
+            _info("gemini (generateContent) returned no audio inlineData")
             return False
         pcm = base64.b64decode(b64)
         rate = 24000
@@ -306,8 +342,12 @@ def _gemini_synth(text: str, path: Path) -> bool:
             except (ValueError, IndexError):
                 rate = 24000
         _pcm_to_wav(pcm, rate, path)
-        return path.exists() and path.stat().st_size > 0
-    except Exception:
+        ok = path.exists() and path.stat().st_size > 0
+        _info(f"gemini (generateContent) spoke: {len(pcm)} PCM bytes @ {rate} Hz "
+              f"({path.stat().st_size if ok else 0} bytes wav)")
+        return ok
+    except Exception as e:
+        _info(f"gemini (generateContent) bad payload: {e.__class__.__name__}: {e}")
         return False
 
 
@@ -392,6 +432,63 @@ def _ws_connect(url: str, key: str, timeout: float = 30.0) -> socket.socket:
     return sock
 
 
+def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bool]:
+    """Collect one Live turn's audio; -> (audio, rate, compressed, finished).
+
+    `audio` is raw bytes the server sent (PCM or a container, per the mimeType);
+    `finished` is True when the server signalled turnComplete (or the socket closed).
+    """
+    audio = b""
+    compressed = False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            opcode, data = _ws_read_frame(sock)
+        except Exception as e:
+            _info(f"gemini (live): socket read failed: {e.__class__.__name__}: {e}")
+            return audio, rate, compressed, False
+        if opcode == 8:                                   # close
+            _info("gemini (live): closed before the turn finished")
+            return audio, rate, compressed, True
+        if opcode == 9:                                   # ping -> pong
+            try:
+                _ws_send_frame(sock, 10, data)
+            except Exception:
+                pass
+            continue
+        if opcode == 10:                                  # pong
+            continue
+        if opcode == 2:                                   # raw audio bytes
+            audio += data
+            continue
+        if opcode == 1:
+            try:
+                msg = json.loads(data)
+            except Exception:
+                continue
+            sc = msg.get("serverContent") or {}
+            parts = (sc.get("modelTurn") or {}).get("parts") or []
+            for part in parts:
+                inline = part.get("inlineData") or {}
+                b64 = inline.get("data")
+                if not b64:
+                    continue
+                mime = str(inline.get("mimeType") or "")
+                if any(x in mime for x in ("ogg", "opus", "mpeg", "mp3", "webm")):
+                    compressed = True
+                elif "rate=" in mime:
+                    try:
+                        rate = int(mime.split("rate=")[1].split(";")[0])
+                    except (ValueError, IndexError):
+                        rate = 24000
+                audio += base64.b64decode(b64)
+            if sc.get("turnComplete"):
+                return audio, rate, compressed, True
+            if sc.get("interrupted"):
+                _info("gemini (live): turn interrupted")
+    return audio, rate, compressed, False
+
+
 def _gemini_live_synth(text: str, path: Path) -> bool:
     """Ask the Gemini Live native-audio model to speak `text` over the WebSocket.
 
@@ -403,6 +500,7 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
     so the caller can try the TTS endpoint / espeak / silence.
     """
     if not config.LLM_API_KEY:
+        _info("gemini (live): no API key")
         return False
     model = tts_model()
     if not _is_live_model(model):
@@ -410,6 +508,7 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
     sock = None
     try:
         sock = _ws_connect(_live_url(), config.LLM_API_KEY)
+        _info(f"gemini (live): connected, model={model}, voice={voice_name()}")
         _ws_send_frame(sock, 1, json.dumps({
             "setup": {"model": "models/" + model,
                       "generationConfig": {
@@ -420,66 +519,54 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
         while True:
             opcode, data = _ws_read_frame(sock)
             if opcode == 8:                                   # close
+                _info("gemini (live): closed before setupComplete")
                 sock.close()
                 return False
             if opcode == 1:
                 msg = json.loads(data)
                 if "setupComplete" in msg:
+                    _info("gemini (live): setupComplete")
                     break
                 if "goAway" in msg:
+                    _info(f"gemini (live): goAway -> {msg.get('goAway')}")
                     sock.close()
                     return False
-        # Gemini 3.1 Live wants real-time text via realtimeInput, not clientContent
-        _ws_send_frame(sock, 1, json.dumps({"realtimeInput": {"text": text}}).encode())
-        audio = b""                       # whatever the server sent (PCM or a container)
-        compressed = False                # True when the server says it is ogg/opus/mp3/webm
-        rate = 24000
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            opcode, data = _ws_read_frame(sock)
-            if opcode == 8:
+                _info("gemini (live): setup-phase message " + json.dumps(msg)[:200])
+        # Gemini 3.1 Live wants real-time text via realtimeInput, not clientContent.
+        # Older Live models use clientContent with turnComplete; try realtimeInput
+        # first and, if it yields nothing, re-send as a clientContent turn as a backstop.
+        audio, rate, compressed = None, 24000, False
+        for attempt in ({"realtimeInput": {"text": text}},
+                        {"clientContent": {"turns": [{"role": "user",
+                                                      "parts": [{"text": text}]}],
+                                           "turnComplete": True}}):
+            if audio:
                 break
-            if opcode == 9:                                   # ping -> pong
-                _ws_send_frame(sock, 10, data)
-                continue
-            if opcode == 10:                                  # pong
-                continue
-            if opcode == 2:                                   # raw audio bytes
-                audio += data
-                continue
-            if opcode == 1:
-                msg = json.loads(data)
-                sc = msg.get("serverContent") or {}
-                for part in ((sc.get("modelTurn") or {}).get("parts") or []):
-                    inline = part.get("inlineData") or {}
-                    b64 = inline.get("data")
-                    if not b64:
-                        continue
-                    mime = str(inline.get("mimeType") or "")
-                    if any(x in mime for x in ("ogg", "opus", "mpeg", "mp3", "webm")):
-                        compressed = True
-                    elif "rate=" in mime:
-                        try:
-                            rate = int(mime.split("rate=")[1].split(";")[0])
-                        except (ValueError, IndexError):
-                            rate = 24000
-                    audio += base64.b64decode(b64)
-                if sc.get("turnComplete"):
-                    break
+            _ws_send_frame(sock, 1, json.dumps(attempt).encode())
+            audio, rate, compressed, finished = _live_collect(sock, timeout=12.0, rate=rate)
+            if finished:
+                break
         try:
             sock.close()
         except Exception:
             pass
         if not audio:
+            _info("gemini (live): no audio came back (tried realtimeInput and clientContent)")
             return False
         if compressed:
             # a container (ogg/opus/mp3) is written as-is; mpv sniffs the content
             # and does not care that the temp name happens to end in .wav
             path.write_bytes(audio)
-            return path.exists() and path.stat().st_size > 0
+            ok = path.exists() and path.stat().st_size > 0
+            _info(f"gemini (live): spoke, wrote {len(audio)} bytes of audio container")
+            return ok
         _pcm_to_wav(audio, rate, path)
-        return path.exists() and path.stat().st_size > 0
-    except Exception:
+        ok = path.exists() and path.stat().st_size > 0
+        _info(f"gemini (live): spoke, {len(audio)} PCM bytes @ {rate} Hz "
+              f"({path.stat().st_size if ok else 0} bytes wav)")
+        return ok
+    except Exception as e:
+        _info(f"gemini (live) failed: {e.__class__.__name__}: {e}")
         try:
             if sock is not None:
                 sock.close()
@@ -514,30 +601,44 @@ def _espeak_synth(text: str, path: Path) -> bool:
 def _synth(text: str) -> str | None:
     """Return a path to a spoken clip for `text`, or None if it could not be made."""
     engine = _engine()
+    if engine == "":
+        _info("no speech engine: no Gemini key and no espeak installed")
+        return None
+    _info(f"engine={engine} synthesizing {len(text)} chars")
     clip = Path(tempfile.mkstemp(suffix=".wav")[1])
     ok = False
+    used = ""
     if engine == "gemini":
         # a Live native-audio model (-live-) speaks over the WebSocket, a TTS
         # model (-tts-) over generateContent. Try the one the model prefers first,
         # then the other, so either works; espeak is the offline stamp.
         if _is_live_model(tts_model()):
             ok = _gemini_live_synth(text, clip)
+            used = "live"
             if not ok:
                 ok = _gemini_synth(text, clip)
+                used = "generateContent"
         else:
             ok = _gemini_synth(text, clip)
+            used = "generateContent"
             if not ok:
                 ok = _gemini_live_synth(text, clip)
+                used = "live"
         if not ok and (bins.find("espeak-ng") or bins.find("espeak")):
-            ok = _espeak_synth(text, clip)      # offline fallback after a Gemini miss
+            _info("gemini said nothing - falling back to espeak")
+            ok = _espeak_synth(text, clip)
+            used = "espeak"
     elif engine == "espeak":
         ok = _espeak_synth(text, clip)
+        used = "espeak"
     if not ok:
+        _info(f"no audio was produced ({used or 'unknown engine'})")
         try:
             clip.unlink(missing_ok=True)
         except OSError:
             pass
         return None
+    _info(f"produced {clip.stat().st_size} bytes via {used}")
     return str(clip)
 
 
@@ -545,10 +646,13 @@ def _play(path: str) -> None:
     """Play the clip with mpv (a second process mixes with the music on the OS)."""
     exe = bins.find("mpv")
     if not exe:
+        _info("mpv not found - the spoken line was synthesized but cannot be played; "
+              "install mpv (or run with --backend spotube) to hear the DJ")
         return
     try:
-        subprocess.Popen([exe, "--really-quiet", "--no-video", "--force-window=no",
-                          "--volume=90", "--", path],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+        proc = subprocess.Popen([exe, "--really-quiet", "--no-video", "--force-window=no",
+                                 "--volume=90", "--", path],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _info(f"playing line via mpv (pid {proc.pid})")
+    except Exception as e:
+        _info(f"mpv could not start: {e.__class__.__name__}: {e}")
