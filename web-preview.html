@@ -19,7 +19,7 @@ background-clip:padding-box;border-radius:8px}
 ::-webkit-scrollbar-thumb:hover{background:#7a7a7a;background-clip:padding-box}
 ::-webkit-scrollbar-track{background:transparent}
 
-.app{display:grid;grid-template-columns:300px minmax(0,1fr) 360px;gap:10px;min-height:0;
+.app{display:grid;grid-template-columns:300px minmax(0,1fr) 400px;gap:10px;min-height:0;
 position:relative}
 /* a liquid-glass card: a translucent shell with a soft edge and an inner highlight,
    so the blurred cover behind it reads as frosted glass. The right panel must NEVER
@@ -49,12 +49,12 @@ transform:scale(1.08);transition:opacity .45s ease}
 background:radial-gradient(120% 90% at 30% 20%,var(--tint) 0%,transparent 55%),
 radial-gradient(110% 80% at 80% 85%,var(--tint2) 0%,transparent 55%);
 mix-blend-mode:screen;opacity:.5;will-change:transform,filter;
-animation:tintdrift 22s ease-in-out infinite alternate}
-/* the playing colour breathes: the cover-derived tint slowly drifts across the
-   screen and its hue wanders a touch, so the wash is alive rather than a fixed
-   gradient. Slow on purpose - a few seconds of this should feel ambient, not like
-   the page is moving under the song. Grey (idle, no cover) has no hue, so the
-   effect only shows once a cover is actually supplying colour. */
+animation:tintdrift 8s ease-in-out infinite alternate}
+/* the playing colour breathes: the cover-derived tint drifts across the screen and
+   its hue wanders a touch, so the wash is alive rather than a fixed gradient.
+   8s a side - clearly moving, but still ambient rather than the page sliding under
+   the song. Grey (idle, no cover) has no hue, so the effect only shows once a
+   cover is actually supplying colour. */
 @keyframes tintdrift{
 0%{transform:translate3d(-2.5%,1.5%,0) scale(1.02);filter:hue-rotate(-7deg) saturate(1.05)}
 100%{transform:translate3d(2.5%,-1.5%,0) scale(1.08);filter:hue-rotate(10deg) saturate(1.14)}}
@@ -282,10 +282,12 @@ text-transform:none;margin-left:2px}
 .qh .iconbtn{margin-left:auto;width:26px;height:26px}
 .qh .iconbtn svg{width:14px;height:14px}
 #queue-sect .rows{display:flex;flex-direction:column;gap:1px}
-/* the queue sits in a 360px panel, so its rows drop the row number and use the
+/* the queue sits in a 400px panel, so its rows drop the row number and use the
    room for the song and a single actions column - the same shape Spotify's queue
-   uses, where the title is the thing a person scans for */
-#upnext .row{grid-template-columns:40px minmax(0,1.6fr) minmax(0,1fr) 40px auto;gap:10px}
+   uses, where the title is the thing a person scans for. The title gets the lion's
+   share (2.4fr) and the artist a quarter of it, so a song name reads without being
+   chopped a few characters in. */
+#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:8px}
 #upnext .row .n{display:none}
 #upnext .row .du{color:var(--muted);font-size:12px;text-align:right}
 #upnext .row .fab{right:44px}
@@ -394,12 +396,12 @@ body.busy .btn.prim{opacity:.55}
    width that cannot hold one and never leaves a cut-off, unscrollable panel. */
 @media (max-width:1300px){.app{grid-template-columns:280px minmax(0,1fr)}
 .detail{display:none}.app.wide .detail{display:flex;position:absolute;top:0;right:0;
-bottom:0;width:360px;max-width:92vw;z-index:30;box-shadow:-18px 0 60px rgba(0,0,0,.6)}}
+bottom:0;width:400px;max-width:92vw;z-index:30;box-shadow:-18px 0 60px rgba(0,0,0,.6)}}
 @media (max-width:1000px){.app{grid-template-columns:minmax(0,1fr)}.side{display:none}
 .app.nav .side{display:flex;position:absolute;inset:8px auto 80px 8px;width:300px;z-index:20;
 box-shadow:0 18px 60px rgba(0,0,0,.8)}.cards{grid-template-columns:repeat(auto-fill,
 minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
-.row .ar{display:none}.right .vol input{width:60px} .app.wide .detail{width:min(360px,100%)}}
+.row .ar{display:none}.right .vol input{width:60px} .app.wide .detail{width:min(400px,100%)}}
 @media (max-width:760px){.center{gap:2px}.player{grid-template-columns:1fr auto}
 .right .iconbtn:nth-child(-n+2){display:none}.quick{grid-template-columns:1fr}}
 </style></head><body>
