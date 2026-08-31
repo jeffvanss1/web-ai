@@ -11,9 +11,9 @@ music, like Spotify's DJ. It is not a plain robotic read:
      its own phrasing. The voice is **Despina** (warm, smooth) by default,
      changeable by voice name. If the configured model is a `*-tts-preview`
      model, it instead uses the synchronous `generateContent` speech endpoint.
-  2. **espeak / espeak-ng** is the offline fallback (robotic, but no key/network).
-  3. If there is no key and no espeak, it stays silent - the vocal line is a
-     nicety, never a crash.
+  2. There is no offline/robotic fallback - if Gemini cannot speak (no key, a
+     socket failure, or a model-access error) the DJ stays silent. The vocal line
+     is a nicety, never a crash, and never a robotic substitute.
 
 Speech is generated and played on a single worker thread, so a fast skipper only
 hears the latest line and the engine/webserver are never blocked. It degrades
@@ -110,13 +110,12 @@ def _live_url() -> str:
 
 
 def engines() -> list[str]:
-    """Which engines this machine can possibly use, in preference order."""
-    out = []
-    if config.LLM_API_KEY:
-        out.append("gemini")
-    if bins.find("espeak-ng") or bins.find("espeak"):
-        out.append("espeak")
-    return out
+    """Which engines this machine can possibly use, in preference order.
+
+    There is no offline (espeak) fallback: the DJ only speaks via Gemini, so the
+    only engine here is "gemini" (when a key is set) - otherwise nothing.
+    """
+    return ["gemini"] if config.LLM_API_KEY else []
 
 
 # one speech worker: a rapid fire of track changes (a fast skipper) collapses to
@@ -292,12 +291,8 @@ def _say(text: str) -> None:
 
 
 def _engine() -> str:
-    """Pick the engine: Gemini if a key is set, else espeak, else none."""
-    if config.LLM_API_KEY:
-        return "gemini"
-    if bins.find("espeak-ng") or bins.find("espeak"):
-        return "espeak"
-    return ""
+    """Pick the engine: Gemini if a key is set, else none (no offline fallback)."""
+    return "gemini" if config.LLM_API_KEY else ""
 
 
 def _gemini_synth(text: str, path: Path) -> bool:
@@ -305,7 +300,8 @@ def _gemini_synth(text: str, path: Path) -> bool:
 
     The response is base64 PCM (signed 16-bit, mono, 24 kHz by default); we wrap
     it as a WAV so mpv can play it. Returns True on success; a missing key, an
-    HTTP error or a bad payload is False (the caller falls back to espeak).
+    HTTP error or a bad payload is False (the caller stays silent - there is no
+    offline/robotic fallback).
     """
     if not config.LLM_API_KEY:
         _info("gemini (generateContent): no API key")
@@ -582,8 +578,8 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
 # list is the same as the generateContent TTS voices, so a chosen voice is always
 # valid on the Live path. We only fall back to a guaranteed-initially-available voice
 # if the *server* closes during setup (a genuine rejection of the config), so the
-# DJ keeps speaking instead of dropping to espeak/silence. We never swap the voice
-# when setup succeeds but just no audio arrives - that is a different failure.
+# DJ keeps speaking instead of staying silent. We never swap the voice when setup
+# succeeds but just no audio arrives - that is a different failure.
 _LIVE_FALLBACK_VOICE = "kore"
 
 
@@ -676,7 +672,7 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
     synchronous generateContent TTS endpoint is a different family and returns
     nothing for them (which is why the old default model silently fell back).
     The server replies with PCM; we wrap it as a WAV. Returns False on any failure
-    so the caller can try the TTS endpoint / espeak / silence.
+    so the caller can try the TTS endpoint / stay silent.
     """
     if not config.LLM_API_KEY:
         _info("gemini (live): no API key")
@@ -793,55 +789,37 @@ def _pcm_to_wav(pcm: bytes, rate: int, path: Path) -> None:
         wf.writeframes(pcm)
 
 
-def _espeak_synth(text: str, path: Path) -> bool:
-    """Synthesize offline with espeak-ng (or espeak). Returns True on success."""
-    exe = bins.find("espeak-ng") or bins.find("espeak")
-    if not exe:
-        return False
-    try:
-        subprocess.run([exe, "-w", str(path), text],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=30, check=False)
-        return path.exists() and path.stat().st_size > 0
-    except Exception:
-        return False
-
-
 def _synth(text: str) -> str | None:
-    """Return a path to a spoken clip for `text`, or None if it could not be made."""
+    """Return a path to a spoken clip for `text`, or None if it could not be made.
+
+    There is no offline (espeak) fallback: if Gemini cannot speak, the DJ stays
+    silent. The only engine is "gemini"; anything else returns None.
+    """
     engine = _engine()
     if engine == "":
-        _info("no speech engine: no Gemini key and no espeak installed")
+        _info("no Gemini API key - the DJ stays silent (no offline voice)")
         return None
     _info(f"engine={engine} synthesizing {len(text)} chars")
     clip = Path(tempfile.mkstemp(suffix=".wav")[1])
     ok = False
     used = ""
-    if engine == "gemini":
-        # a Live native-audio model (-live-) speaks over the WebSocket, a TTS
-        # model (-tts-) over generateContent. Try the one the model prefers first,
-        # then the other, so either works; espeak is the offline stamp.
-        if _is_live_model(tts_model()):
-            ok = _gemini_live_synth(text, clip)
-            used = "live"
-            if not ok:
-                ok = _gemini_synth(text, clip)
-                used = "generateContent"
-        else:
+    # a Live native-audio model (-live-) speaks over the WebSocket, a TTS model
+    # (-tts-) over generateContent. Try the one the model prefers first, then the
+    # other, so either works. No espeak fallback.
+    if _is_live_model(tts_model()):
+        ok = _gemini_live_synth(text, clip)
+        used = "live"
+        if not ok:
             ok = _gemini_synth(text, clip)
             used = "generateContent"
-            if not ok:
-                ok = _gemini_live_synth(text, clip)
-                used = "live"
-        if not ok and (bins.find("espeak-ng") or bins.find("espeak")):
-            _info("gemini said nothing - falling back to espeak")
-            ok = _espeak_synth(text, clip)
-            used = "espeak"
-    elif engine == "espeak":
-        ok = _espeak_synth(text, clip)
-        used = "espeak"
+    else:
+        ok = _gemini_synth(text, clip)
+        used = "generateContent"
+        if not ok:
+            ok = _gemini_live_synth(text, clip)
+            used = "live"
     if not ok:
-        _info(f"no audio was produced ({used or 'unknown engine'})")
+        _info(f"no audio was produced via {used or 'gemini'} - the DJ stays silent")
         try:
             clip.unlink(missing_ok=True)
         except OSError:

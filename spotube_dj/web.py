@@ -382,7 +382,7 @@ def build_state(ctx) -> dict:
         "autoplay": bool((dj.state or {}).get("autoplay")),
         "voice": bool((dj.state or {}).get("voice", True)),
         "voice_note": (("gemini · " + config.load_dj_voice()) if config.LLM_API_KEY
-                       else "offline (no key)"),
+                       else "off (no key)"),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
         "idle": idle,

@@ -2,8 +2,8 @@
 
 The announcer builds a line from what the mixer actually did (the request, the
 vibe, a from-your-likes pick, the station seed, the planner's reason) - no text
-chat. The *spoken* DJ optionally uses Gemini's speech generation (the Despina
-voice) when a key is set; without one it falls back to espeak or stays silent.
+chat. The *spoken* DJ uses Gemini's speech generation (the Despina voice) when a key is
+set; without one it stays silent (there is no offline/robotic fallback).
 These tests exercise the line, the prompt, the Gemini-voice decode and the
 no-audio no-op, all offline (the network calls are mocked).
 """
