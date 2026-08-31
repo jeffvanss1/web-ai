@@ -32,7 +32,7 @@ same bug wearing a different hat:
 
 ```bash
 npm run check     # node --check, then a real `wrangler deploy --dry-run`
-npm test          # 24 route tests
+npm test          # 26 route tests
 ```
 
 `node --check` alone is **not** enough and has already missed one deploy-blocking
@@ -57,7 +57,7 @@ npx wrangler deploy
 Then point the app at it, once, from Settings → Worker (or `~/.spotube-dj/config.json`):
 
 ```json
-{ "WORKER_URL": "https://spotube-dj.<your-subdomain>.workers.dev",
+{ "WORKER_URL": "https://spotube-dj-worker.<your-subdomain>.workers.dev",
   "WORKER_TOKEN": "the same WORKER_TOKEN",
   "WORKER_PROFILE": "default" }
 ```

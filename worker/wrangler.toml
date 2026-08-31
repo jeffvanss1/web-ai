@@ -10,7 +10,17 @@
 #   npx wrangler d1 execute spotube-dj --file=schema.sql --remote
 #   npx wrangler deploy
 
-name = "spotube-dj"
+# The script name, and the first part of your URL:
+#   https://spotube-dj-worker.<your-subdomain>.workers.dev
+#
+# Rename this if the deploy ever says the name is taken - or if it complains
+# about a Durable Object class you have never heard of (e.g. `UserQueue`).
+# That is not this Worker: it means a *different* script already owns the name
+# in your account, and Cloudflare will not let a new script orphan its Durable
+# Objects. Pick a fresh name rather than deleting theirs - the rename costs you
+# nothing but a different URL, and `wrangler delete` on a script you did not
+# write destroys state you cannot restore.
+name = "spotube-dj-worker"
 main = "src/index.js"
 compatibility_date = "2026-06-01"
 

@@ -636,7 +636,7 @@ The brain has three modes and the pill in the header says which one you are in
 not working).
 
 ```bash
-export SPOTUBE_DJ_WORKER_URL=https://spotube-dj.<you>.workers.dev  # Gemini, via your Worker
+export SPOTUBE_DJ_WORKER_URL=https://spotube-dj-worker.<you>.workers.dev  # Gemini, via your Worker
 export SPOTUBE_DJ_WORKER_TOKEN=...                                 # if you deployed one
 export SPOTUBE_DJ_BASE_URL=http://localhost:11434                  # Ollama / LM Studio instead
 export SPOTUBE_DJ_MODEL=llama3.2:latest
@@ -646,7 +646,7 @@ export SPOTUBE_DJ_LLM_TIMEOUT=90                  # slow machine / big model
 or save them once so they survive a restart:
 
 ```bash
-python3 -m spotube_dj --set-worker https://spotube-dj.<you>.workers.dev
+python3 -m spotube_dj --set-worker https://spotube-dj-worker.<you>.workers.dev
 python3 -m spotube_dj --set-worker-token ... --set-worker-profile laptop
 python3 -m spotube_dj --test-worker       # health, then one real plan call
 python3 -m spotube_dj --set-base http://localhost:11434 --set-model llama3.2
@@ -766,7 +766,7 @@ Then point the app at it - in the page (**gear → Worker & cloud → Save the
 Worker**) or from the terminal:
 
 ```bash
-python3 -m spotube_dj --set-worker https://spotube-dj.<you>.workers.dev
+python3 -m spotube_dj --set-worker https://spotube-dj-worker.<you>.workers.dev
 python3 -m spotube_dj --set-worker-token "$(openssl rand -hex 32)"
 python3 -m spotube_dj --test-worker
 ```
@@ -841,7 +841,7 @@ switch is reported in an `X-Voice-Notes` header.
 | `Worker: timed out after 45s` | `SPOTUBE_DJ_LLM_TIMEOUT`, or a smaller model |
 
 The full contract - every route, error kind and env var - is in
-[`worker/README.md`](worker/README.md). `cd worker && npm test` runs its 24 tests
+[`worker/README.md`](worker/README.md). `cd worker && npm test` runs its 26 tests
 and `npm run check` does a real `wrangler deploy --dry-run`; neither needs a
 network or a Cloudflare account. Run `check` before `deploy`: it is the only
 thing that builds the bundle the way Cloudflare will.
@@ -878,11 +878,11 @@ thing that builds the bundle the way Cloudflare will.
 | `tests/test_desktop.py` | 15 tests: the .desktop file and the icon, in a temp $XDG_DATA_HOME |
 | `tests/test_web.py` | 200 tests: the clear-queue verb and its job lane, the published snapshot, every routed action, the transport verbs, library rows, artwork lanes, path traversal, the Host guard, the settings route, one real socket over the routes |
 | `tests/test_worker.py` | 53 tests: the Worker client - key custody, error kinds, D1 sync and adopt, the asset split, the voice bus |
-| `worker/test/smoke.mjs` | 24 tests: the Worker's routes, token gate, model ladder and WAV wrapping (with and without R2), under `node --test` |
+| `worker/test/smoke.mjs` | 26 tests: the Worker's routes, token gate, model ladder and WAV wrapping (with and without R2), under `node --test` |
 
 ```bash
 python3 -m unittest discover -s tests -t .     # from the repo root: 767 tests
-cd worker && npm test                          # 24 more, no network
+cd worker && npm test                          # 26 more, no network
 cd worker && npm run check                     # + a real wrangler build (no account)
 ```
 

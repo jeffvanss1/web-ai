@@ -223,6 +223,28 @@ test("GET / answers with the route map", async () => {
   assert.match(text, /POST \/v1\/speech/);
 });
 
+// The root page is the first thing anyone sees after deploying, so it is the
+// worst place to be wrong. It used to print "audio is cached by sha256(...)"
+// unconditionally - including on a Worker with no bucket bound, where nothing
+// is cached at all. It now reports what is actually configured.
+test("GET / tells the truth about the clip cache", async () => {
+  const bare = await call("GET", "/", { env: envWith({ CLIPS: undefined }) });
+  const bareText = await bare.text();
+  assert.match(bareText, /audio is not cached/, "no bucket must not claim a cache");
+  assert.doesNotMatch(bareText, /is cached/, bareText);
+
+  const cached = await call("GET", "/", { env: envWith() });
+  assert.match(await cached.text(), /audio is cached .* in R2/);
+});
+
+test("GET / shouts when the Worker has no token", async () => {
+  const open = await call("GET", "/", { env: envWith({ WORKER_TOKEN: "" }) });
+  assert.match(await open.text(), /WARNING: no WORKER_TOKEN/);
+
+  const shut = await call("GET", "/", { env: envWith({ WORKER_TOKEN: "shh" }) });
+  assert.doesNotMatch(await shut.text(), /WARNING/);
+});
+
 test("OPTIONS is answered for the preflight a browser sends", async () => {
   const res = await call("OPTIONS", "/v1/plan");
   assert.equal(res.status, 204);

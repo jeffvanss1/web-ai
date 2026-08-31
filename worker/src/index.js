@@ -51,9 +51,15 @@ const DEFAULT_PLAN_MODEL = "gemini-3.5-flash";
 const DEFAULT_TTS_MODEL = "gemini-3.1-flash-tts-preview";
 
 // Spoken lines are short and get repeated a lot (the same "up next" phrasing,
-// the same greeting). An R2 hit costs no quota, which is the whole reason the
-// free tier used to 429 mid-set.
-const CLIP_CACHE_TTL_NOTE = "audio is cached by sha256(text|voice|model)";
+// the same greeting), so an R2 hit costs no quota - which is the whole reason
+// the free tier used to 429 mid-set. The bucket is optional and OFF by
+// default, so this line reports which of the two you are actually running
+// rather than promising a cache that isn't there.
+function clipCacheNote(env) {
+  return env.CLIPS
+    ? "audio is cached by sha256(text|voice|model) in R2"
+    : "audio is not cached (no CLIPS bucket bound) - every line is synthesized";
+}
 
 const PLAN_SCHEMA = {
   type: "object",
@@ -861,7 +867,10 @@ export default {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
     }
     if (path === "/" || path === "") {
-      return new Response(`spotube-dj worker ${VERSION}\n\n${ROUTE_MAP}\n${CLIP_CACHE_TTL_NOTE}\n`, {
+      return new Response(
+        `spotube-dj worker ${VERSION}\n\n${ROUTE_MAP}\n${clipCacheNote(env)}\n`
+          + (env.WORKER_TOKEN ? "" : "\nWARNING: no WORKER_TOKEN - every route is open.\n"),
+        {
         headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS_HEADERS },
       });
     }
