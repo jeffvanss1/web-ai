@@ -856,13 +856,16 @@ function drawSettings(s){
     (st.dj_lang || "Indonesian");
   $("unkeybtn").hidden = !st.key_set;
   drawWorker(s);
-  $("engine2").textContent = st.key_set
-    ? "Planning goes through " + (st.model || "the default model") + " at " +
-      (st.base || "generativelanguage.googleapis.com") + ", and the DJ's voice is " +
-      (st.dj_voice || "Despina") + ". The key is only ever sent back as "
-      + (st.key_mask || "a mask") + "."
-    : "No key saved, so a small offline parser plans the searches and the DJ voice stays " +
-      "quiet/robotic. Paste a Gemini key (or a local model URL) and the DJ speaks in a real voice.";
+  $("engine2").textContent = st.worker && st.worker.configured
+    ? "Planning goes through your Worker with " + (st.model || "the default model")
+      + ", and the DJ's voice is " + (st.dj_voice || "Despina") + "."
+      + (st.key_set ? " The saved key is sent only if the Worker asks for it ("
+        + (st.key_mask || "a mask") + ")." : " No key is stored on this machine.")
+    : st.base
+      ? "Planning goes to your local model at " + st.base + " with " +
+        (st.model || "its default model") + ". The DJ's voice needs a Worker, so it stays quiet."
+      : "No Worker and no local model, so a small offline parser plans the searches and the "
+        + "DJ stays quiet. Add a Worker below for planning, a spoken DJ, and cloud sync.";
   $("setnote").textContent = st.note || "";
 }
 /* The Worker card. It says which of the four things is true - no URL, a URL that

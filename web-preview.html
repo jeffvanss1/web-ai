@@ -1,5 +1,12 @@
-<!doctype html><html lang=en><head><meta charset=utf-8><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><meta name="referrer" content="no-referrer"><title>Spotube DJ</title><style>
-:root{--bg:#121212;--panel:#181818;--card:#1c1c1c;--edge:#2a2a2a;--hover:#2a2a2a;
+<!doctype html>
+<html lang=en>
+<head>
+<meta charset=utf-8>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Spotube DJ</title>
+<style>:root{--bg:#121212;--panel:#181818;--card:#1c1c1c;--edge:#2a2a2a;--hover:#2a2a2a;
 --input:#242424;--text:#ffffff;--muted:#a7a7a7;--faint:#6a6a6a;--accent:#1db954;
 --accent-dk:#169c46;--playing:#123a20;--error:#e2445c;--heart:#1ed760;
 --tiles:#5b3a8f,#8f4a3a,#3a6f8f,#3a8f5d,#8f3a6a,#6a6a3a,#3a8f8a,#7a4d5d,#4d5d8f,#4d8f7a;--tint:#1db954;--tint2:#169c46;--glass:rgba(255,255,255,.05);
@@ -304,15 +311,18 @@ text-transform:none;margin-left:2px}
    not mashing into the artist's name. Each row is its own faint tile so the queue
    reads as a list of entries against the tinted backdrop instead of text floating
    on the blur. */
-#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:14px;
+#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) auto;gap:14px;
 background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);
 border-radius:10px;margin-bottom:6px;padding:7px 10px}
 #upnext .row:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.12)}
 #upnext .row .ti{font-weight:600}
 #upnext .row .ar{color:var(--muted)}
 #upnext .row .n{display:none}
-#upnext .row .du{color:var(--muted);font-size:12px;text-align:right}
-#upnext .row .fab{right:44px}
+/* no per-track duration in the queue: a busy list is scanned by title, and the
+   panel is 400px - the seconds column is what used to crush the title and push the
+   play button over the actions. The row opens the song on a click instead. */
+#upnext .row .du{display:none}
+#upnext .row .fab{display:none}
 #upnext .row .rowacts .iconbtn{width:24px;height:24px}
 .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .btn{display:inline-flex;align-items:center;gap:8px;background:var(--hover);
@@ -445,7 +455,9 @@ font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--edge);
 background:var(--card);color:var(--muted);cursor:pointer}
 .djvoice.on{color:var(--accent);border-color:var(--accent)}
 .djvoice svg{width:13px;height:13px}
-</style></head><body>
+</style>
+</head>
+<body>
 <div class="app" id="app">
  <aside class="side panel">
   <div class="side-head">
@@ -511,19 +523,25 @@ background:var(--card);color:var(--muted);cursor:pointer}
     </div>
     <h2 id="lovedh">Loved songs</h2>
     <div class="rows" id="loved"></div>
-    <h2>Search &amp; AI</h2>
+    <h2>Local model &amp; voice</h2>
     <div class="card set">
      <div class="sub" id="engine2"></div>
      <label class="setrow"><span>Gemini key</span><input id="in-key" type="password"
-      placeholder="paste to save, leave blank to keep" autocomplete="off" spellcheck="false"></label>
-     <label class="setrow"><span>Base URL</span><input id="in-base" type="text"
-      placeholder="blank = Google; or http://localhost:11434/v1 for a local model"
+      placeholder="only if your Worker asks for one - Test the worker says so"
+      autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Local model URL</span><input id="in-base" type="text"
+      placeholder="blank = none; http://localhost:11434 for Ollama / LM Studio"
       autocomplete="off" spellcheck="false"></label>
      <label class="setrow"><span>Model</span><input id="in-model" type="text"
-      placeholder="gemini-3.5-flash" autocomplete="off" spellcheck="false"></label>
+      placeholder="llama3.2 locally, or the Worker's model (gemini-3.5-flash)"
+      autocomplete="off" spellcheck="false"></label>
      <label class="setrow"><span>DJ voice</span>
       <select id="in-voice" class="infield"></select>
       <small class="setnote" id="voice-lang"></small>
+     </label>
+     <label class="setrow"><span>Language</span>
+      <select id="in-lang" class="infield"></select>
+      <small class="setnote">the language the DJ announces in</small>
      </label>
      <div class="acts">
       <button class="btn prim" id="savebtn"><svg viewBox="0 0 24 24"><path d="M9.6 16.2 5.4 12 4 13.4l5.6 5.6 12-12L20.2 6z"/></svg><span>Save</span></button>
@@ -531,6 +549,29 @@ background:var(--card);color:var(--muted);cursor:pointer}
       <button class="btn ghost" id="unkeybtn" hidden><svg viewBox="0 0 24 24"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z"/></svg><span>Remove the key</span></button>
      </div>
      <div class="sub" id="setnote"></div>
+    </div>
+    <h2>Worker &amp; cloud</h2>
+    <div class="card set">
+     <div class="sub" id="worker-note"></div>
+     <label class="setrow"><span>Worker URL</span><input id="in-wurl" type="text"
+      placeholder="https://spotube-dj.&lt;you&gt;.workers.dev" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Worker token</span><input id="in-wtoken" type="password"
+      placeholder="the WORKER_TOKEN you deployed; blank keeps the saved one" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Profile</span><input id="in-wprofile" type="text"
+      placeholder="default" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Cloud sync</span>
+      <select id="in-wsync" class="infield">
+       <option value="on">on - mirror my taste to D1</option>
+       <option value="off">off - keep everything on this machine</option>
+      </select>
+     </label>
+     <div class="acts">
+      <button class="btn prim" id="wsavebtn"><svg viewBox="0 0 24 24"><path d="M9.6 16.2 5.4 12 4 13.4l5.6 5.6 12-12L20.2 6z"/></svg><span>Save the Worker</span></button>
+      <button class="btn ghost" data-action="test_worker"><svg viewBox="0 0 24 24"><path d="M11 2.6 12.7 7 17 8.7 12.7 10.4 11 14.8 9.3 10.4 5 8.7 9.3 7zM18 14l1.1 2.9 2.9 1.1-2.9 1.1L18 22l-1.1-2.9-2.9-1.1 2.9-1.1z"/></svg><span>Test the worker</span></button>
+      <button class="btn ghost" data-action="worker_sync"><svg viewBox="0 0 24 24"><path d="M4 6h11v2H4zM4 11h11v2H4zM4 16h7v2H4zM18 10v6.2a2.6 2.6 0 1 1-1.6-2.4V10z"/></svg><span>Save my taste now</span></button>
+      <button class="btn ghost" data-action="worker_pull"><svg viewBox="0 0 24 24"><path d="M15.4 4.6 7.9 12l7.5 7.4 1.5-1.5L10.8 12l6.1-5.9z"/></svg><span>Pull my taste</span></button>
+     </div>
+     <div class="sub" id="worker-sub"></div>
     </div>
     <h2>Activity</h2>
     <div class="logbox" id="log"></div>
@@ -636,7 +677,6 @@ background:var(--card);color:var(--muted);cursor:pointer}
 <div class="toast" id="toast"></div>
 <script>const ICONS={"prev": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 5h2v14H7zM19 5v14L9.5 12z\"/></svg>", "next": "<svg viewBox=\"0 0 24 24\"><path d=\"M15 5h2v14h-2zM5 5v14l9.5-7z\"/></svg>", "play": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 4.5v15L20 12z\"/></svg>", "pause": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 5h3.4v14H7zM13.6 5H17v14h-3.4z\"/></svg>", "stop": "<svg viewBox=\"0 0 24 24\"><rect x=\"6\" y=\"6\" width=\"12\" height=\"12\" rx=\"2\"/></svg>", "heart": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 20.6 3.4 12.4A5 5 0 0 1 12 6.2a5 5 0 0 1 8.6 6.2z\"/></svg>", "library": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h2.6v16H4zM8.4 4H11v16H8.4zM13.2 4.3l2.5.7-3.4 15.6-2.5-.7z\"/></svg>", "heart_o": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 18.9 5 12.2a3.6 3.6 0 0 1 5.1-5.1l1.9 1.8 1.9-1.8A3.6 3.6 0 0 1 19 12.2z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\"/></svg>", "thumb_down": "<svg viewBox=\"0 0 24 24\"><path d=\"M6.5 4H5a2 2 0 0 0-1.4.6A2 2 0 0 0 3 6v5a2 2 0 0 0 2 2h2.3l-1 3.9A1.7 1.7 0 0 0 8 18.7a1.7 1.7 0 0 0 1.6-1.3l1-3.4h4.3a2.1 2.1 0 0 0 2-2.7L15.3 5.6A2 2 0 0 0 13.4 4H6.5zM5 6h1.6L9 12.7 8 16l-1.2-.9 1.1-4.1H5V6zm11 9.5v-1.7h1.5V6h1.6v7.8z\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.6\"/></svg>", "chat": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-4 4v-4H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2m0 2v9h3v2.5L9.5 15H20V6z\"/></svg>", "queue": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h11v2H4zM4 11h11v2H4zM4 16h7v2H4zM18 10v6.2a2.6 2.6 0 1 1-1.6-2.4V10z\"/></svg>", "shuffle": "<svg viewBox=\"0 0 24 24\"><path d=\"M3 6h4.5l9 12H21v-2h-3l-2.6-3.5 1.5-2H21V8h-4.5l-1.4 1.9L6.9 6H3zM3 16h3.9l1.5-2 2.6 3.5L6.9 18H3zM17 4l3 3-3 3z\"/></svg>", "repeat": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 6.5h9V4l4 3.8-4 3.8V9.3H6v-2h1V6.5zM17 17.5H8v2.5l-4-3.8 4-3.8v2.3h10v2zM6 14.7h1v2H6z\"/></svg>", "repeat_one": "<svg viewBox=\"0 0 24 24\"><path d=\"M7 6.5h9V4l4 3.8-4 3.8V9.3H6v-2h1V6.5zM17 17.5H8v2.5l-4-3.8 4-3.8v2.3h10v2zM11.6 12.4h1.3v5.2h-1.1l-1.3-.8v-1h1.1z\"/></svg>", "search": "<svg viewBox=\"0 0 24 24\"><path d=\"M10.5 3a7.5 7.5 0 1 0 4.6 13.5l4.3 4.3 1.4-1.4-4.3-4.3A7.5 7.5 0 0 0 10.5 3m0 2a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11\" fill=\"currentColor\" stroke=\"none\"/></svg>", "open": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3v2h5.6L10 12.6 11.4 14 19 6.4V12h2V3zM5 5v14h14v-4h-2v2H7V7h2V5z\"/></svg>", "mix": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 5h2v14H4zM18 5h2v14h-2zM9.5 7l5 5-5 5z\"/></svg>", "vol": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 9v6h4l5 4V5L8 9zM16 8.5a4 4 0 0 1 0 7v-2a2 2 0 0 0 0-3zM18.5 6a7 7 0 0 1 0 12v-2.1a4.9 4.9 0 0 0 0-7.8z\"/></svg>", "vol_mute": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 9v6h4l5 4V5L8 9zM15.4 9.6 16.8 8l5 5-1.4 1.4zM20.4 8 21.8 9.4l-5 5-1.4-1.4z\"/></svg>", "dot": "<svg viewBox=\"0 0 24 24\"><circle cx=\"12\" cy=\"12\" r=\"5\"/></svg>", "home": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3.1 2.8 11l1.3 1.5L5 11.8V21h5v-6h4v6h5v-9.2l.9.7 1.3-1.5z\"/></svg>", "plus": "<svg viewBox=\"0 0 24 24\"><path d=\"M11 4.5h2V11h6.5v2H13v6.5h-2V13H4.5v-2H11z\"/></svg>", "chev_l": "<svg viewBox=\"0 0 24 24\"><path d=\"M15.4 4.6 7.9 12l7.5 7.4 1.5-1.5L10.8 12l6.1-5.9z\"/></svg>", "chev_r": "<svg viewBox=\"0 0 24 24\"><path d=\"M8.6 4.6 16.1 12l-7.5 7.4-1.5-1.5 6.1-5.9-6.1-5.9z\"/></svg>", "close": "<svg viewBox=\"0 0 24 24\"><path d=\"M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z\"/></svg>", "expand": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 4h6.5v2H6v4.5H4zM20 4v6.5h-2V6h-4.5V4zM4 13.5h2V18h4.5v2H4zM20 13.5V20h-6.5v-2H18v-4.5z\"/></svg>", "clock": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18m0 2a7 7 0 1 1 0 14 7 7 0 0 1 0-14M11 7v5.6l4.2 2.4 1-1.7-3.2-1.8V7z\"/></svg>", "dots": "<svg viewBox=\"0 0 24 24\"><circle cx=\"5.5\" cy=\"12\" r=\"1.6\"/><circle cx=\"12\" cy=\"12\" r=\"1.6\"/><circle cx=\"18.5\" cy=\"12\" r=\"1.6\"/></svg>", "sparkle": "<svg viewBox=\"0 0 24 24\"><path d=\"M11 2.6 12.7 7 17 8.7 12.7 10.4 11 14.8 9.3 10.4 5 8.7 9.3 7zM18 14l1.1 2.9 2.9 1.1-2.9 1.1L18 22l-1.1-2.9-2.9-1.1 2.9-1.1z\"/></svg>", "lyrics": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3m-6 8a6 6 0 0 0 5 5.9V20H8v2h8v-2h-3v-3.1A6 6 0 0 0 18 11h-2a4 4 0 0 1-8 0z\"/></svg>", "devices": "<svg viewBox=\"0 0 24 24\"><path d=\"M3 5h12v8H3zm2 2v4h8V7zm10 2h6v9h-6zm2 1.6v5.8h2.8V8.6z\"/></svg>", "sort": "<svg viewBox=\"0 0 24 24\"><path d=\"M4 6h16v2H4zm0 5h11v2H4zm0 5h7v2H4z\"/></svg>", "check": "<svg viewBox=\"0 0 24 24\"><path d=\"M9.6 16.2 5.4 12 4 13.4l5.6 5.6 12-12L20.2 6z\"/></svg>", "verified": "<svg viewBox=\"0 0 24 24\"><path d=\"M12 2.2l2.3 1.9 3-.1.8 2.9 2.4 1.8-1.1 2.8 1.1 2.8-2.4 1.8-.8 2.9-3-.1L12 21.8l-2.3-1.9-3 .1-.8-2.9L3.5 15.3l1.1-2.8-1.1-2.8 2.4-1.8.8-2.9 3 .1z\"/><path d=\"M10.8 15.4 7.6 12.2 9 10.8l1.8 1.8 4.2-4.2 1.4 1.4z\" fill=\"#121212\"/></svg>"};
 const VM={"moods": [{"label": "Deep focus", "q": "mellow instrumental beats for deep focus"}, {"label": "Chill evening", "q": "warm soul and soft rock for a chill evening"}, {"label": "Late night", "q": "quiet neo soul and jazz for late at night"}, {"label": "Workout", "q": "high energy workout music, drums and bass"}, {"label": "Throwback", "q": "70s 80s classics, no remixes"}, {"label": "Rainy day", "q": "slow acoustic songs for a rainy day"}, {"label": "Party", "q": "upbeat funk and disco party tracks"}, {"label": "Road trip", "q": "classic rock road trip singalong"}], "views": ["home", "search", "library", "history"], "nav": [{"view": "home", "icon": "home", "label": "Home"}, {"view": "search", "icon": "search", "label": "Search"}, {"view": "library", "icon": "library", "label": "Your Library"}, {"view": "history", "icon": "clock", "label": "Recently played"}], "greeting": [[5, 12, "Good morning"], [12, 18, "Good afternoon"], [18, 24, "Good evening"], [0, 5, "Still up?"]]};
-
 "use strict";
 const S = {state:null, view:"home", filter:"all", sort:"recent", menu:null,
            prog:{pos:0, dur:0, playing:false, at:0},
@@ -1476,19 +1516,93 @@ function drawSettings(s){
     }
     sel.dataset.current = current;
   }
-  const lang = sel && sel.selectedOptions[0] && sel.selectedOptions[0].textContent
-    ? String(sel.selectedOptions[0].textContent) : "";
-  $("voice-lang").textContent = (st.dj_voice || "Despina") + " speaks " +
-    ((lang && lang.includes("·")) ? lang.split("·").pop().trim() : "English");
+  // DJ language dropdown. Rebuilt only when the effective language (or the choice
+  // list) changes, so an in-flight selection is not clobbered by the tick.
+  const lsel = $("in-lang");
+  if (lsel && (lsel.dataset.current !== (st.dj_lang || "Indonesian"))) {
+    const current = st.dj_lang || "Indonesian";
+    lsel.options.length = 0;
+    for (const l of (st.dj_langs || ["Indonesian", "English", "Arabic"])) {
+      const o = document.createElement("option");
+      o.value = l;
+      o.textContent = l;
+      if (l === current) o.selected = true;
+      lsel.appendChild(o);
+    }
+    lsel.dataset.current = current;
+  }
+  $("voice-lang").textContent = (st.dj_voice || "Despina") + " announces in " +
+    (st.dj_lang || "Indonesian");
   $("unkeybtn").hidden = !st.key_set;
-  $("engine2").textContent = st.key_set
-    ? "Planning goes through " + (st.model || "the default model") + " at " +
-      (st.base || "generativelanguage.googleapis.com") + ", and the DJ's voice is " +
-      (st.dj_voice || "Despina") + ". The key is only ever sent back as "
-      + (st.key_mask || "a mask") + "."
-    : "No key saved, so a small offline parser plans the searches and the DJ voice stays " +
-      "quiet/robotic. Paste a Gemini key (or a local model URL) and the DJ speaks in a real voice.";
+  drawWorker(s);
+  $("engine2").textContent = st.worker && st.worker.configured
+    ? "Planning goes through your Worker with " + (st.model || "the default model")
+      + ", and the DJ's voice is " + (st.dj_voice || "Despina") + "."
+      + (st.key_set ? " The saved key is sent only if the Worker asks for it ("
+        + (st.key_mask || "a mask") + ")." : " No key is stored on this machine.")
+    : st.base
+      ? "Planning goes to your local model at " + st.base + " with " +
+        (st.model || "its default model") + ". The DJ's voice needs a Worker, so it stays quiet."
+      : "No Worker and no local model, so a small offline parser plans the searches and the "
+        + "DJ stays quiet. Add a Worker below for planning, a spoken DJ, and cloud sync.";
   $("setnote").textContent = st.note || "";
+}
+/* The Worker card. It says which of the four things is true - no URL, a URL that
+   does not answer, one that answers but has no D1, or one that works - because
+   "engine: offline" is the same sentence for all four and they have four
+   different fixes. */
+function drawWorker(s){
+  const w = s.worker || {};
+  const fillIn = (node, v) => { if (node && document.activeElement !== node) node.value = v; };
+  const st = s.settings || {};
+  fillIn($("in-wurl"), st.worker_url || "");
+  fillIn($("in-wprofile"), st.worker_profile || "default");
+  const ws = $("in-wsync");
+  if (ws && document.activeElement !== ws) ws.value = (st.worker_sync === "off") ? "off" : "on";
+  const bits = [];
+  if (!w.configured) {
+    bits.push("No Worker URL, so the planner is the offline parser and the DJ does "
+      + "not speak. Deploy worker/ (see worker/README.md) and paste the URL here.");
+  } else if (!w.on) {
+    bits.push("Cloud sync is off: the Worker still plans and speaks, but nothing is "
+      + "saved to D1.");
+  } else if (w.ok === false && w.detail) {
+    bits.push("The Worker is not answering: " + w.detail);
+  } else {
+    bits.push("Profile '" + (w.profile || "default") + "' is mirrored to " + (w.url || "")
+      + (w.pushed_at ? " · last saved " + hhmm(w.pushed_at) : " · not saved yet"));
+    if (w.pending) bits.push(w.pending + " taste event(s) queued");
+  }
+  setText($("worker-note"), bits.join(" "));
+  const sub = [];
+  if (st.worker_note) sub.push(st.worker_note);
+  if (st.worker_token_set) sub.push("a Worker token is saved (never shown back)");
+  setText($("worker-sub"), sub.join(" · "));
+}
+function hhmm(ms){
+  try { const d = new Date(Number(ms));
+    return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+  } catch (e) { return ""; }
+}
+
+/* The spoken DJ: the server publishes a clip, the page plays it. An <audio>
+   element rather than Audio() so the element survives a redraw, and the play()
+   promise is caught because a browser that has never seen a gesture refuses it -
+   a rejected promise here used to throw into the tick and blank the pill. */
+let voiceEl = null, voiceId = "";
+function drawVoice(s){
+  const clip = s.voice_clip;
+  if (!clip || !clip.url) return;
+  if (clip.id === voiceId) return;                 // already playing this one
+  voiceId = clip.id;
+  if (!voiceEl) { voiceEl = new Audio(); voiceEl.volume = 0.9; }
+  voiceEl.src = clip.url;
+  const p = voiceEl.play();
+  if (p && p.catch) p.catch(() => {
+    // autoplay blocked: the next click on the page will let it through, so say
+    // so once instead of leaving the listener wondering why the DJ went quiet
+    toast("the browser blocked audio - click anywhere to hear the DJ");
+  });
 }
 function drawRecents(s){
   const box = $("recents");
@@ -1561,6 +1675,7 @@ function draw(s){
   region("drawPage", () => drawPage(s));
   region("drawTaste", () => drawTaste(s));
   region("drawSettings", () => drawSettings(s));
+  region("drawVoice", () => drawVoice(s));
   region("drawRecents", () => drawRecents(s));
   region("drawLog", () => drawLog(s));
   region("drawEmptyActs", () => drawEmptyActs(s));
@@ -1682,17 +1797,46 @@ $("savebtn").addEventListener("click", async () => {
   if (k) f.key = k;
   const v = $("in-voice");
   if (v && v.value) f.voice = v.value;
+  const l = $("in-lang");
+  if (l && l.value) f.lang = l.value;
   try {
     const j = await post("/api/settings", f);
     draw(j.state); $("in-key").value = "";
     toast(j.note || "saved");
   } catch (e) { toast(e.message); }
 });
+$("wsavebtn").addEventListener("click", async () => {
+  const f = {worker_url: $("in-wurl").value.trim(),
+             worker_profile: $("in-wprofile").value.trim(),
+             worker_sync: $("in-wsync").value};
+  const t = $("in-wtoken").value.trim();
+  if (t) f.worker_token = t;
+  try {
+    const j = await post("/api/settings", f);
+    draw(j.state); $("in-wtoken").value = "";
+    toast(j.note || "saved");
+  } catch (e) { toast(e.message); }
+});
+let pullArm = 0;
+document.querySelectorAll('[data-action="worker_pull"]').forEach((b) => {
+  b.addEventListener("click", (e) => {
+    // this one can overwrite tonight's listening with the cloud copy, so it
+    // asks on the page the way clear_taste asks on the wire
+    if (Date.now() - pullArm > 4000) {
+      e.stopPropagation();
+      pullArm = Date.now();
+      b.querySelector("span").textContent = "Tap again to replace this taste";
+      return;
+    }
+    pullArm = 0;
+    b.querySelector("span").textContent = "Pull my taste";
+  });
+});
 $("in-voice").addEventListener("change", () => {
-  const sel = $("in-voice");
-  const lang = sel.selectedOptions[0] && sel.selectedOptions[0].textContent;
-  $("voice-lang").textContent = sel.value + " speaks " +
-    ((lang && lang.includes("·")) ? lang.split("·").pop().trim() : "English");
+  const v = $("in-voice");
+  const l = $("in-lang");
+  $("voice-lang").textContent = v.value + " announces in " +
+    ((l && l.value) ? l.value : "Indonesian");
 });
 let wipeArm = 0;
 $("wipebtn").addEventListener("click", () => {
@@ -1825,4 +1969,6 @@ subscribe();
 navSync();                     // home is the sole entry on load: back/forward both off
 setInterval(drawProgress, 200);
 if (!window.__noPoll) poll();
-</script></body></html>
+</script>
+</body>
+</html>
