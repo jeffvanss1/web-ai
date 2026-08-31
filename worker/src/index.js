@@ -35,6 +35,8 @@
  * No npm dependencies, no build step: this file is the Worker.
  */
 
+import { resolveAudio, streamAudio } from "./ytplayer.js";
+
 const VERSION = "1.0.0";
 
 // Same ladder brain.py used to walk client-side. Ordered: the configured model
@@ -858,6 +860,34 @@ PUT  /v1/state    {profile, state}
 POST /v1/events   {profile, events:[{ts, kind, payload}]}
 GET  /v1/events   ?profile=&since=&limit=`;
 
+const SAMPLE = "dQw4w9WgXcQ";
+
+function probePage(id, got) {
+  const row = (k, v) => `<tr><td>${k}</td><td><code>${v}</code></td></tr>`;
+  const body = got.ok
+    ? `<audio controls autoplay src="/audio/${id}" style="width:100%"></audio>
+       <table>${row("client", got.client)}${row("mime", got.mimeType)}
+       ${row("bitrate", got.bitrate)}${row("title", got.title)}${row("seconds", got.seconds)}</table>
+       <p style="color:#0a0">It resolved. If you can hear it, a fully hosted
+       player is possible: search, queue, taste and planning all live up here
+       and the browser is the player.</p>`
+    : `<p style="color:#a00"><b>${got.why}</b></p>
+       <p>${got.detail || ""}</p>
+       ${got.sawCiphered
+         ? "<p>YouTube sent <i>ciphered</i> URLs, which is what it does to datacenter "
+           + "IPs. Descrambling needs the JS interpreter yt-dlp ships and a Worker "
+           + "does not have, so a hosted player is not viable this way.</p>"
+         : ""}
+       <table>${(got.notes || []).map((n) => row("tried", n)).join("")}</table>`;
+  return `<!doctype html><meta charset=utf-8><title>audio probe</title>
+  <body style="background:#121212;color:#eee;font:15px system-ui;padding:24px;max-width:44em">
+  <h2>audio probe</h2>
+  <form><input name=v value="${id}" style="width:22em" placeholder="video id">
+  <button>resolve</button></form>
+  <p><small>video id: ${id} &middot; <a href="/probe?v=${SAMPLE}">sample</a></small></p>
+  ${body}</body>`;
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -872,6 +902,29 @@ export default {
           + (env.WORKER_TOKEN ? "" : "\nWARNING: no WORKER_TOKEN - every route is open.\n"),
         {
         headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS_HEADERS },
+      });
+    }
+    // ---- the hosted-player probe ------------------------------------------
+    // Not /v1: this is the experiment that decides whether the whole app can
+    // live up here. Resolve a video to an audio URL and stream it to a
+    // browser, because yt-dlp cannot run in a Worker and a browser cannot
+    // fetch YouTube's CDN itself.
+    if (path.startsWith("/audio/")) {
+      const id = path.slice("/audio/".length).split("/")[0];
+      const got = await resolveAudio(id);
+      if (!got.ok) {
+        return fail(502, "audio", `could not resolve audio for ${id}: ${got.why}`, {
+          why: got.why, detail: got.detail, sawCiphered: !!got.sawCiphered,
+          notes: got.notes,
+        });
+      }
+      return streamAudio(got.url, request.headers.get("range"));
+    }
+    if (path.startsWith("/probe")) {
+      const id = (url.searchParams.get("v") || "").trim() || "dQw4w9WgXcQ";
+      const got = await resolveAudio(id);
+      return new Response(probePage(id, got), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
       });
     }
     if (!path.startsWith("/v1/")) {
