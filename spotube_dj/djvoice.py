@@ -17,9 +17,12 @@ music, like Spotify's DJ. It is not a plain robotic read:
      socket failure, or a model-access error) the DJ stays silent. The vocal line
      is a nicety, never a crash, and never a robotic substitute.
 
-Speech is generated and played on a single worker thread, so a fast skipper only
-hears the latest line and the engine/webserver are never blocked. It degrades
-gracefully in a sandbox with no network or audio.
+The line for each upcoming song is written and synthesized on a background thread
+AS SOON as the current track starts, so the announcement is already a ready clip
+and plays instantly at the hand-off - a slow text/TTS call can no longer trail
+30s into the next song. A fast skipper drops the stale clip (the line for a track
+that already advanced is never played), and the engine/webserver are never blocked.
+It degrades gracefully in a sandbox with no network or audio.
 """
 
 from __future__ import annotations
@@ -120,13 +123,6 @@ def engines() -> list[str]:
     return ["gemini"] if config.LLM_API_KEY else []
 
 
-# one speech worker: a rapid fire of track changes (a fast skipper) collapses to
-# the *latest* line so the DJ never runs a queue of scripts or talks over itself.
-_cond = threading.Condition()
-_pending: str | None = None
-_worker = False
-
-
 def lead_secs() -> float:
     """Seconds before a track ends that the DJ starts the next-up announcement."""
     return getattr(config, "DJ_LEAD_SECS", 10.0)
@@ -138,20 +134,35 @@ def speak_for(dj) -> None:
 
 
 def speak_intro(dj) -> None:
-    """Announce the *current* song now - used for the first track of a set."""
+    """Announce the *current* song now - used for the first track of a set.
+
+    Runs entirely on a background thread so it never stalls the engine: the
+    creative line is written and synthesized there and played as soon as it is
+    ready. If the track advances while the line is being written, it stays quiet.
+    """
     set_logger(getattr(dj, "_note", None))
     if not enabled(dj):
         _info("voice is off (env or the DJ's on/off setting)")
         return
-    try:
-        import agent
-        text = _creative_line(dj, agent, next_up=False)
-    except Exception as e:
-        _info(f"intro line failed: {e.__class__.__name__}: {e}")
-        return
-    _info(f"announcing track now (engine={_engine() or 'none'}, "
-          f"model={tts_model()}, voice={voice_name()})")
-    _queue(text)
+    current_id = (dj.current or {}).get("id")
+
+    def run() -> None:
+        try:
+            import agent
+            text = _creative_line(dj, agent, next_up=False)
+        except Exception as e:
+            _info(f"intro line failed: {e.__class__.__name__}: {e}")
+            return
+        if not text:
+            return
+        if (dj.current or {}).get("id") != current_id:
+            _info("intro line is stale (track advanced) - staying quiet")
+            return
+        _info(f"announcing track now (engine={_engine() or 'none'}, "
+              f"model={tts_model()}, voice={voice_name()})")
+        _say(text)          # the line is written; synth + play on this thread
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 def schedule_next(dj) -> None:
@@ -171,7 +182,15 @@ def schedule_next(dj) -> None:
 
 
 def _monitor(dj) -> None:
-    """Generate the up-next line, wait until near the end, then speak it."""
+    """Write + pre-synthesize the up-next line, then play it near the track's end.
+
+    The clip is synthesized EARLY on this background thread (as soon as the track
+    starts), so when the track is close to its end the announcement is already
+    ready and plays immediately. That is the whole fix for the voice trailing
+    ~30s into a song: a slow TTS call used to run *at* the hand-off moment and
+    spill into the next track, and the creative line (a slow text call) blocked
+    the engine.
+    """
     try:
         import agent
         current_id = (dj.current or {}).get("id")
@@ -182,9 +201,23 @@ def _monitor(dj) -> None:
         return
     if not text:
         return
-    if not _wait_lead(dj, current_id):
+    # a skip may have happened while writing; don't spend a TTS call on a stale line
+    if (dj.current or {}).get("id") != current_id:
+        _info("up-next line is stale (track advanced)")
         return
-    _queue(text)
+    clip = _synth(text)                        # pre-synthesize NOW, on this thread
+    if not clip:
+        return
+    played = False
+    try:
+        if _wait_lead(dj, current_id):
+            _play_clip(clip)
+            played = True
+    except Exception:
+        pass
+    finally:
+        if not played:                        # skipped; drop the stale clip
+            _unlink(clip)
 
 
 def _wait_lead(dj, current_id: str) -> bool:
@@ -213,19 +246,6 @@ def _wait_lead(dj, current_id: str) -> bool:
             return True
         time.sleep(0.25)
     return False
-
-
-def _queue(text: str) -> None:
-    """Enqueue a line for the single speech worker (serializes rapid changes)."""
-    global _pending
-    if not text:
-        return
-    global _worker
-    with _cond:
-        _pending = text
-        if not _worker:
-            _worker = True
-            threading.Thread(target=_worker_loop, daemon=True).start()
 
 
 def _creative_line(dj, agent, next_up: bool = False) -> str:
@@ -273,19 +293,23 @@ def _has_any_next(dj) -> bool:
         return False
 
 
-def _worker_loop() -> None:
-    """Serial line-write + synth + play: take the latest pending, stop when idle."""
-    global _pending, _worker
-    while True:
-        with _cond:
-            text = _pending
-            _pending = None
-        if not text:
-            with _cond:
-                _worker = False
-                return                    # idle; the next speak_for restarts me
-        time.sleep(0.15)                  # breathing room so two lines don't overlap
-        _say(text)
+def _unlink(path: str) -> None:
+    """Best-effort remove a temp clip (never raises)."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _play_clip(clip: str) -> None:
+    """Play a ready clip and schedule its temp file cleanup. Never raises."""
+    try:
+        _play(clip)
+    finally:
+        def _cleanup():
+            time.sleep(30)
+            _unlink(clip)
+        threading.Thread(target=_cleanup, daemon=True).start()
 
 
 def _say(text: str) -> None:
@@ -293,16 +317,7 @@ def _say(text: str) -> None:
     clip = _synth(text)
     if not clip:
         return
-    try:
-        _play(clip)
-    finally:
-        def _cleanup():
-            time.sleep(30)
-            try:
-                Path(clip).unlink(missing_ok=True)
-            except OSError:
-                pass
-        threading.Thread(target=_cleanup, daemon=True).start()
+    _play_clip(clip)
 
 
 def _engine() -> str:
