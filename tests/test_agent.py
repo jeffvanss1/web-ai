@@ -323,15 +323,14 @@ class SpeechTests(unittest.TestCase):
         self.assertIn("voice_note", s)
         self.assertIn("Despina", s["voice_note"])
 
-    def test_default_model_reads_the_line_verbatim(self):
+    def test_default_model_is_the_live_web_socket(self):
         import djvoice
-        # the default is the TTS model, which reads the pre-written line VERBATIM
-        # via generateContent - the DJ announces, it does NOT chat. A Live model is
-        # conversational by design and would answer the line like a chatbot, so it
-        # is only used when explicitly selected.
-        self.assertEqual(djvoice.tts_model(), "gemini-3.1-flash-tts-preview")
-        self.assertFalse(djvoice._is_live_model(djvoice.tts_model()))
-        self.assertTrue(djvoice._is_live_model("gemini-3.1-flash-live-preview"))
+        # the default is the Live native-audio model over the WebSocket, which has
+        # no free-tier REST quota cap here (the REST TTS endpoint 429'd). A
+        # systemInstruction in the Live setup tells it to READ the line as a DJ
+        # announcement instead of answering it like a chatbot.
+        self.assertEqual(djvoice.tts_model(), "gemini-3.1-flash-live-preview")
+        self.assertTrue(djvoice._is_live_model(djvoice.tts_model()))
         self.assertTrue(djvoice._is_live_model("gemini-2.5-flash-live-preview"))
         self.assertFalse(djvoice._is_live_model("gemini-3.1-flash-tts-preview"))
         self.assertIn("BidiGenerateContent", djvoice._live_url())
@@ -379,6 +378,11 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(sent[0]["setup"]["generationConfig"]["speechConfig"]
                          ["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"], "Despina")
         self.assertNotIn("responseModalities", sent[0]["setup"])   # not top-level
+        # a top-level systemInstruction makes the Live model read the line as an
+        # on-air announcement instead of answering it like a chatbot
+        self.assertIn("systemInstruction", sent[0]["setup"])
+        self.assertIn("radio DJ announcer",
+                      sent[0]["setup"]["systemInstruction"]["parts"][0]["text"])
         self.assertEqual(sent[1]["realtimeInput"]["text"], "hello")
 
     def test_live_synth_falls_back_to_a_safe_voice_when_one_is_rejected(self):

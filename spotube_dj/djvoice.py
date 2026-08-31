@@ -6,13 +6,13 @@ The on-screen announcer (agent.narrate) is visual. This module makes the same
 music, like Spotify's DJ. It is not a plain robotic read:
 
   1. **Gemini** writes the line and voices it. By default it uses the Gemini
-     **TTS** model (`gemini-3.1-flash-tts-preview`) over the synchronous
-     `generateContent` speech endpoint, which reads the written DJ line VERBATIM
-     in the chosen voice - the DJ announces what's playing/next, it never chats.
-     The voice is **Despina** (warm, smooth) by default, changeable by voice name.
-     A `*-live-preview` (Gemini Live) model is conversational by design and would
-     answer the line like a chatbot instead of reading it, so it is only used if
-     explicitly set.
+     **Live** native-audio model (`gemini-3.1-flash-live-preview`) over the Live
+     API WebSocket, which has no free-tier request cap here and speaks the written
+     DJ line in the chosen voice; a `systemInstruction` in the Live setup makes it
+     read the line as an on-air DJ announcement instead of chatting. The voice is
+     **Despina** (warm, smooth) by default, changeable by voice name. The
+     `generateContent` TTS endpoint (`gemini-*-tts-preview`) reads verbatim but can
+     trip a REST quota, so it is only used if explicitly selected.
   2. There is no offline/robotic fallback - if Gemini cannot speak (no key, a
      socket failure, or a model-access error) the DJ stays silent. The vocal line
      is a nicety, never a crash, and never a robotic substitute.
@@ -93,9 +93,9 @@ def voice_name() -> str:
 
 
 def tts_model() -> str:
-    """The speech-generation model (gemini-*-tts-preview or gemini-*-live-preview)."""
+    """The speech-generation model (gemini-*-live-preview or gemini-*-tts-preview)."""
     return (os.environ.get("SPOTUBE_DJ_TTS_MODEL") or config.GEMINI_DEFAULT_TTS_MODEL
-            or "gemini-3.1-flash-tts-preview")
+            or "gemini-3.1-flash-live-preview")
 
 
 def _is_live_model(model: str) -> bool:
@@ -739,11 +739,13 @@ def _send_text_turn(sock, text: str) -> tuple[bytes, int, bool, bool]:
 def _gemini_live_synth(text: str, path: Path) -> bool:
     """Ask the Gemini Live native-audio model to speak `text` over the WebSocket.
 
-    Only for a `*-live-*` model (e.g. `gemini-3.1-flash-live-preview`), which is
-    conversational: it treats the line as an utterance and may answer it (which is
-    why the default is the TTS model that reads verbatim - use Live only when you
-    explicitly want a Live model). The server replies with PCM; we wrap it as a WAV.
-    Returns False on any failure, and the caller stays silent.
+    The default path for `*-live-*` models (e.g. `gemini-3.1-flash-live-preview`),
+    which speak over the Live API WebSocket and have no free-tier request cap here
+    (unlike the generateContent REST TTS endpoint, which 429s). The Live model is
+    conversational by design, so the setup includes a `systemInstruction` telling
+    it to READ the sent line as an on-air DJ announcement and not answer it like a
+    chatbot. The server replies with PCM; we wrap it as a WAV. Returns False on any
+    failure, and the caller stays silent.
     """
     if not config.LLM_API_KEY:
         _info("gemini (live): no API key")
@@ -757,12 +759,22 @@ def _gemini_live_synth(text: str, path: Path) -> bool:
         # The raw-wire BidiGenerateContentSetup schema (ai.google.dev/api/live) is
         # authoritative: `model` is `models/{model}`; `responseModalities` and
         # `speechConfig` live **inside** `generationConfig` (NOT at the top level,
-        # which the server 1007-rejects). We do not touch outputAudioTranscription -
-        # it is a *top-level* setup field, and we don't need output text anyway.
-        # No systemInstruction: the line is already written as text and we only want
-        # it voiced as-is.
+        # which the server 1007-rejects). `systemInstruction` is a TOP-LEVEL setup
+        # field (a sibling of generationConfig). We add one so the Live model reads
+        # the line we send as an ON-AIR ANNOUNCEMENT instead of answering it like a
+        # chatbot ("anything else you'd like to hear?"). No outputAudioTranscription.
         return {
             "model": "models/" + model,
+            "systemInstruction": {"parts": [{
+                "text": (
+                    "You are a warm, smooth, energetic radio DJ announcer on air. "
+                    "The text you are sent is the announcement to SAY OUT LOUD "
+                    "word for word: name the track, the reason it is playing and "
+                    "what is up next. Read it exactly as written. Do not ask the "
+                    "listener anything, do not add a question, and do not carry on "
+                    "a conversation - speak the script and stop."
+                ),
+            }]},
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
                 "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {
@@ -874,12 +886,11 @@ def _synth(text: str) -> str | None:
     clip = Path(tempfile.mkstemp(suffix=".wav")[1])
     ok = False
     used = ""
-    # The model type decides the path ONCE: a TTS model (-tts-) reads the line
-    # verbatim over the generateContent REST endpoint (what a DJ announcer does);
-    # a Live native-audio model (-live-) is conversational, so it is only used when
-    # explicitly selected. We never cross-fall back to the Live model from a TTS
-    # model or vice versa - a Live model would answer the line like a chatbot, and
-    # the DJ must only announce, never chat. No espeak fallback either.
+    # The model type decides the path ONCE: the Live native-audio model (-live-,
+    # the default) speaks over the WebSocket and has no REST quota cap here; a
+    # generateContent TTS model (-tts-) reads the line verbatim over REST but can
+    # trip a rate limit. We never cross-fall back to the other, so the DJ only
+    # ever announces. No espeak fallback either.
     if _is_live_model(tts_model()):
         ok = _gemini_live_synth(text, clip)
         used = "live"
