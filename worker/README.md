@@ -32,7 +32,7 @@ same bug wearing a different hat:
 
 ```bash
 npm run check     # node --check, then a real `wrangler deploy --dry-run`
-npm test          # 22 route tests
+npm test          # 24 route tests
 ```
 
 `node --check` alone is **not** enough and has already missed one deploy-blocking
@@ -49,7 +49,6 @@ npm install                                  # just wrangler
 npx wrangler login
 npx wrangler d1 create spotube-dj            # paste the id into wrangler.toml
 npx wrangler d1 execute spotube-dj --file=schema.sql --remote
-npx wrangler r2 bucket create spotube-dj-clips   # optional, see below
 npx wrangler secret put GEMINI_API_KEY
 npx wrangler secret put WORKER_TOKEN        # set this one
 npx wrangler deploy
@@ -112,7 +111,10 @@ tier. A Worker cannot open a WebSocket as a client — it can only proxy one it
 was handed — so `/v1/speech` uses the REST TTS sibling instead and answers the
 quota problem the other way: **the clip is cached**. `sha256(text|voice|model)`
 in R2, so "Stay right here — up next Radiohead" is synthesized once and never
-again. Bind `CLIPS` (R2) to get the cache; without it the Worker still speaks,
+again. **The bucket is off by default** — one less thing to create, pay for and
+think about, and the spoken DJ works either way. Bind `CLIPS` (R2) and
+uncomment the `[[r2_buckets]]` block in `wrangler.toml` to turn it on; without
+it the Worker still speaks,
 it just asks Google every time and can 429 mid-set like the old client did.
 
 A `*-live-*` model name is mapped to its `-tts-` sibling rather than rejected,

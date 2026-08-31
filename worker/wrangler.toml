@@ -5,7 +5,6 @@
 #   npm run check                     # dry-run build - needs no account, do it first
 #   npx wrangler login
 #   npx wrangler d1 create spotube-dj # paste the database_id below
-#   npx wrangler r2 bucket create spotube-dj-clips   # optional: spoken-line cache
 #   npx wrangler secret put GEMINI_API_KEY
 #   npx wrangler secret put WORKER_TOKEN      # strongly recommended (see below)
 #   npx wrangler d1 execute spotube-dj --file=schema.sql --remote
@@ -45,9 +44,14 @@ binding = "DB"
 database_name = "spotube-dj"
 database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
 
-# Optional. Spoken lines are cached by sha256(text|voice|model) so the same
-# "up next" phrasing costs no quota the second time. Without it the Worker still
-# speaks, it just asks Gemini every time.
-[[r2_buckets]]
-binding = "CLIPS"
-bucket_name = "spotube-dj-clips"
+# R2 is OFF by default: one less resource to create, pay for and think about,
+# and the spoken DJ works either way - without a bucket it just asks Gemini for
+# every line instead of reusing one.
+#
+# To turn the clip cache back on:
+#   npx wrangler r2 bucket create spotube-dj-clips
+# then uncomment the block below and `npx wrangler deploy`.
+#
+# [[r2_buckets]]
+# binding = "CLIPS"
+# bucket_name = "spotube-dj-clips"

@@ -365,6 +365,43 @@ test("POST /v1/speech returns a real WAV and caches it in R2", async () => {
   assert.equal(state.calls.length, 0, "a cached line must not cost quota");
 });
 
+// The R2 binding is OFF by default (see wrangler.toml), so this is the shape
+// most deployments actually run: no bucket, every line synthesized on demand.
+// Every CLIPS use in the source is behind `if (env.CLIPS)`, and this is the
+// test that keeps it that way - if a `.get` ever escapes its guard, the speech
+// route throws instead of speaking.
+test("POST /v1/speech works with no R2 binding at all", async () => {
+  state.scenario = "audio";
+  const env = envWith({ CLIPS: undefined });
+  const res = await call("POST", "/v1/speech", {
+    body: { text: "Up next, Slowdive", voice: "Despina" },
+    env,
+  });
+  assert.equal(res.status, 200, "no bucket must not cost the listener the line");
+  assert.equal(res.headers.get("content-type"), "audio/wav");
+  assert.equal(res.headers.get("x-voice-cached"), "0");
+  const buf = Buffer.from(await res.arrayBuffer());
+  assert.equal(buf.subarray(0, 4).toString(), "RIFF");
+  assert.equal(buf.length, 44 + 200);
+
+  // and it is genuinely uncached: the same line asks Gemini again
+  state.calls = [];
+  const again = await call("POST", "/v1/speech", {
+    body: { text: "Up next, Slowdive", voice: "Despina" },
+    env,
+  });
+  assert.equal(again.status, 200);
+  assert.equal(again.headers.get("x-voice-cached"), "0");
+  assert.equal(state.calls.length, 1, "no bucket means no reuse - one call per line");
+});
+
+test("GET /v1/health reports clips: false when the bucket is not bound", async () => {
+  const res = await call("GET", "/v1/health", { env: envWith({ CLIPS: undefined }) });
+  const body = await res.json();
+  assert.equal(body.clips, false);
+  assert.equal(body.d1, true, "dropping R2 must not disturb D1");
+});
+
 test("a Live model name is mapped to its REST TTS sibling, and says so", async () => {
   state.scenario = "audio";
   const res = await call("POST", "/v1/speech", {

@@ -757,7 +757,6 @@ npm install                                        # just wrangler
 npx wrangler login
 npx wrangler d1 create spotube-dj                  # paste the id into wrangler.toml
 npx wrangler d1 execute spotube-dj --file=schema.sql --remote
-npx wrangler r2 bucket create spotube-dj-clips      # optional: caches spoken lines
 npx wrangler secret put GEMINI_API_KEY              # free, from Google AI Studio
 npx wrangler secret put WORKER_TOKEN                # openssl rand -hex 32
 npx wrangler deploy
@@ -773,8 +772,9 @@ python3 -m spotube_dj --test-worker
 ```
 
 `--test-worker` calls `/v1/health`, then makes a real plan call, and prints what
-it found: which model answered, whether D1 and the clip bucket are bound, and
-whether the Worker is holding a key or waiting for yours. `--doctor` gets its
+it found: which model answered, whether D1 is bound, and whether the Worker is
+holding a key or waiting for yours. (`clips: false` in that report is the
+default and is fine - it just means spoken lines are not being reused.) `--doctor` gets its
 own `cloudflare worker` line for the same reason: "brain: offline" hides four
 different faults (no URL, not deployed, wrong token, no D1) that have four
 different fixes.
@@ -806,8 +806,11 @@ everything stays on that disk.
 ### The spoken DJ, in the tab
 
 `djvoice.py` asks the Worker for `POST /v1/speech` and gets WAV bytes back; the
-Worker wraps raw PCM in a header, and caches each line in R2 keyed on
-`sha256(text|voice|model)`, so a line the DJ says twice is synthesized once.
+Worker wraps raw PCM in a header. **No bucket is required** - the R2 clip cache
+is commented out in `wrangler.toml` by default, so there is one less thing to
+create. Turn it on (`wrangler r2 bucket create spotube-dj-clips` + uncomment
+the `[[r2_buckets]]` block) if you want a line the DJ says twice to be
+synthesized once; off, every line costs one call.
 
 Where it plays depends on whether a tab is listening:
 
@@ -838,7 +841,7 @@ switch is reported in an `X-Voice-Notes` header.
 | `Worker: timed out after 45s` | `SPOTUBE_DJ_LLM_TIMEOUT`, or a smaller model |
 
 The full contract - every route, error kind and env var - is in
-[`worker/README.md`](worker/README.md). `cd worker && npm test` runs its 22 tests
+[`worker/README.md`](worker/README.md). `cd worker && npm test` runs its 24 tests
 and `npm run check` does a real `wrangler deploy --dry-run`; neither needs a
 network or a Cloudflare account. Run `check` before `deploy`: it is the only
 thing that builds the bundle the way Cloudflare will.
@@ -864,7 +867,7 @@ thing that builds the bundle the way Cloudflare will.
 | `spotube_dj/djvoice.py` | the spoken DJ: `POST /v1/speech` from the Worker, played by the tab or by mpv |
 | `spotube_dj/viewmodel.py` | every colour, string, key-map and truncation rule the page and the CLI share - no UI code in it, so it is testable |
 | `spotube_dj/desktop.py` | the app-menu launcher: write, validate, remove |
-| `worker/src/index.js` | the Cloudflare Worker: `/v1/plan`, `/v1/text`, `/v1/speech`, `/v1/state`, `/v1/events` over D1 + R2 |
+| `worker/src/index.js` | the Cloudflare Worker: `/v1/plan`, `/v1/text`, `/v1/speech`, `/v1/state`, `/v1/events` over D1 (R2 clip cache optional) |
 | `worker/schema.sql` | the two D1 tables: `profiles` and `events` |
 | `tests/test_dj_core.py` | 168 tests: queue, taste, search shape, YTM parsing, cache-first start, auto-mix, station seeds, repeat and shuffle, the self-filling queue, the end-of-song rules, the clear verb, the cache race |
 | `tests/test_filters_cache.py` | 41 tests: the filter against harvested searches, bins discovery, cache |
@@ -875,11 +878,11 @@ thing that builds the bundle the way Cloudflare will.
 | `tests/test_desktop.py` | 15 tests: the .desktop file and the icon, in a temp $XDG_DATA_HOME |
 | `tests/test_web.py` | 200 tests: the clear-queue verb and its job lane, the published snapshot, every routed action, the transport verbs, library rows, artwork lanes, path traversal, the Host guard, the settings route, one real socket over the routes |
 | `tests/test_worker.py` | 53 tests: the Worker client - key custody, error kinds, D1 sync and adopt, the asset split, the voice bus |
-| `worker/test/smoke.mjs` | 22 tests: the Worker's routes, token gate, model ladder and WAV wrapping, under `node --test` |
+| `worker/test/smoke.mjs` | 24 tests: the Worker's routes, token gate, model ladder and WAV wrapping (with and without R2), under `node --test` |
 
 ```bash
 python3 -m unittest discover -s tests -t .     # from the repo root: 767 tests
-cd worker && npm test                          # 22 more, no network
+cd worker && npm test                          # 24 more, no network
 cd worker && npm run check                     # + a real wrangler build (no account)
 ```
 
