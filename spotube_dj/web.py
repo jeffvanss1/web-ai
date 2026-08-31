@@ -2182,8 +2182,8 @@ def doctor_line() -> tuple[str, bool, str]:
         ok = bool(webapp.page())
     except Exception as e:
         return ("web player", False, f"page could not be built: {e.__class__.__name__}")
-    return ("web player", ok, f"http://127.0.0.1:{DEFAULT_PORT} - one HTML file, "
-            f"stdlib only, no CDN")
+    return ("web player", ok, f"http://127.0.0.1:{DEFAULT_PORT} - "
+            f"{len(webapp.static_files())} files from static/, stdlib only, no CDN")
 
 
 if __name__ == "__main__":            # python3 -m web  (dev: a demo DJ on a port)
