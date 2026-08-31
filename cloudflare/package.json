@@ -1,0 +1,15 @@
+{
+  "name": "spotube-dj-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply spotube-dj --local"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260831.1",
+    "wrangler": "^4.127.1",
+    "typescript": "^5.9.2"
+  }
+}

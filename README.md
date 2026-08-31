@@ -388,6 +388,23 @@ before the page opens. Measured on this machine with a live queue of 10: the pag
 page saved out of the server - open it to read the layout, but its `/art/...` hrefs
 only resolve while a server is running, so artwork needs `--web` to appear.
 
+## Cloud/browser deployment
+
+The repository now includes a Worker-compatible cloud backend in [`cloudflare/`](cloudflare/). It is the migration path for running the DJ as a real multi-user web app rather than a localhost Python process. The cloud surface uses Cloudflare Workers + D1 + Access authentication and browser-native audio playback; it does not require Python, `mpv`, a local filesystem, or a local Ollama instance.
+
+```bash
+cd cloudflare
+npm install
+npx wrangler d1 create spotube-dj
+# copy the returned database_id into wrangler.toml
+npm run db:migrate
+npx wrangler dev --local
+```
+
+The Worker handles metadata search, per-user queues, likes, history, and audio URL resolution. Because Workers cannot execute `yt-dlp` or `mpv`, audio resolution is an explicit provider boundary: configure `AUDIO_RESOLVER_URL` with a service that returns a CORS-enabled, range-request-capable browser audio URL. Protect the deployed hostname with Cloudflare Access; local development alone may use `AUTH_MODE=dev`. See [`cloudflare/README.md`](cloudflare/README.md) for the API contract and deployment steps.
+
+The original Python web player remains available during this migration. The cloud implementation is isolated so local playback stays stable while the browser player and provider adapters are moved across incrementally.
+
 ## Install
 
 ```bash

@@ -1,0 +1,29 @@
+name = "spotube-dj"
+main = "src/index.ts"
+compatibility_date = "2026-08-31"
+
+[vars]
+# Set this to a browser-playable resolver service. The Worker never runs yt-dlp.
+# AUDIO_RESOLVER_URL = "https://resolver.example.com/resolve"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spotube-dj"
+database_id = "replace-with-d1-database-id"
+migrations_dir = "migrations"
+
+[durable_objects]
+bindings = [
+  { name = "USER_QUEUE", class_name = "UserQueue" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["UserQueue"]
+
+[assets]
+directory = "../web"
+binding = "ASSETS"
+
+[observability]
+enabled = true
