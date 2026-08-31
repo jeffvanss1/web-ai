@@ -100,7 +100,9 @@ def dj_speech(dj) -> str:
     if not now or now.lower() == "nothing playing":
         return ""                       # nothing to announce; stay quiet
     artist, sep, title = now.partition(" - ")
-    bits = [f"Now playing {artist}," if sep else f"Now playing {now}."]
+    # a DJ announcer signposts before naming the song, then leads into what's next.
+    bits = [f"Alright, coming up next - here's {artist}," if sep
+            else f"Alright, coming up next - here's {now}."]
     if sep and title:
         bits.append(f"{title}.")
     why = str(snap.get("why") or "").strip()
@@ -109,11 +111,12 @@ def dj_speech(dj) -> str:
         bits.append(f"{why}.")
     vibe = str(snap.get("vibe") or "").strip()
     if vibe:
-        bits.append(f"It's part of the {vibe} set.")
+        bits.append(f"It's all part of the {vibe} set.")
     nxt = str(snap.get("next") or "").strip()
     if nxt:
         a, s2, t = nxt.partition(" - ")
-        bits.append(f"Up next {a}," if s2 else f"Up next {nxt}.")
+        bits.append(f"Stay right here - up next {a}," if s2
+                    else f"Stay right here - up next {nxt}.")
         if s2 and t:
             bits.append(f"{t}.")
     return " ".join(bits)
@@ -143,12 +146,16 @@ def dj_prompt(dj, lang: str = "English") -> str:
     if nxt:
         facts += f"; up next is {nxt}"
     return (
-        "You are a warm, smooth, a little playful radio DJ. Say ONE short, natural "
-        "spoken line to introduce the song that is starting. Speak like a real DJ "
-        "host, not a text readout - vary the phrasing, be friendly, and keep it to "
-        "one or two sentences (about 15 to 35 words). Use these facts but express "
-        "them in your own words, and don't mention that you are an AI. Write the "
-        "line in " + lang + ". Facts: "
+        "You are a live radio DJ announcer, on-air and full of energy - warm, "
+        "smooth and a little playful. Introduce the song that is starting exactly "
+        "the way a real DJ host would say it over the music. Say ONE short spoken "
+        "line: open with a natural signpost (something like 'Alright, here we go', "
+        "'Keeping it moving now', 'Coming up right here', 'This one's a vibe'), "
+        "name the track and artist, weave in why it's on and the set's mood, and "
+        "tease what's up next - all in your own words, not a list. Sound like "
+        "you're on air, not reading a screen; never mention that you are an AI. "
+        "Keep it to one or two sentences (about 15 to 35 words). Write the line in "
+        + lang + ". Facts: "
         + facts + "."
         " Reply with only the line to speak - no labels, no quotes, no preamble."
     )
@@ -170,10 +177,14 @@ def lead_prompt(dj, lang: str = "English") -> str:
     if why and not vibe:
         context = why[0].upper() + why[1:] + "."
     return (
-        "You are a warm, playful radio DJ. The song currently playing is almost "
-        "finished. Give a short spoken lead-in that hands over to the next song "
-        "(one or two sentences, about 10 to 25 words, friendly and energetic). "
-        "The next song is " + nxt + "."
+        "You are a warm, energetic radio DJ announcer, live on air. The song "
+        "currently playing is almost finished. Give a short spoken lead-in that "
+        "hands over to the next song exactly like a DJ host announcing it on the "
+        "radio: a quick energetic signpost (something like 'Up next', 'Stay right "
+        "here', 'Next up, we've got', 'Right after this'), the next track and "
+        "artist, and a hint of the set's mood. Keep it to one or two sentences "
+        "(about 10 to 25 words), friendly and energetic. The next song is "
+        + nxt + "."
         + ((" " + context) if context else "")
         + " Write the line in " + lang + ". "
         "Reply with only the line to speak - no labels, no quotes, no preamble."
@@ -188,11 +199,11 @@ def lead_line(dj) -> str:
         return ""
     a, s, t = nxt.partition(" - ")
     vibe = str(snap.get("vibe") or "").strip()
-    line = f"Up next {a}," if s else f"Up next {nxt}."
+    line = f"Stay right here - up next {a}," if s else f"Stay right here - up next {nxt}."
     if s and t:
         line += f" {t}."
     if vibe:
-        line += f" It's part of the {vibe} set."
+        line += f" It's all part of the {vibe} set."
     return line + " Coming right up."
 
 

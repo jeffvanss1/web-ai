@@ -146,11 +146,12 @@ class OfflineByConstructionTests(unittest.TestCase):
 class SpeechTests(unittest.TestCase):
     """The DJ's spoken line (agent.dj_speech) and the voice trigger (djvoice)."""
 
-    def test_speech_reads_like_a_dj_host(self):
+    def test_speech_reads_like_a_dj_announcer(self):
         line = agent.dj_speech(_dj())
-        self.assertIn("Now playing Oneohtrix, Royal Albert.", line)
+        # a DJ announcer signposts before naming the song, then hands over to next
+        self.assertIn("here's Oneohtrix, Royal Albert.", line)
         self.assertIn("You asked for", line)          # capitalized for speech
-        self.assertIn("Up next Boards, Reach for the Dead.", line)
+        self.assertIn("Stay right here - up next Boards, Reach for the Dead.", line)
 
     def test_speech_nothing_playing_is_silent(self):
         dj = _dj()
@@ -247,7 +248,7 @@ class SpeechTests(unittest.TestCase):
         self.assertIn("Reach for the Dead", prompt)
         self.assertIn("Write the line in English", prompt)
         line = agent.lead_line(dj)
-        self.assertIn("Up next Boards,", line)
+        self.assertIn("Stay right here - up next Boards,", line)
         self.assertIn("Reach for the Dead", line)
         self.assertIn("Coming right up", line)
         # a set with nothing queued says nothing instead of inventing a track

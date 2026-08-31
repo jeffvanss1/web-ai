@@ -227,10 +227,23 @@ def _queue(text: str) -> None:
 
 
 def _creative_line(dj, agent, next_up: bool = False) -> str:
-    """A creative DJ line: ask Gemini to write it, fall back to the template."""
-    if config.LLM_API_KEY:
+    """A creative DJ line: ask Gemini to write it, fall back to the template.
+
+    The key is read from config BEFORE the check so a key saved in Settings
+    (config.json) is honoured - `apply_llm_overrides` pushes it into the globals.
+    Otherwise the first check sees the unloaded default and silently degrades to
+    the plain template, which is how "the AI doesn't announce like a DJ" happens.
+    """
+    try:
+        config.apply_llm_overrides()        # load a key saved in Settings (config.json)
+    except Exception:
+        pass
+    try:
+        import brain
+    except Exception:
+        brain = None
+    if brain is not None and config.LLM_API_KEY:
         try:
-            import brain
             lang = config.voice_lang(config.load_dj_voice())
             prompt = (agent.lead_prompt(dj, lang) if next_up
                       else agent.dj_prompt(dj, lang))
