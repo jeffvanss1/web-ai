@@ -5,10 +5,9 @@ This is the cloud/browser backend. It replaces the localhost Python HTTP server,
 - Cloudflare Worker API
 - D1 for tracks, queue, likes, and history
 - Optional Cloudflare Access identity (`cf-access-authenticated-user-email`); guests can use the UI without logging in
-- browser `<audio>` playback
-- an external **browser-playable audio resolver** configured with `AUDIO_RESOLVER_URL`
+- the official YouTube IFrame Player API for browser playback
 
-The Worker intentionally does not run `yt-dlp` or proxy audio itself. A resolver must return JSON in the form `{ "url": "https://..." }`, with a URL that supports browser CORS and HTTP range requests. This boundary keeps the Worker runtime-compatible and makes the provider replaceable.
+The Worker intentionally does not run `yt-dlp` or `mpv`. Search results contain official YouTube video IDs; the browser loads those IDs through YouTube's embedded player. This keeps playback inside the supported YouTube client boundary.
 
 ## Local development
 
@@ -27,7 +26,7 @@ Authentication is optional for the public UI. Unauthenticated browsers receive a
 
 ```sh
 npx wrangler d1 migrations apply spotube-dj --remote
-npx wrangler secret put AUDIO_RESOLVER_URL
+npx wrangler secret put YOUTUBE_API_KEY
 npx wrangler deploy
 ```
 
@@ -38,6 +37,4 @@ Protect the Worker/Pages hostname with Cloudflare Access. Set `ALLOWED_ORIGIN` t
 - `GET /api/state` — current user queue and likes
 - `GET /api/search?q=...` — YouTube Data API v3 metadata search via `fetch` (uses the `YOUTUBE_API_KEY` Worker secret)
 - `POST /api/action` — `queue`, `remove`, `like`, `unlike`, `played`, `clear`
-- `POST /api/resolve` — asks the configured resolver for a playable URL
-
-The browser owns play/pause/seek and reports `played` back to the Worker. No server process, global queue, filesystem, or local audio device is required.
+The browser owns playback through the official YouTube IFrame Player API and reports `played` back to the Worker. No server process, global queue, filesystem, or local audio device is required.

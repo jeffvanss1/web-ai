@@ -3,11 +3,8 @@ main = "src/index.ts"
 compatibility_date = "2026-08-31"
 
 [vars]
-# Set this to a browser-playable resolver service. The Worker never runs yt-dlp.
-# Store both values as secrets for production:
+# Store the YouTube Data API key as a secret for production:
 # npx wrangler secret put YOUTUBE_API_KEY
-# npx wrangler secret put AUDIO_RESOLVER_URL
-# AUDIO_RESOLVER_URL = "https://resolver.example.com/resolve"
 
 [[d1_databases]]
 binding = "DB"

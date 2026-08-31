@@ -401,7 +401,7 @@ npm run db:migrate
 npx wrangler dev --local
 ```
 
-The Worker handles YouTube metadata search through the YouTube Data API v3 (`YOUTUBE_API_KEY`), per-user queues, likes, history, and audio URL resolution. Because Workers cannot execute `yt-dlp` or `mpv`, audio resolution is an explicit provider boundary: configure `AUDIO_RESOLVER_URL` with a service that returns a CORS-enabled, range-request-capable browser audio URL. The YouTube API key is kept server-side and is never sent to the browser. The public UI works without authentication using a private guest cookie; Cloudflare Access can be added when account login is enabled, which upgrades the guest state to an account-scoped state. See [`cloudflare/README.md`](cloudflare/README.md) for the API contract and deployment steps.
+The Worker handles YouTube metadata search through the YouTube Data API v3 (`YOUTUBE_API_KEY`), per-user queues, likes, and history. Playback uses the official YouTube IFrame Player API in the browser, so no audio resolver, `yt-dlp`, `mpv`, or local audio device is needed. The YouTube API key is kept server-side and is never sent to the browser. The public UI works without authentication using a private guest cookie; Cloudflare Access can be added when account login is enabled, which upgrades the guest state to an account-scoped state. See [`cloudflare/README.md`](cloudflare/README.md) for the API contract and deployment steps.
 
 The original Python web player remains available during this migration. The cloud implementation is isolated so local playback stays stable while the browser player and provider adapters are moved across incrementally.
 

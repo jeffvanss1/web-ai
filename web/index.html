@@ -2,7 +2,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Spotube DJ</title>
 <style>
-:root{color-scheme:dark;font:16px system-ui;background:#121212;color:#eee}body{max-width:900px;margin:40px auto;padding:0 20px}input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #444;background:#222;color:inherit}button{cursor:pointer}form{display:flex;gap:8px}input{flex:1}.row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #292929}.meta{flex:1}.muted{color:#999;font-size:.9em}#error{color:#ff8585}.playing{color:#6ee7a0}audio{width:100%;margin-top:24px}
+:root{color-scheme:dark;font:16px system-ui;background:#121212;color:#eee}body{max-width:900px;margin:40px auto;padding:0 20px}input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #444;background:#222;color:inherit}button{cursor:pointer}form{display:flex;gap:8px}input{flex:1}.row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #292929}.meta{flex:1}.muted{color:#999;font-size:.9em}#error{color:#ff8585}.playing{color:#6ee7a0}#player{width:100%;aspect-ratio:16/9;margin-top:24px;border:0;border-radius:12px;overflow:hidden;background:#000}
 /* Small-screen layout: the player is designed for one-handed use and narrow
    phone viewports, not just a desktop page squeezed into a column. */
 @media (max-width:600px){
@@ -18,20 +18,23 @@
   .meta b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .muted{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .row button{font-size:.88rem;white-space:nowrap;padding:9px 10px}
-  audio{position:sticky;bottom:10px;z-index:3;margin-top:22px;filter:drop-shadow(0 4px 12px #000)}
+  #player{margin-top:22px;min-height:220px}
 }
 @media (max-width:360px){
   .row{display:grid;grid-template-columns:minmax(0,1fr) auto auto}
   .row button{padding-left:8px;padding-right:8px}
 }
 </style>
-<h1>Spotube DJ</h1><form id="search"><input id="query" placeholder="Search for music" autofocus><button>Search</button></form><p id="error"></p><section id="results"></section><h2>Queue</h2><section id="queue"></section><audio id="player" controls></audio>
+<h1>Spotube DJ</h1><form id="search"><input id="query" placeholder="Search for music" autofocus><button>Search</button></form><p id="error"></p><section id="results"></section><h2>Queue</h2><section id="queue"></section><div id="player"></div>
+<script src="https://www.youtube.com/iframe_api"></script>
 <script type="module">
-const $=s=>document.querySelector(s), results=$("#results"), queue=$("#queue"), audio=$("#player"), error=$("#error"); let state;
+const $=s=>document.querySelector(s), results=$("#results"), queue=$("#queue"), error=$("#error"); let state, player, pending;
 const api=async(path, options={})=>{const r=await fetch(path,options), j=await r.json();if(!r.ok)throw Error(j.error||r.statusText);return j};
 const post=(action, extra={})=>api('/api/action',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...extra})});
+const youtubeReady=new Promise(resolve=>{pending=resolve;window.onYouTubeIframeAPIReady=()=>resolve()});
+async function play(t){await youtubeReady;if(!player)player=new YT.Player('player',{videoId:t.id,playerVars:{playsinline:1,rel:0},events:{onStateChange:e=>{if(e.data===YT.PlayerState.ENDED)next()}}});else player.loadVideoById(t.id);post('played',{track_id:t.id}).catch(()=>{})}
+async function next(){const i=state.queue.findIndex(t=>t.id===player?.getVideoData()?.video_id), t=state.queue[i+1]||state.queue[0];if(t)play(t)}
 function track(t, button){button.onclick=async()=>{try{state=await post('queue',{track:t});render();play(t)}catch(e){error.textContent=e.message}}}
-function play(t){api('/api/resolve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({id:t.id})}).then(x=>{if(!x.url)throw Error('resolver returned no audio URL');audio.src=x.url;audio.play();post('played',{track_id:t.id}).catch(()=>{})}).catch(e=>error.textContent=e.message)}
 function render(){queue.innerHTML='';for(const t of state.queue){const row=document.createElement('div');row.className='row';row.innerHTML=`<div class="meta"><b>${esc(t.title)}</b><div class="muted">${esc(t.artist)}</div></div>`;const p=document.createElement('button');p.textContent='Play';p.onclick=()=>play(t);const r=document.createElement('button');r.textContent='Remove';r.onclick=async()=>{state=await post('remove',{position:t.position});render()};row.append(p,r);queue.append(row)}}
 function esc(x){const d=document.createElement('div');d.textContent=x||'';return d.innerHTML}
 $('#search').onsubmit=async e=>{e.preventDefault();error.textContent='';try{const j=await api('/api/search?q='+encodeURIComponent($('#query').value));results.innerHTML='';for(const t of j.rows){const row=document.createElement('div');row.className='row';row.innerHTML=`<div class="meta"><b>${esc(t.title)}</b><div class="muted">${esc(t.artist)}</div></div>`;const b=document.createElement('button');b.textContent='Queue';track(t,b);row.append(b);results.append(row)}}catch(e){error.textContent=e.message}};
