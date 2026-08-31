@@ -6,11 +6,13 @@ The on-screen announcer (agent.narrate) is visual. This module makes the same
 music, like Spotify's DJ. It is not a plain robotic read:
 
   1. **Gemini** writes the line and voices it. By default it uses the Gemini
-     **Live** native-audio model (`gemini-3.1-flash-live-preview`) over the Live
-     API WebSocket, so the DJ speaks in a warm, playful voice - every track gets
-     its own phrasing. The voice is **Despina** (warm, smooth) by default,
-     changeable by voice name. If the configured model is a `*-tts-preview`
-     model, it instead uses the synchronous `generateContent` speech endpoint.
+     **TTS** model (`gemini-3.1-flash-tts-preview`) over the synchronous
+     `generateContent` speech endpoint, which reads the written DJ line VERBATIM
+     in the chosen voice - the DJ announces what's playing/next, it never chats.
+     The voice is **Despina** (warm, smooth) by default, changeable by voice name.
+     A `*-live-preview` (Gemini Live) model is conversational by design and would
+     answer the line like a chatbot instead of reading it, so it is only used if
+     explicitly set.
   2. There is no offline/robotic fallback - if Gemini cannot speak (no key, a
      socket failure, or a model-access error) the DJ stays silent. The vocal line
      is a nicety, never a crash, and never a robotic substitute.
@@ -87,9 +89,9 @@ def voice_name() -> str:
 
 
 def tts_model() -> str:
-    """The speech-generation model (gemini-*-live-preview or gemini-*-tts-preview)."""
+    """The speech-generation model (gemini-*-tts-preview or gemini-*-live-preview)."""
     return (os.environ.get("SPOTUBE_DJ_TTS_MODEL") or config.GEMINI_DEFAULT_TTS_MODEL
-            or "gemini-3.1-flash-live-preview")
+            or "gemini-3.1-flash-tts-preview")
 
 
 def _is_live_model(model: str) -> bool:
@@ -680,12 +682,11 @@ def _send_text_turn(sock, text: str) -> tuple[bytes, int, bool, bool]:
 def _gemini_live_synth(text: str, path: Path) -> bool:
     """Ask the Gemini Live native-audio model to speak `text` over the WebSocket.
 
-    This is the path for `*-live-*` models (default `gemini-3.1-flash-live-preview`),
-    which only speak over the Live API's BidiGenerateContent socket - the
-    synchronous generateContent TTS endpoint is a different family and returns
-    nothing for them (which is why the old default model silently fell back).
-    The server replies with PCM; we wrap it as a WAV. Returns False on any failure
-    so the caller can try the TTS endpoint / stay silent.
+    Only for a `*-live-*` model (e.g. `gemini-3.1-flash-live-preview`), which is
+    conversational: it treats the line as an utterance and may answer it (which is
+    why the default is the TTS model that reads verbatim - use Live only when you
+    explicitly want a Live model). The server replies with PCM; we wrap it as a WAV.
+    Returns False on any failure, and the caller stays silent.
     """
     if not config.LLM_API_KEY:
         _info("gemini (live): no API key")
@@ -816,21 +817,18 @@ def _synth(text: str) -> str | None:
     clip = Path(tempfile.mkstemp(suffix=".wav")[1])
     ok = False
     used = ""
-    # a Live native-audio model (-live-) speaks over the WebSocket, a TTS model
-    # (-tts-) over generateContent. Try the one the model prefers first, then the
-    # other, so either works. No espeak fallback.
+    # The model type decides the path ONCE: a TTS model (-tts-) reads the line
+    # verbatim over the generateContent REST endpoint (what a DJ announcer does);
+    # a Live native-audio model (-live-) is conversational, so it is only used when
+    # explicitly selected. We never cross-fall back to the Live model from a TTS
+    # model or vice versa - a Live model would answer the line like a chatbot, and
+    # the DJ must only announce, never chat. No espeak fallback either.
     if _is_live_model(tts_model()):
         ok = _gemini_live_synth(text, clip)
         used = "live"
-        if not ok:
-            ok = _gemini_synth(text, clip)
-            used = "generateContent"
     else:
         ok = _gemini_synth(text, clip)
         used = "generateContent"
-        if not ok:
-            ok = _gemini_live_synth(text, clip)
-            used = "live"
     if not ok:
         _info(f"no audio was produced via {used or 'gemini'} - the DJ stays silent")
         try:

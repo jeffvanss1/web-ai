@@ -40,12 +40,15 @@ GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta"
 # survivable rather than fatal.
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
 # the spoken DJ: a Google audio model + a voice. Despina is warm and smooth.
-# The default is the Gemini **Live** native-audio model (gemini-3.1-flash-live-preview),
-# which speaks over the Live API WebSocket; the older generateContent TTS model
-# (gemini-2.5/3.1-flash-*-tts-preview) is still accepted and falls back to the
-# synchronous REST path. Override per shell (SPOTUBE_DJ_TTS_MODEL) or in Settings.
+# The default is the Gemini **TTS** model (gemini-3.1-flash-tts-preview), which
+# reads the pre-written DJ line VERBATIM over the synchronous generateContent REST
+# endpoint - so the DJ announces what's playing/next in a chosen voice, it does
+# NOT chat. The Gemini Live native-audio model (gemini-3.1-flash-live-preview) is
+# conversational by design: given the line as input it answers it like a chatbot
+# ("anything else you'd like to hear?") instead of reading it, so it is only used
+# when explicitly selected. Override per shell (SPOTUBE_DJ_TTS_MODEL) or in Settings.
 GEMINI_DEFAULT_TTS_MODEL = os.environ.get("SPOTUBE_DJ_TTS_MODEL",
-                                          "gemini-3.1-flash-live-preview")
+                                          "gemini-3.1-flash-tts-preview")
 DJ_VOICE = os.environ.get("SPOTUBE_DJ_TTS_VOICE", "Despina")
 
 LLM_BASE_URL = os.environ.get("SPOTUBE_DJ_BASE_URL", "")

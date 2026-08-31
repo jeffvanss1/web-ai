@@ -323,13 +323,17 @@ class SpeechTests(unittest.TestCase):
         self.assertIn("voice_note", s)
         self.assertIn("Despina", s["voice_note"])
 
-    def test_live_model_defaults_to_the_live_native_audio_model(self):
+    def test_default_model_reads_the_line_verbatim(self):
         import djvoice
-        # the default model speaks over the Live API WebSocket (not generateContent)
-        self.assertEqual(djvoice.tts_model(), "gemini-3.1-flash-live-preview")
-        self.assertTrue(djvoice._is_live_model(djvoice.tts_model()))
-        self.assertFalse(djvoice._is_live_model("gemini-3.1-flash-tts-preview"))
+        # the default is the TTS model, which reads the pre-written line VERBATIM
+        # via generateContent - the DJ announces, it does NOT chat. A Live model is
+        # conversational by design and would answer the line like a chatbot, so it
+        # is only used when explicitly selected.
+        self.assertEqual(djvoice.tts_model(), "gemini-3.1-flash-tts-preview")
+        self.assertFalse(djvoice._is_live_model(djvoice.tts_model()))
+        self.assertTrue(djvoice._is_live_model("gemini-3.1-flash-live-preview"))
         self.assertTrue(djvoice._is_live_model("gemini-2.5-flash-live-preview"))
+        self.assertFalse(djvoice._is_live_model("gemini-3.1-flash-tts-preview"))
         self.assertIn("BidiGenerateContent", djvoice._live_url())
 
     def test_live_synth_writes_a_wav_from_the_websocket_audio(self):
