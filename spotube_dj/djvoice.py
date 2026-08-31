@@ -300,9 +300,9 @@ def _creative_line(dj, agent, next_up: bool = False) -> str:
         import brain
     except Exception:
         brain = None
+    lang = config.load_dj_lang()          # the spoken language (default: Indonesian)
     if brain is not None and config.LLM_API_KEY:
         try:
-            lang = config.voice_lang(config.load_dj_voice())
             prompt = (agent.lead_prompt(dj, lang) if next_up
                       else agent.dj_prompt(dj, lang))
             if prompt:
@@ -311,7 +311,8 @@ def _creative_line(dj, agent, next_up: bool = False) -> str:
                     return line
         except Exception:
             pass
-    return (agent.lead_line(dj) if next_up else agent.dj_speech(dj))
+    return (agent.lead_line(dj, lang) if next_up
+            else agent.dj_speech(dj, lang))
 
 
 def _lead_line(dj, agent) -> str:

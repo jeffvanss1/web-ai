@@ -308,17 +308,44 @@ class SpeechTests(unittest.TestCase):
     def test_lead_line_beats_the_intro_when_handing_over(self):
         import djvoice
         dj = _dj()
-        # keyless: the hand-over gets the \"up next\" template, the intro the current one
+        # keyless, pinned to English: the hand-over gets the \"up next\" template,
+        # the intro the current one. The app's default is Indonesian, so set
+        # DJ_LANG=English to compare the exact English fallback strings.
         with mock.patch.object(config, "LLM_API_KEY", ""):
-            self.assertEqual(djvoice._creative_line(dj, agent, next_up=True),
-                             agent.lead_line(dj))
-            self.assertEqual(djvoice._creative_line(dj, agent, next_up=False),
-                             agent.dj_speech(dj))
+            with mock.patch.object(config, "DJ_LANG", "English"):
+                self.assertEqual(djvoice._creative_line(dj, agent, next_up=True),
+                                 agent.lead_line(dj, "English"))
+                self.assertEqual(djvoice._creative_line(dj, agent, next_up=False),
+                                 agent.dj_speech(dj, "English"))
         # with nothing queued the lead-in is empty, so the DJ stays silent
         dj.queue = type("Q", (), {"upcoming": lambda self, n: []})()
         with mock.patch.object(config, "LLM_API_KEY", ""):
             self.assertEqual(djvoice._lead_line(dj, agent), "")
 
+    def test_dj_speaks_indonesian_by_default_and_on_request(self):
+        # the app's spoken default is Indonesian (the swap the user asked for), and
+        # a saved DJ_LANG rides the config the same way DJ_VOICE does.
+        self.assertEqual(config.load_dj_lang(), "Indonesian")
+        with mock.patch.object(config, "load_llm_config", return_value={"DJ_LANG": "English"}):
+            self.assertEqual(config.load_dj_lang(), "English")
+        self.assertEqual(config.voice_lang("Despina"), "English")
+        with mock.patch.object(config, "load_llm_config", return_value={"DJ_LANG": "Klingon"}):
+            self.assertEqual(config.load_dj_lang(), "Indonesian")
+        # the fallback spoken lines render in Bahasa when asked for it
+        dj = _dj()
+        line = agent.dj_speech(dj, "Indonesian")
+        self.assertIn("Baiklah, berikutnya", line)
+        self.assertIn("Reach for the Dead", line)
+        nxt = agent.lead_line(dj, "Indonesian")
+        self.assertIn("selanjutnya", nxt)
+        self.assertIn("Sebentar lagi", nxt)
+        # the creative-line path passes the configured language to the prompt writer
+        import djvoice
+        with mock.patch.object(config, "LLM_API_KEY", "x"):
+            with mock.patch.object(brain, "free_text") as ft:
+                djvoice._creative_line(dj, agent, next_up=True)
+                prompt = ft.call_args[0][0]
+                self.assertIn("Write the line in Indonesian", prompt)
     def test_lead_prompt_and_line_hand_over_to_the_next_song(self):
         dj = _dj()
         prompt = agent.lead_prompt(dj, "English")
@@ -344,16 +371,17 @@ class SpeechTests(unittest.TestCase):
     def test_creative_line_uses_gemini_when_written_else_the_template(self):
         import djvoice
         dj = _dj()
-        # no key -> the offline template is used (no network, no crash)
+        # no key, pinned to English -> the offline template is used (no network, no crash)
         with mock.patch.object(config, "LLM_API_KEY", ""):
-            self.assertEqual(djvoice._creative_line(dj, agent), agent.dj_speech(dj))
+            with mock.patch.object(config, "DJ_LANG", "English"):
+                self.assertEqual(djvoice._creative_line(dj, agent),
+                                 agent.dj_speech(dj, "English"))
         # a key + a model that answers -> the generated line wins
         with mock.patch.object(config, "LLM_API_KEY", "x"):
             with mock.patch.object(brain, "free_text",
                                    return_value="Ooh, we're going to Boards of Canada."):
                 self.assertEqual(djvoice._creative_line(dj, agent),
                                  "Ooh, we're going to Boards of Canada.")
-
     def test_gemini_synth_writes_a_wav_from_pcm(self):
         import djvoice
         import base64, wave as wave_mod, tempfile

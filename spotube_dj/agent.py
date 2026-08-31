@@ -88,18 +88,41 @@ def dj_snapshot(ctx) -> dict:
     return snapshot_of(getattr(ctx, "dj", ctx))
 
 
-def dj_speech(dj) -> str:
+def dj_speech(dj, lang: str = "English") -> str:
     """A spoken-friendly DJ announcement: why now + what's next, read aloud.
 
     differs from `narrate` in that it is built for a text-to-speech voice, not an
     on-screen card: no "Why:" label, no parentheses, artist and title separated by
     a comma so a synthesizer reads them as two nouns rather than a "minus" sign.
+    `lang` is the written language (e.g. 'Indonesian'); when it is Indonesian the
+    fallback line is spoken in Bahasa so a keyless/offline announce still reads
+    naturally. Gemini is the primary speaker and writes its own line in `lang`.
     """
     snap = snapshot_of(dj)
     now = str(snap.get("now") or "").strip()
     if not now or now.lower() == "nothing playing":
         return ""                       # nothing to announce; stay quiet
     artist, sep, title = now.partition(" - ")
+    if lang and lang.lower() in ("indonesian", "bahasa"):
+        # a DJ announcer signposts before naming the song, then leads into what's next.
+        bits = [f"Baiklah, berikutnya - ini {artist}," if sep
+                else f"Baiklah, berikutnya - ini {now}."]
+        if sep and title:
+            bits.append(f"{title}.")
+        why = str(snap.get("why") or "").strip()
+        if why:
+            bits.append(f"{why[0].upper() + why[1:]}.")
+        vibe = str(snap.get("vibe") or "").strip()
+        if vibe:
+            bits.append(f"Ini semua bagian dari set {vibe}.")
+        nxt = str(snap.get("next") or "").strip()
+        if nxt:
+            a, s2, t = nxt.partition(" - ")
+            bits.append(f"Tetap di sini - selanjutnya {a}," if s2
+                        else f"Tetap di sini - selanjutnya {nxt}.")
+            if s2 and t:
+                bits.append(f"{t}.")
+        return " ".join(bits)
     # a DJ announcer signposts before naming the song, then leads into what's next.
     bits = [f"Alright, coming up next - here's {artist}," if sep
             else f"Alright, coming up next - here's {now}."]
@@ -191,7 +214,7 @@ def lead_prompt(dj, lang: str = "English") -> str:
     )
 
 
-def lead_line(dj) -> str:
+def lead_line(dj, lang: str = "English") -> str:
     """A keyless template for the up-next lead-in (used when there is no key)."""
     snap = snapshot_of(dj)
     nxt = str(snap.get("next") or "").strip()
@@ -199,6 +222,13 @@ def lead_line(dj) -> str:
         return ""
     a, s, t = nxt.partition(" - ")
     vibe = str(snap.get("vibe") or "").strip()
+    if lang and lang.lower() in ("indonesian", "bahasa"):
+        line = f"Tetap di sini - selanjutnya {a}," if s else f"Tetap di sini - selanjutnya {nxt}."
+        if s and t:
+            line += f" {t}."
+        if vibe:
+            line += f" Ini semua bagian dari set {vibe}."
+        return line + " Sebentar lagi."
     line = f"Stay right here - up next {a}," if s else f"Stay right here - up next {nxt}."
     if s and t:
         line += f" {t}."

@@ -51,6 +51,14 @@ GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
 GEMINI_DEFAULT_TTS_MODEL = os.environ.get("SPOTUBE_DJ_TTS_MODEL",
                                           "gemini-3.1-flash-live-preview")
 DJ_VOICE = os.environ.get("SPOTUBE_DJ_TTS_VOICE", "Despina")
+# The spoken language for the DJ's lines. A Gemini TTS/Live voice can speak any of
+# the supported languages regardless of which timbre is chosen, so this is its own
+# setting rather than a trait of a particular voice. Defaults to Indonesian (Bahasa).
+# Override per shell (SPOTUBE_DJ_TTS_LANG) or in Settings.
+DJ_LANG = os.environ.get("SPOTUBE_DJ_TTS_LANG", "Indonesian")
+# The languages the DJ may compose (and thus speak) its line in. Must stay in sync
+# with what the Gemini TTS model auto-detects/accepts.
+DJ_LANG_CHOICES = ("English", "Arabic", "Indonesian")
 
 LLM_BASE_URL = os.environ.get("SPOTUBE_DJ_BASE_URL", "")
 LLM_API_KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("SPOTUBE_DJ_API_KEY", ""))
@@ -68,7 +76,8 @@ LLM_TIMEOUT = _env_timeout()
 MAX_RECENT_HISTORY = 800
 
 
-LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT", "DJ_VOICE")
+LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT", "DJ_VOICE",
+            "DJ_LANG")
 
 # The Gemini speech-generation voices (name, gender, character, written language).
 # The "language" is the written language the DJ composes in; choosing an Arabic
@@ -240,6 +249,8 @@ def load_llm_config() -> dict:
         out["LLM_MODEL"] = os.environ["SPOTUBE_DJ_MODEL"]
     if os.environ.get("SPOTUBE_DJ_TTS_VOICE"):
         out["DJ_VOICE"] = os.environ["SPOTUBE_DJ_TTS_VOICE"]
+    if os.environ.get("SPOTUBE_DJ_TTS_LANG"):
+        out["DJ_LANG"] = os.environ["SPOTUBE_DJ_TTS_LANG"]
     return out
 
 
@@ -248,8 +259,26 @@ def load_dj_voice() -> str:
     return str(load_llm_config().get("DJ_VOICE") or DJ_VOICE or "Despina")
 
 
+def _canonical_lang(lang: str) -> str:
+    """Categorize a language string against DJ_LANG_CHOICES (case-insensitive)."""
+    lang = str(lang or "").strip()
+    for choice in DJ_LANG_CHOICES:
+        if choice.lower() == lang.lower():
+            return choice
+    return "Indonesian"          # unknown -> the app's spoken default
+
+
+def load_dj_lang() -> str:
+    """The effective spoken language for the DJ line: env > saved config > default."""
+    return _canonical_lang(load_llm_config().get("DJ_LANG") or DJ_LANG)
+
+
 def voice_lang(name: str | None) -> str:
-    """The written language the DJ should compose in for a given voice."""
+    """The written language the DJ should compose in for a given voice.
+
+    Only used as a *fallback* when no explicit DJ_LANG is configured; the effective
+    spoken language is load_dj_lang() (which defaults to Indonesian).
+    """
     name = str(name or "")
     for n, _g, _t, lang in GEMINI_TTS_VOICES:
         if n.lower() == name.lower():

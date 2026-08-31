@@ -427,15 +427,18 @@ text-transform:none;margin-left:2px}
    not mashing into the artist's name. Each row is its own faint tile so the queue
    reads as a list of entries against the tinted backdrop instead of text floating
    on the blur. */
-#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) 40px auto;gap:14px;
+#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) auto;gap:14px;
 background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);
 border-radius:10px;margin-bottom:6px;padding:7px 10px}
 #upnext .row:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.12)}
 #upnext .row .ti{font-weight:600}
 #upnext .row .ar{color:var(--muted)}
 #upnext .row .n{display:none}
-#upnext .row .du{color:var(--muted);font-size:12px;text-align:right}
-#upnext .row .fab{right:44px}
+/* no per-track duration in the queue: a busy list is scanned by title, and the
+   panel is 400px - the seconds column is what used to crush the title and push the
+   play button over the actions. The row opens the song on a click instead. */
+#upnext .row .du{display:none}
+#upnext .row .fab{display:none}
 #upnext .row .rowacts .iconbtn{width:24px;height:24px}
 .acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
 .btn{display:inline-flex;align-items:center;gap:8px;background:var(--hover);
@@ -649,6 +652,10 @@ BODY = """
      <label class="setrow"><span>DJ voice</span>
       <select id="in-voice" class="infield"></select>
       <small class="setnote" id="voice-lang"></small>
+     </label>
+     <label class="setrow"><span>Language</span>
+      <select id="in-lang" class="infield"></select>
+      <small class="setnote">the language the DJ announces in</small>
      </label>
      <div class="acts">
       <button class="btn prim" id="savebtn">@@check@@<span>Save</span></button>
@@ -1601,10 +1608,23 @@ function drawSettings(s){
     }
     sel.dataset.current = current;
   }
-  const lang = sel && sel.selectedOptions[0] && sel.selectedOptions[0].textContent
-    ? String(sel.selectedOptions[0].textContent) : "";
-  $("voice-lang").textContent = (st.dj_voice || "Despina") + " speaks " +
-    ((lang && lang.includes("·")) ? lang.split("·").pop().trim() : "English");
+  // DJ language dropdown. Rebuilt only when the effective language (or the choice
+  // list) changes, so an in-flight selection is not clobbered by the tick.
+  const lsel = $("in-lang");
+  if (lsel && (lsel.dataset.current !== (st.dj_lang || "Indonesian"))) {
+    const current = st.dj_lang || "Indonesian";
+    lsel.options.length = 0;
+    for (const l of (st.dj_langs || ["Indonesian", "English", "Arabic"])) {
+      const o = document.createElement("option");
+      o.value = l;
+      o.textContent = l;
+      if (l === current) o.selected = true;
+      lsel.appendChild(o);
+    }
+    lsel.dataset.current = current;
+  }
+  $("voice-lang").textContent = (st.dj_voice || "Despina") + " announces in " +
+    (st.dj_lang || "Indonesian");
   $("unkeybtn").hidden = !st.key_set;
   $("engine2").textContent = st.key_set
     ? "Planning goes through " + (st.model || "the default model") + " at " +
@@ -1807,6 +1827,8 @@ $("savebtn").addEventListener("click", async () => {
   if (k) f.key = k;
   const v = $("in-voice");
   if (v && v.value) f.voice = v.value;
+  const l = $("in-lang");
+  if (l && l.value) f.lang = l.value;
   try {
     const j = await post("/api/settings", f);
     draw(j.state); $("in-key").value = "";
@@ -1814,10 +1836,10 @@ $("savebtn").addEventListener("click", async () => {
   } catch (e) { toast(e.message); }
 });
 $("in-voice").addEventListener("change", () => {
-  const sel = $("in-voice");
-  const lang = sel.selectedOptions[0] && sel.selectedOptions[0].textContent;
-  $("voice-lang").textContent = sel.value + " speaks " +
-    ((lang && lang.includes("·")) ? lang.split("·").pop().trim() : "English");
+  const v = $("in-voice");
+  const l = $("in-lang");
+  $("voice-lang").textContent = v.value + " announces in " +
+    ((l && l.value) ? l.value : "Indonesian");
 });
 let wipeArm = 0;
 $("wipebtn").addEventListener("click", () => {

@@ -741,6 +741,10 @@ class ActionTests(unittest.TestCase):
         names = {v["name"] for v in view["dj_voices"]}
         self.assertIn("Despina", names)
         self.assertEqual(view["dj_lead"], float(config.DJ_LEAD_SECS))
+        # the spoken language is its own setting, exposed for the dropdown
+        self.assertEqual(view["dj_lang"], config.load_dj_lang())
+        self.assertIn(view["dj_lang"], view["dj_langs"])
+        self.assertGreaterEqual(len(view["dj_langs"]), 3)
 
         with mock.patch("web.config.save_llm_config") as save:
             code, payload = web.save_settings({"model": ["gemini-3.6-flash"],
@@ -787,6 +791,25 @@ class ActionTests(unittest.TestCase):
         with mock.patch("web.config.save_llm_config") as save3:
             self.assertEqual(web.save_settings({"voice": ["sulafat"]})[0], 200)
         self.assertEqual(save3.call_args.kwargs["DJ_VOICE"], "Sulafat")
+
+    def test_the_dj_language_is_saved_and_validated(self):
+        # the Settings language dropdown posts its value; it is checked against the
+        # catalog and written as DJ_LANG (never as a raw arbitrary string)
+        with mock.patch("web.config.save_llm_config") as save:
+            code, payload = web.save_settings({"lang": ["indonesian"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(save.call_args.kwargs, {"DJ_LANG": "Indonesian"})
+        self.assertEqual(payload["note"], "saved")
+        # case is tolerated and the canonical form is stored
+        with mock.patch("web.config.save_llm_config") as save2:
+            self.assertEqual(web.save_settings({"lang": ["english"]})[0], 200)
+        self.assertEqual(save2.call_args.kwargs["DJ_LANG"], "English")
+        # a language not in the catalog is rejected, not silently stored
+        with mock.patch("web.config.save_llm_config") as save3:
+            code, payload = web.save_settings({"lang": ["Klingon"]})
+        self.assertEqual(code, 400)
+        save3.assert_not_called()
+        self.assertIn("unknown DJ language", payload["error"])
 
     def test_settings_write_failures_are_500_not_a_broken_tab(self):
         with mock.patch("web.config.save_llm_config", side_effect=OSError("read-only")):

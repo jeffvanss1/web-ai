@@ -199,6 +199,8 @@ def settings_view() -> dict:
             "model": str(data.get("LLM_MODEL") or config.LLM_MODEL
                          or config.GEMINI_DEFAULT_MODEL),
             "dj_voice": config.load_dj_voice(),
+            "dj_lang": config.load_dj_lang(),
+            "dj_langs": list(config.DJ_LANG_CHOICES),
             "dj_voice_model": str(config.GEMINI_DEFAULT_TTS_MODEL),
             "dj_voices": [{"name": name, "gender": gender, "trait": trait,
                            "lang": lang if lang != "English" else ""}
@@ -381,7 +383,8 @@ def build_state(ctx) -> dict:
         "auto": bool(st.get("auto")),
         "autoplay": bool((dj.state or {}).get("autoplay")),
         "voice": bool((dj.state or {}).get("voice", True)),
-        "voice_note": (("gemini · " + config.load_dj_voice()) if config.LLM_API_KEY
+        "voice_note": (("gemini · " + config.load_dj_voice() + " · " +
+                        config.load_dj_lang()) if config.LLM_API_KEY
                        else "off (no key)"),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
@@ -1338,6 +1341,13 @@ def save_settings(fields: dict) -> tuple[int, dict]:
             return 400, {"error": (f"unknown TTS voice {voice!r}; pick one of the "
                                    "voices in the dropdown")}
         vals["DJ_VOICE"] = config.GEMINI_TTS_VOICE_NAMES[names.index(voice.lower())]
+    if "lang" in fields:
+        lang = one("lang")
+        langs = [l.lower() for l in config.DJ_LANG_CHOICES]
+        if lang.lower() not in langs:
+            return 400, {"error": (f"unknown DJ language {lang!r}; pick one of the "
+                                   "languages in the dropdown")}
+        vals["DJ_LANG"] = config.DJ_LANG_CHOICES[langs.index(lang.lower())]
     if one("clear_key") == "1":
         vals["LLM_API_KEY"] = ""
     elif one("key"):
