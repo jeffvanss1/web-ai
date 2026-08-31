@@ -3,6 +3,27 @@
 <title>Spotube DJ</title>
 <style>
 :root{color-scheme:dark;font:16px system-ui;background:#121212;color:#eee}body{max-width:900px;margin:40px auto;padding:0 20px}input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #444;background:#222;color:inherit}button{cursor:pointer}form{display:flex;gap:8px}input{flex:1}.row{display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #292929}.meta{flex:1}.muted{color:#999;font-size:.9em}#error{color:#ff8585}.playing{color:#6ee7a0}audio{width:100%;margin-top:24px}
+/* Small-screen layout: the player is designed for one-handed use and narrow
+   phone viewports, not just a desktop page squeezed into a column. */
+@media (max-width:600px){
+  body{margin:0 auto;padding:20px 14px 28px;max-width:none}
+  h1{font-size:1.65rem;margin:0 0 20px}
+  h2{font-size:1.2rem;margin-top:28px}
+  form{position:sticky;top:0;z-index:2;padding:8px 0 12px;background:#121212}
+  input,button{min-height:44px;padding:10px 12px}
+  input{min-width:0;width:100%}
+  form button{flex:0 0 auto}
+  .row{gap:8px;align-items:center;padding:14px 0}
+  .meta{min-width:0;overflow:hidden}
+  .meta b{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .muted{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row button{font-size:.88rem;white-space:nowrap;padding:9px 10px}
+  audio{position:sticky;bottom:10px;z-index:3;margin-top:22px;filter:drop-shadow(0 4px 12px #000)}
+}
+@media (max-width:360px){
+  .row{display:grid;grid-template-columns:minmax(0,1fr) auto auto}
+  .row button{padding-left:8px;padding-right:8px}
+}
 </style>
 <h1>Spotube DJ</h1><form id="search"><input id="query" placeholder="Search for music" autofocus><button>Search</button></form><p id="error"></p><section id="results"></section><h2>Queue</h2><section id="queue"></section><audio id="player" controls></audio>
 <script type="module">
