@@ -72,16 +72,21 @@ class _TmpHome(unittest.TestCase):
 
 # -------------------------------------------------------------------- brain
 class BrainTests(unittest.TestCase):
-    def test_engine_is_offline_without_keys(self):
+    def test_engine_is_offline_without_a_worker_or_a_local_model(self):
         with mock.patch.object(brain.config, "LLM_API_KEY", ""), \
-             mock.patch.object(brain.config, "LLM_BASE_URL", ""):
+             mock.patch.object(brain.config, "LLM_BASE_URL", ""), \
+             mock.patch.object(brain.config, "WORKER_URL", ""):
             self.assertEqual(brain.configured_engine(), "offline")
 
-    def test_engine_gemini_with_key(self):
-        with mock.patch.object(brain.config, "LLM_API_KEY", "x"), \
-             mock.patch.object(brain.config, "LLM_BASE_URL",
-                               "https://generativelanguage.googleapis.com/v1beta"):
-            self.assertEqual(brain.configured_engine(), "gemini")
+    def test_engine_is_the_worker_with_a_worker_url(self):
+        """A key alone is no longer an engine: Gemini comes from the Worker."""
+        with mock.patch.object(brain.config, "WORKER_URL", "https://dj.test"):
+            self.assertEqual(brain.configured_engine(), "worker")
+
+    def test_a_local_base_url_stays_local(self):
+        with mock.patch.object(brain.config, "WORKER_URL", ""), \
+             mock.patch.object(brain.config, "LLM_BASE_URL", "http://localhost:11434"):
+            self.assertEqual(brain.configured_engine(), "local-llm")
 
     def test_strips_filler_keeps_signal(self):
         r = brain._heuristic("play some lofi hip hop for studying")["queries"]

@@ -1,0 +1,16 @@
+{
+  "name": "spotube-dj-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Cloudflare Worker behind Spotube DJ: Gemini calls, the spoken DJ, and D1 state.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "check": "node --check src/index.js"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

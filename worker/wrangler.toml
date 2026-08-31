@@ -1,0 +1,52 @@
+# spotube-dj worker - deploy with `wrangler deploy` from this directory.
+#
+# First time:
+#   npm install                       # just wrangler
+#   npx wrangler login
+#   npx wrangler d1 create spotube-dj # paste the database_id below
+#   npx wrangler r2 bucket create spotube-dj-clips   # optional: spoken-line cache
+#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put WORKER_TOKEN      # strongly recommended (see below)
+#   npx wrangler d1 execute spotube-dj --file=schema.sql --remote
+#   npx wrangler deploy
+
+name = "spotube-dj"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+# One Worker is enough for a home setup; the plan call is the slow one and it
+# runs while the queue is short, so a cold start in a far region is felt. Keep
+# the default (smart placement off) unless you deploy far from your listeners.
+observability = { enabled = true }
+
+[vars]
+# Where Gemini is reached. Only change this if you front it with a gateway.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+# Preferred model. A retired name is not an outage: the Worker walks the ladder.
+GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL_LADDER = "gemini-3.5-flash,gemini-3.1-flash-lite,gemini-3.6-flash,gemini-3.7-flash"
+# Spoken DJ. A `*-live-*` name is mapped to its `-tts-` sibling: a Worker cannot
+# open the Live API's WebSocket as a client.
+GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+DJ_VOICE = "Despina"
+
+# Secrets (never inline these here):
+#   GEMINI_API_KEY  the Google AI Studio key. When it is set, every client uses
+#                   it and no client ever sends a key.
+#   WORKER_TOKEN    a shared secret for this Worker. Set it: the D1 routes are
+#                   otherwise open to anyone who learns the URL, and they can
+#                   read and overwrite your taste profile.
+#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put WORKER_TOKEN
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spotube-dj"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# Optional. Spoken lines are cached by sha256(text|voice|model) so the same
+# "up next" phrasing costs no quota the second time. Without it the Worker still
+# speaks, it just asks Gemini every time.
+[[r2_buckets]]
+binding = "CLIPS"
+bucket_name = "spotube-dj-clips"

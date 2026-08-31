@@ -1,0 +1,10 @@
+# Local development secrets. Copy to .dev.vars and fill in.
+# .dev.vars is gitignored - never commit a real key.
+
+# The Google AI Studio key. Leave it out to test the client-passthrough path
+# (the app then sends x-gemini-key with each request).
+GEMINI_API_KEY=
+
+# A shared secret for this Worker. Set it locally too, so you exercise the same
+# auth path that production will run.
+WORKER_TOKEN=dev-token
