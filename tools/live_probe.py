@@ -153,7 +153,8 @@ def main():
             break
         if op == 9:
             send_frame(sock, 10, data)
-        if op == 1:
+        # The Live API wraps its JSON in BINARY frames (opcode 2), not text frames.
+        if op in (1, 2):
             try:
                 msg = json.loads(data)
             except Exception:

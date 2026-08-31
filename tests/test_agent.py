@@ -338,10 +338,10 @@ class SpeechTests(unittest.TestCase):
         pcm = b"\x00\x00\x01\x00" * 100
         b64 = base64.b64encode(pcm).decode()
         frames = [
-            (1, b'{"setupComplete":{}}'),
-            (1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
+            (2, b'{"setupComplete":{}}'),
+            (2, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
                  '"mimeType":"audio/L16;codec=pcm;rate=24000"}}]}}}' % b64).encode()),
-            (1, b'{"serverContent":{"turnComplete":true}}'),
+            (2, b'{"serverContent":{"turnComplete":true}}'),
         ]
         sent = []
         class FakeSock:
@@ -384,10 +384,10 @@ class SpeechTests(unittest.TestCase):
         b64 = base64.b64encode(pcm).decode()
         frames = [
             (8, b""),                                  # variant 1 rejected (server close)
-            (1, b'{"setupComplete":{}}'),              # variant 2 accepted
-            (1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
+            (2, b'{"setupComplete":{}}'),              # variant 2 accepted
+            (2, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
                  '"mimeType":"audio/L16;codec=pcm;rate=24000"}}]}}}' % b64).encode()),
-            (1, b'{"serverContent":{"turnComplete":true}}'),
+            (2, b'{"serverContent":{"turnComplete":true}}'),
         ]
         sent = []
         fake_iter = iter(frames)
@@ -446,10 +446,10 @@ class SpeechTests(unittest.TestCase):
         ogg_header = b"OggS" + b"\x00" * 100
         b64 = base64.b64encode(ogg_header).decode()
         frames = [
-            (1, b'{"setupComplete":{}}'),
-            (1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
+            (2, b'{"setupComplete":{}}'),
+            (2, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":{"data":"%s",'
                  '"mimeType":"audio/ogg;codecs=opus"}}]}}}' % b64).encode()),
-            (1, b'{"serverContent":{"turnComplete":true}}'),
+            (2, b'{"serverContent":{"turnComplete":true}}'),
         ]
         fake_iter = iter(frames)
         with mock.patch.object(config, "LLM_API_KEY", "x"):
@@ -572,14 +572,15 @@ def _mock_handle(conn, reject_despina):
         if reject_despina and voice.lower() == "despina":
             _mock_send_frame(conn, 8, struct.pack("!H", 4003) + b"voice not supported")
             return
-        _mock_send_frame(conn, 1, b'{"setupComplete":{}}')
+        # The real Live API sends its JSON in BINARY frames (opcode 2), not text.
+        _mock_send_frame(conn, 2, b'{"setupComplete":{}}')
         _mock_read_frame(conn)                       # the client's text turn
         pcm = b"\x00\x00\x01\x00" * 100
         b64 = base64.b64encode(pcm).decode()
-        _mock_send_frame(conn, 1, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":'
+        _mock_send_frame(conn, 2, ('{"serverContent":{"modelTurn":{"parts":[{"inlineData":'
                                    '{"data":"%s","mimeType":"audio/L16;codec=pcm;rate=24000"}}]}}}'
                                    % b64).encode())
-        _mock_send_frame(conn, 1, b'{"serverContent":{"turnComplete":true}}')
+        _mock_send_frame(conn, 2, b'{"serverContent":{"turnComplete":true}}')
     except Exception:
         pass
     finally:

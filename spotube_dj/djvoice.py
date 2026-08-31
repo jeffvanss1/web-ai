@@ -460,7 +460,13 @@ def _frame_repr(opcode: int, data: bytes) -> str:
 
 
 def _decode_ws_message(data: bytes):
-    """Return (message_dict, raw_text) for an opcode-1 text frame, else None."""
+    """Return (message_dict, raw_text) for a JSON text frame, else None.
+
+    The Gemini Live API sends its structured messages (setupComplete, serverContent,
+    toolCall...) as WebSocket **binary** frames whose body is JSON - not as text
+    frames. So this is used for both opcode 1 (text) and opcode 2 (binary) frames;
+    both carry UTF-8 JSON. Returns None if the bytes are not valid JSON.
+    """
     try:
         txt = data.decode("utf-8")
     except Exception:
@@ -539,14 +545,16 @@ def _live_collect(sock, timeout: float, rate: int) -> tuple[bytes, int, bool, bo
             continue
         if opcode == 10:                                  # pong
             continue
-        if opcode == 2:                                   # raw audio bytes
-            audio += data
-            continue
-        if opcode == 1:
-            try:
-                msg = json.loads(data)
-            except Exception:
+        # The Live API wraps its JSON in BINARY frames (opcode 2). A JSON frame holds
+        # serverContent (with inbox ASCII base64 audio), so try to decode it as JSON.
+        # Only a binary frame that is NOT valid JSON is treated as raw audio bytes.
+        if opcode in (1, 2):
+            decoded = _decode_ws_message(data)
+            if decoded is None:
+                if opcode == 2:                           # non-JSON binary = raw audio
+                    audio += data
                 continue
+            msg, _raw = decoded
             sc = msg.get("serverContent") or {}
             parts = (sc.get("modelTurn") or {}).get("parts") or []
             for part in parts:
@@ -620,10 +628,12 @@ def _live_setup(sock, setup: dict, timeout: float = 10.0) -> str:
             continue
         if opcode == 10:                                  # pong
             continue
-        if opcode == 1:
+        # The Live API wraps its JSON in BINARY frames (opcode 2), not text frames.
+        # Accept both so the server's setupComplete / goAway are recognised regardless.
+        if opcode in (1, 2):
             decoded = _decode_ws_message(data)
             if decoded is None:
-                _info("gemini (live): setup-phase non-JSON text " + repr(data)[:200])
+                _info("gemini (live): setup-phase non-JSON " + repr(data)[:200])
                 continue
             msg, _raw = decoded
             if "setupComplete" in msg:
@@ -635,7 +645,7 @@ def _live_setup(sock, setup: dict, timeout: float = 10.0) -> str:
                 status = "reject"
                 break
             _info("gemini (live): setup-phase message " + json.dumps(msg)[:300])
-        # binary / continuation / anything else: logged above, keep waiting
+        # continuation / anything else: logged above, keep waiting
     if status == "timeout":
         _info(f"gemini (live): server never sent setupComplete within {timeout:.0f}s")
     return status
