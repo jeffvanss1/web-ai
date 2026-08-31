@@ -168,6 +168,70 @@ class KeyHandlingTests(_Iso):
 
 # ----------------------------------------------------------------------- routes
 
+class EdgeTests(_Iso):
+    """Cloudflare answers some failures before the Worker ever sees them."""
+
+    def test_every_request_looks_like_a_client_not_a_bot(self):
+        """HTTP 403 "Error 1010: blocked based on your browser's signature".
+
+        urllib's default User-Agent is "Python-urllib/3.x", which the browser
+        integrity check refuses - the page loads in a browser and 403s from
+        Python, which reads exactly like a broken deployment.
+        """
+        with _Wire([_Resp({"ok": True, "plan": {"queries": ["a b"]}})]) as wire:
+            workerclient.plan("x")
+        h = wire.calls[-1]["headers"]
+        self.assertNotIn("Python-urllib", h.get("User-Agent", ""),
+                         "the default UA is what gets this client blocked")
+        self.assertIn("spotube-dj", h.get("User-Agent", ""))
+        self.assertIn("application/json", h.get("Accept", ""))
+        self.assertTrue(h.get("Accept-Language"))
+
+    def test_a_cloudflare_1010_is_explained_not_dumped(self):
+        page = {"type": "https://developers.cloudflare.com/support/troubleshooting/"
+                        "http-status-codes/cloudflare-1xxx-errors/error-1010/",
+                "title": "Error 1010: Access denied", "status": 403,
+                "detail": "The site owner has blocked access based on your "
+                          "browser's signature."}
+        body = json.dumps(page).encode()
+        err = urllib.error.HTTPError("https://dj.test/v1/plan", 403, "Forbidden",
+                                     {}, io.BytesIO(body))
+        with _Wire([err]):
+            with self.assertRaises(workerclient.WorkerError) as cm:
+                workerclient.plan("x")
+        self.assertEqual(cm.exception.kind, "edge")
+        self.assertIn("browser integrity check", cm.exception.detail)
+        self.assertIn("Bot Fight Mode", cm.exception.detail,
+                      "the fix has to be in the sentence, not in a doc")
+        self.assertNotIn("Error 1010: Access denied', 'status'", cm.exception.detail)
+
+    def test_the_edge_wording_survives_brain(self):
+        """worker_error_text rewrites unknown kinds; this one must not be."""
+        import brain
+        err = workerclient.WorkerError("edge", "Cloudflare blocked this client "
+                                       "before it reached the Worker.")
+        self.assertIn("Cloudflare blocked", brain.worker_error_text(err))
+        self.assertNotIn("the request failed", brain.worker_error_text(err))
+
+    def test_an_unknown_cloudflare_code_still_says_cloudflare(self):
+        page = {"type": "https://developers.cloudflare.com/x", "status": 521,
+                "title": "Error 521: Web server is down", "detail": "nope"}
+        err = urllib.error.HTTPError("https://dj.test/v1/plan", 521, "x", {},
+                                     io.BytesIO(json.dumps(page).encode()))
+        with _Wire([err]):
+            with self.assertRaises(workerclient.WorkerError) as cm:
+                workerclient.plan("x")
+        self.assertEqual(cm.exception.kind, "edge")
+        self.assertIn("Cloudflare", cm.exception.detail)
+
+    def test_a_plain_json_error_is_not_mistaken_for_the_edge(self):
+        """Our own 404s have no `type`/`title`, and must not be relabelled."""
+        with _Wire([_err("model", "no such model", code=404)]):
+            with self.assertRaises(workerclient.WorkerError) as cm:
+                workerclient.plan("x")
+        self.assertEqual(cm.exception.kind, "model")
+
+
 class RouteTests(_Iso):
     def test_plan_sends_the_prompt_and_returns_the_plan(self):
         reply = {"ok": True, "plan": {"queries": ["slowdive", "mbv"], "why": "you asked"},

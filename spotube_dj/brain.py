@@ -251,6 +251,9 @@ _KIND_HINTS = {
     "timeout": "the Worker did not answer in time",
     "auth": "the Worker refused this machine's token (Settings -> Worker)",
     "no_d1": "the Worker has no D1 database bound, so state sync is off",
+    # answered by Cloudflare's edge, not by the Worker and not by Google: there
+    # is no Google status to append and nothing in the Worker to fix
+    "edge": "Cloudflare blocked this client before it reached the Worker",
     "empty": "the model answered with nothing usable",
     "parse": "the Worker's answer could not be read",
     "crash": "the Worker threw while answering",
@@ -270,7 +273,7 @@ def worker_error_text(err: Exception) -> str:
     """
     kind = str(getattr(err, "kind", "") or "other")
     detail = " ".join(str(getattr(err, "detail", "") or "").split())
-    if kind in ("network", "timeout", "offline", "auth", "no_d1", "crash"):
+    if kind in ("network", "timeout", "offline", "auth", "no_d1", "crash", "edge"):
         # these are already sentences about the Worker, not Google statuses
         return (detail or _KIND_HINTS.get(kind, ""))[:400]
     hint = _KIND_HINTS.get(kind, _KIND_HINTS["other"])

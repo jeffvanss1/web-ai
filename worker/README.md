@@ -57,7 +57,7 @@ npx wrangler deploy
 Then point the app at it, once, from Settings → Worker (or `~/.spotube-dj/config.json`):
 
 ```json
-{ "WORKER_URL": "https://spotube-dj-worker.<your-subdomain>.workers.dev",
+{ "WORKER_URL": "https://spotube-dj.<your-subdomain>.workers.dev",
   "WORKER_TOKEN": "the same WORKER_TOKEN",
   "WORKER_PROFILE": "default" }
 ```

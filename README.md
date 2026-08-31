@@ -636,7 +636,7 @@ The brain has three modes and the pill in the header says which one you are in
 not working).
 
 ```bash
-export SPOTUBE_DJ_WORKER_URL=https://spotube-dj-worker.<you>.workers.dev  # Gemini, via your Worker
+export SPOTUBE_DJ_WORKER_URL=https://spotube-dj.<you>.workers.dev  # Gemini, via your Worker
 export SPOTUBE_DJ_WORKER_TOKEN=...                                 # if you deployed one
 export SPOTUBE_DJ_BASE_URL=http://localhost:11434                  # Ollama / LM Studio instead
 export SPOTUBE_DJ_MODEL=llama3.2:latest
@@ -646,7 +646,7 @@ export SPOTUBE_DJ_LLM_TIMEOUT=90                  # slow machine / big model
 or save them once so they survive a restart:
 
 ```bash
-python3 -m spotube_dj --set-worker https://spotube-dj-worker.<you>.workers.dev
+python3 -m spotube_dj --set-worker https://spotube-dj.<you>.workers.dev
 python3 -m spotube_dj --set-worker-token ... --set-worker-profile laptop
 python3 -m spotube_dj --test-worker       # health, then one real plan call
 python3 -m spotube_dj --set-base http://localhost:11434 --set-model llama3.2
@@ -766,7 +766,7 @@ Then point the app at it - in the page (**gear → Worker & cloud → Save the
 Worker**) or from the terminal:
 
 ```bash
-python3 -m spotube_dj --set-worker https://spotube-dj-worker.<you>.workers.dev
+python3 -m spotube_dj --set-worker https://spotube-dj.<you>.workers.dev
 python3 -m spotube_dj --set-worker-token "$(openssl rand -hex 32)"
 python3 -m spotube_dj --test-worker
 ```

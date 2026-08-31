@@ -113,9 +113,28 @@ def _urlopen(req, timeout: float):
     return urllib.request.urlopen(req, timeout=timeout)
 
 
+# Cloudflare's Browser Integrity Check answers a request with no User-Agent -
+# or with urllib's default "Python-urllib/3.11" - with HTTP 403 and
+# "Error 1010: The site owner has blocked access based on your browser's
+# signature", *before* the Worker is ever reached. The page loads in a browser
+# and fails from Python, which is the signature of exactly that.
+#
+# So this client announces itself the way every HTTP client that speaks for a
+# person does: the Mozilla/5.0 (compatible; ...) form exists for this, and it
+# still says what it is. It is not a disguise - the app, its version and its
+# source are all in the string.
+UA = "Mozilla/5.0 (compatible; spotube-dj/1.0; +https://github.com/jeffvanss1/web-ai)"
+BROWSERISH = {
+    "User-Agent": UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 def _headers(extra: dict | None = None) -> dict:
     cfg = settings()
-    out = {"Content-Type": "application/json", "Accept": "application/json"}
+    out = dict(BROWSERISH)
+    out["Content-Type"] = "application/json"
     token = str(cfg.get("token") or "")
     if token:
         out["Authorization"] = f"Bearer {token}"
@@ -167,8 +186,40 @@ def _read_error(err: urllib.error.HTTPError) -> WorkerError:
                                status=str(inner.get("status") or ""),
                                http=err.code,
                                notes=list(inner.get("notes") or []))
+        cf = _cloudflare_words(payload)
+        if cf:
+            return WorkerError("edge", cf, http=err.code)
         return WorkerError("other", str(payload)[:300], http=err.code)
     return WorkerError("other", (body or f"HTTP {err.code}")[:300], http=err.code)
+
+
+def _cloudflare_words(payload: dict) -> str:
+    """
+    Cloudflare's own error pages (403 "Error 1010", 1020, 1015...) are JSON
+    with a `title` and a support URL, and they are answered by the *edge*, not
+    by the Worker - so nothing in the Worker's config can explain them and
+    nothing in the Worker's logs will show them. Say which one it is and what
+    to do, rather than printing the JSON.
+    """
+    title = str(payload.get("title") or "")
+    detail = str(payload.get("detail") or "")
+    if "cloudflare" not in str(payload.get("type") or "").lower() and not title.startswith("Error "):
+        return ""
+    code = ""
+    if title.startswith("Error "):
+        code = title[len("Error "):].split(":")[0].strip()
+    host = base_url() or "the Worker"
+    if code == "1010":
+        return (f"Cloudflare blocked this client before it reached the Worker "
+                f"(Error 1010, browser integrity check). Open {host} in a "
+                f"browser: if the page loads there, it is the request's "
+                f"signature, not your config. Turn off Bot Fight Mode / Browser "
+                f"Integrity Check for the zone, or put the Worker on your own "
+                f"domain with those off.")
+    if code:
+        return (f"Cloudflare answered {host} with {title} rather than letting "
+                f"the request through: {detail}")
+    return ""
 
 
 def request(method: str, path: str, payload: dict | None = None, *,

@@ -13,14 +13,13 @@
 # The script name, and the first part of your URL:
 #   https://spotube-dj-worker.<your-subdomain>.workers.dev
 #
-# Rename this if the deploy ever says the name is taken - or if it complains
-# about a Durable Object class you have never heard of (e.g. `UserQueue`).
-# That is not this Worker: it means a *different* script already owns the name
-# in your account, and Cloudflare will not let a new script orphan its Durable
-# Objects. Pick a fresh name rather than deleting theirs - the rename costs you
-# nothing but a different URL, and `wrangler delete` on a script you did not
-# write destroys state you cannot restore.
-name = "spotube-dj-worker"
+# If `wrangler deploy` ever fails with "does not export class 'X' which is
+# depended on by existing Durable Objects", that class is not ours: a *different*
+# script owns this name in your account and Cloudflare will not let a new script
+# orphan its Durable Objects. Change this one line to a fresh name and deploy
+# again. Do not `wrangler delete` the existing script to reclaim the name -
+# that destroys state you did not create and cannot restore.
+name = "spotube-dj"
 main = "src/index.js"
 compatibility_date = "2026-06-01"
 
