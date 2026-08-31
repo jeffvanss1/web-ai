@@ -36,7 +36,7 @@ Protect the Worker/Pages hostname with Cloudflare Access. Set `ALLOWED_ORIGIN` t
 ## API
 
 - `GET /api/state` — current user queue and likes
-- `GET /api/search?q=...` — YouTube Music metadata search via `fetch`
+- `GET /api/search?q=...` — YouTube Data API v3 metadata search via `fetch` (uses the `YOUTUBE_API_KEY` Worker secret)
 - `POST /api/action` — `queue`, `remove`, `like`, `unlike`, `played`, `clear`
 - `POST /api/resolve` — asks the configured resolver for a playable URL
 

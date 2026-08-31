@@ -3,6 +3,7 @@ export interface Env {
   ASSETS: Fetcher;
   USER_QUEUE: DurableObjectNamespace;
   AUDIO_RESOLVER_URL?: string;
+  YOUTUBE_API_KEY?: string;
   ALLOWED_ORIGIN?: string;
   AUTH_MODE?: string;
 }
@@ -43,29 +44,33 @@ function cors(request: Request, env: Env): Headers {
   return h;
 }
 
-async function search(query: string): Promise<Track[]> {
-  const response = await fetch("https://music.youtube.com/youtubei/v1/search", {
-    method: "POST",
-    headers: { "content-type": "application/json", "user-agent": "spotube-dj-cloud/1.0" },
-    body: JSON.stringify({ context: { client: { clientName: "WEB_REMIX", clientVersion: "1.20250101.00.00", hl: "en", gl: "US" } }, query })
-  });
-  if (!response.ok) throw new Error(`music provider returned ${response.status}`);
+function durationSeconds(value: string): number {
+  const match = /^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(value || "");
+  if (!match) return 0;
+  return Number(match[1] || 0) * 3600 + Number(match[2] || 0) * 60 + Number(match[3] || 0);
+}
+
+async function search(env: Env, query: string): Promise<Track[]> {
+  const key = env.YOUTUBE_API_KEY;
+  if (!key) throw new Error("YOUTUBE_API_KEY is not configured");
+  const params = new URLSearchParams({ key, part: "snippet", q: query, type: "video", videoCategoryId: "10", maxResults: "20", safeSearch: "none" });
+  const response = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
+  if (!response.ok) throw new Error(`YouTube API search returned ${response.status}`);
   const body: any = await response.json();
-  const rows: any[] = [];
-  const walk = (value: any): void => {
-    if (!value || typeof value !== "object") return;
-    if (value.musicResponsiveListItemRenderer) rows.push(value.musicResponsiveListItemRenderer);
-    for (const child of Object.values(value)) Array.isArray(child) ? child.forEach(walk) : walk(child);
-  };
-  walk(body);
-  return rows.map((row): Track | null => {
-    const text = (v: any) => v?.runs?.map((r: any) => r.text || "").join("") || v?.simpleText || "";
-    const columns = (row.flexColumns || []).map((c: any) => text(c.musicResponsiveListItemFlexColumnRenderer?.text));
-    const id = row.overlay?.musicItemThumbnailOverlayRenderer?.content?.musicPlayButtonRenderer?.playNavigationEndpoint?.watchEndpoint?.videoId || row.playlistItemData?.videoId;
-    if (!id || !columns[0]) return null;
-    const thumbs = row.thumbnail?.musicThumbnailRenderer?.thumbnail?.thumbnails || [];
-    return { id, title: columns[0], artist: columns[1] || "", duration: 0, thumbnail: thumbs.at(-1)?.url || `https://i.ytimg.com/vi/${id}/hqdefault.jpg`, source: "youtube-music" };
-  }).filter((track): track is Track => Boolean(track)).slice(0, 20);
+  const ids = (body.items || []).map((item: any) => item.id?.videoId).filter(Boolean);
+  if (!ids.length) return [];
+  const details = new URLSearchParams({ key, part: "contentDetails", id: ids.join(",") });
+  const detailResponse = await fetch(`https://www.googleapis.com/youtube/v3/videos?${details}`);
+  if (!detailResponse.ok) throw new Error(`YouTube API details returned ${detailResponse.status}`);
+  const durations = new Map<string, number>((((await detailResponse.json()) as any).items || []).map((item: any) => [item.id, durationSeconds(item.contentDetails?.duration)]));
+  return (body.items || []).map((item: any): Track => ({
+    id: item.id.videoId,
+    title: item.snippet?.title || "Untitled",
+    artist: item.snippet?.channelTitle || "",
+    duration: durations.get(item.id.videoId) || 0,
+    thumbnail: item.snippet?.thumbnails?.high?.url || item.snippet?.thumbnails?.medium?.url || `https://i.ytimg.com/vi/${item.id.videoId}/hqdefault.jpg`,
+    source: "youtube"
+  }));
 }
 
 async function saveTracks(env: Env, tracks: Track[]): Promise<void> {
@@ -110,7 +115,7 @@ export default {
       try {
         let result: Response;
         if (url.pathname === "/api/state" && request.method === "GET") result = json(await state(env, auth));
-        else if (url.pathname === "/api/search" && request.method === "GET") result = json({ rows: await search(url.searchParams.get("q") || "") });
+        else if (url.pathname === "/api/search" && request.method === "GET") result = json({ rows: await search(env, url.searchParams.get("q") || "") });
         else if (url.pathname === "/api/action" && request.method === "POST") result = await action(request, env, auth);
         else if (url.pathname === "/api/resolve" && request.method === "POST") {
           if (!env.AUDIO_RESOLVER_URL) result = json({ error: "audio resolver is not configured" }, 503);
