@@ -9,20 +9,21 @@ export interface Env {
 }
 
 type Track = { id: string; title: string; artist: string; duration: number; thumbnail: string; source: string };
-type User = { id: string; email?: string };
+type User = { id: string; email?: string; guest?: boolean };
 
 const json = (data: unknown, status = 200, headers: HeadersInit = {}) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers } });
 const now = () => Math.floor(Date.now() / 1000);
 
-function userFrom(request: Request, env: Env): User | Response {
-  // Cloudflare Access authenticates before the Worker and supplies this identity.
+function userFrom(request: Request, _env: Env): User {
+  // Cloudflare Access is optional. Logged-in users get a stable account identity;
+  // everyone else gets a private browser guest identity so the public UI still
+  // works without making the queue global.
   const email = request.headers.get("cf-access-authenticated-user-email");
-  const subject = request.headers.get("cf-access-jwt-assertion");
-  if (email) return { id: email.toLowerCase(), email };
-  // Local development only. Never enable this mode on a public deployment.
-  if (env.AUTH_MODE === "dev") return { id: request.headers.get("x-dev-user") || "local-dev" };
-  return json({ error: "authentication required" }, 401);
+  if (email) return { id: `account:${email.toLowerCase()}`, email };
+  const cookie = request.headers.get("cookie") || "";
+  const match = /(?:^|;\\s*)spotube_guest=([^;]+)/.exec(cookie);
+  return { id: `guest:${match?.[1] || crypto.randomUUID()}`, guest: true };
 }
 
 async function readBody(request: Request): Promise<Record<string, any>> {
@@ -111,7 +112,7 @@ export default {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors(request, env) });
     if (url.pathname.startsWith("/api/")) {
-      const auth = userFrom(request, env); if (auth instanceof Response) return auth;
+      const auth = userFrom(request, env);
       try {
         let result: Response;
         if (url.pathname === "/api/state" && request.method === "GET") result = json(await state(env, auth));
@@ -123,6 +124,9 @@ export default {
         } else result = json({ error: "not found" }, 404);
         const crossOrigin = cors(request, env);
         crossOrigin.forEach((value, key) => result.headers.set(key, value));
+        if (auth.guest && !request.headers.get("cookie")?.includes("spotube_guest=")) {
+          result.headers.set("set-cookie", `spotube_guest=${auth.id.slice(6)}; Path=/; Max-Age=31536000; Secure; HttpOnly; SameSite=Lax`);
+        }
         return result;
       } catch (error) { return json({ error: error instanceof Error ? error.message : "request failed" }, 502, cors(request, env)); }
     }

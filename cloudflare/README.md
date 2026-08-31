@@ -4,7 +4,7 @@ This is the cloud/browser backend. It replaces the localhost Python HTTP server,
 
 - Cloudflare Worker API
 - D1 for tracks, queue, likes, and history
-- Cloudflare Access identity (`cf-access-authenticated-user-email`)
+- Optional Cloudflare Access identity (`cf-access-authenticated-user-email`); guests can use the UI without logging in
 - browser `<audio>` playback
 - an external **browser-playable audio resolver** configured with `AUDIO_RESOLVER_URL`
 
@@ -21,7 +21,7 @@ npm run db:migrate
 npx wrangler dev --local
 ```
 
-Local development uses `AUTH_MODE=dev` and the `x-dev-user` header. Set it in `.dev.vars`; never set this mode on a public deployment.
+Authentication is optional for the public UI. Unauthenticated browsers receive a private guest cookie and get their own queue, likes, and history. Cloudflare Access can be placed in front of the Worker later; logged-in users then get an account-scoped identity instead of the guest cookie.
 
 ## Deploy
 
