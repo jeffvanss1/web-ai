@@ -388,6 +388,18 @@ def cmd_doctor(a) -> int:  # noqa: C901  (a checklist reads better than helpers)
     else:
         r = _brain.probe()
         checks.append((f"AI brain ({eng})", r["ok"], r["detail"][:70]))
+    # the Worker is a separate line from the brain on purpose: a configured
+    # Worker that answers /v1/health but has no D1, or one whose token is
+    # wrong, look identical from "AI brain: offline" and have different fixes
+    try:
+        import cloudstate
+        import workerclient
+        checks.append(("cloudflare worker", workerclient.configured(),
+                       workerclient.status_line()))
+        if workerclient.configured():
+            checks.append(("worker routes", True, cloudstate.status_line()))
+    except Exception as e:
+        checks.append(("cloudflare worker", False, f"could not look: {e}"))
 
     cid = prov.CLIENT_ID
     if not cid:
@@ -540,6 +552,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--set-model", dest="set_model", metavar="NAME", help="save the model name")
     p.add_argument("--clear-key", action="store_true", help="delete the saved brain config")
     p.add_argument("--test-brain", action="store_true", help="ping the configured LLM once")
+    p.add_argument("--test-worker", action="store_true",
+                   help="ping the Cloudflare Worker: health, then a real plan call")
+    p.add_argument("--set-worker", dest="set_worker", metavar="URL",
+                   help="save the Cloudflare Worker URL (the only route to Gemini)")
+    p.add_argument("--set-worker-token", dest="set_worker_token", metavar="TOKEN",
+                   help="save the Worker's shared secret (WORKER_TOKEN)")
+    p.add_argument("--set-worker-profile", dest="set_worker_profile", metavar="NAME",
+                   help="which listener this machine is (default: default)")
+    p.add_argument("--build-static", dest="build_static", metavar="DIR",
+                   help="write the front end (index.html, app.css, app.js) to DIR")
     p.add_argument("--taste", action="store_true", help="show the learned taste profile")
     p.add_argument("--cache", action="store_true",
                    help="show the audio cache (files, size, what was fetched ahead)")
@@ -642,6 +664,36 @@ def main(argv: list[str] | None = None) -> int:
         for n in r.get("notes") or []:
             print(f"        note: {n}")
         return 0 if r["ok"] else 1
+    if a.set_worker or a.set_worker_token or a.set_worker_profile:
+        vals = {}
+        if a.set_worker is not None:
+            vals["WORKER_URL"] = a.set_worker.strip().rstrip("/")
+        if a.set_worker_token is not None:
+            vals["WORKER_TOKEN"] = a.set_worker_token.strip()
+        if a.set_worker_profile is not None:
+            vals["WORKER_PROFILE"] = a.set_worker_profile.strip() or "default"
+        config.save_llm_config(**vals)
+        print(f"saved to {config.LLM_CONFIG_FILE}: {', '.join(vals)}")
+        import brain
+        print(f"brain is now: {brain.configured_engine()}")
+        return 0
+    if a.test_worker:
+        import workerclient
+        config.apply_llm_overrides()
+        r = workerclient.probe()
+        print(f"worker: {r['url'] or '(none set)'}")
+        print(f"        ok: {r['ok']}   {r['ms']}ms")
+        print(f"        {r['detail']}")
+        for n in r.get("notes") or []:
+            print(f"        note: {n}")
+        return 0 if r["ok"] else 1
+    if a.build_static:
+        import webapp
+        written = webapp.build_static(a.build_static)
+        print(f"wrote the front end to {a.build_static}: {', '.join(written)}")
+        print("  (the page still needs the local server for /api/*, so this is a")
+        print("   deployable front end, not a hosted player)")
+        return 0
     if a.doctor:
         return cmd_doctor(a)
     if a.taste or a.clear_taste or a.restore_taste:

@@ -1728,8 +1728,8 @@ HTML_HEADERS = {
 }
 
 
-ROUTES = ("/", "/api/state", "/api/stream", "/api/action", "/api/search",
-          "/api/settings", "/art/<file>", "/voice/<clip>.wav")
+ROUTES = ("/", "/app.css", "/app.js", "/api/state", "/api/stream", "/api/action",
+          "/api/search", "/api/settings", "/art/<file>", "/voice/<clip>.wav")
 
 
 def not_found_payload() -> dict:
@@ -1818,7 +1818,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path in ("/", "/index.html"):
-            self._send(HTTPStatus.OK, webapp.page().encode(), "text/html; charset=utf-8")
+            self._page()
+        elif path in ("/app.css", "/app.js"):
+            self._static(path)
         elif path == "/api/state":
             self._json(HTTPStatus.OK, with_art(build_state(self.ctx), self.ctx))
         elif path == "/api/stream":
@@ -1920,13 +1922,40 @@ class Handler(BaseHTTPRequestHandler):
         self._send(HTTPStatus.OK, body, ctype,
                    {"Cache-Control": "public, max-age=86400"})
 
+    def _page(self) -> None:
+        """
+        The document. Two shapes, one source:
+
+        * the static site by default - index.html linking app.css and app.js,
+          which is what you edit and what `--build-static` deploys;
+        * one self-contained file with `SPOTUBE_DJ_INLINE_PAGE=1`, for a
+          save-as, a `curl > page.html`, or a host that only takes one file.
+
+        Both are built from the same static/ assets, so they cannot disagree.
+        """
+        html = (webapp.page() if os.environ.get("SPOTUBE_DJ_INLINE_PAGE") == "1"
+                else webapp.shell())
+        self._send(HTTPStatus.OK, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _static(self, path: str) -> None:
+        """app.css / app.js: same-origin, no-store so an edit shows on reload."""
+        got = webapp.asset(path)
+        if not got:
+            self._json(HTTPStatus.NOT_FOUND, not_found_payload())
+            return
+        body, ctype = got
+        self._send(HTTPStatus.OK, body, ctype,
+                   {"Cache-Control": "no-store", "Vary": "Accept-Encoding"})
+
     def _voice(self, name: str) -> None:
         """Serve one spoken-line clip. Same guards as /art/: a name is a name."""
         name = urllib.parse.unquote(str(name or ""))
         if not VOICE_NAME.match(name):
             self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
             return
-        target = Path(config.APP_DIR) / "voice" / name
+        # the same directory `publish_voice` writes to, not a second spelling of
+        # it: a clip that was published is reachable, one that was not is not
+        target = Path(self.ctx._voice_dir) / name
         if not target.is_file():
             self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
             return

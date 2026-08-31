@@ -1,0 +1,449 @@
+:root{--bg:@@BG@@;--panel:@@PANEL@@;--card:@@CARD@@;--edge:@@EDGE@@;--hover:@@HOVER@@;
+--input:@@INPUT@@;--text:@@TEXT@@;--muted:@@MUTED@@;--faint:@@FAINT@@;--accent:@@ACCENT@@;
+--accent-dk:@@ACCENT_DK@@;--playing:@@PLAYING@@;--error:@@ERROR@@;--heart:@@HEART@@;
+--tiles:@@TILES@@;--tint:#1db954;--tint2:#169c46;--glass:rgba(255,255,255,.05);
+--r:14px;--rax:22px}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);overflow:hidden;
+font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,"Cantarell","DejaVu Sans",sans-serif;
+display:grid;grid-template-rows:1fr 72px;padding:8px;gap:8px}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+input{font:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+svg{fill:currentColor;display:block}
+::-webkit-scrollbar{width:12px;height:12px}
+::-webkit-scrollbar-thumb{background:#4d4d4d;border:3px solid transparent;
+background-clip:padding-box;border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:#7a7a7a;background-clip:padding-box}
+::-webkit-scrollbar-track{background:transparent}
+
+.app{display:grid;grid-template-columns:300px minmax(0,1fr) 400px;gap:10px;min-height:0;
+position:relative}
+/* a liquid-glass card: a translucent shell with a soft edge and an inner highlight,
+   so the blurred cover behind it reads as frosted glass. The right panel must NEVER
+   read as a transparent box over content - the report "give a transparent box" was
+   the panel's own backdrop letting the middle column bleed through - so it gets a
+   real, mostly-opaque base that keeps the frosted look without the see-through. */
+.panel{background:linear-gradient(165deg,rgba(30,30,36,.94),rgba(14,14,17,.97));
+border:1px solid rgba(255,255,255,.07);border-radius:var(--r);min-height:0;
+position:relative;isolation:isolate;overflow:hidden;
+box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 24px 70px rgba(0,0,0,.55);
+backdrop-filter:blur(30px) saturate(1.35)}
+
+/* ---- the blurred cover: the one thing a terminal skin could never do ---- */
+/* two layers so a track change is a crossfade, not a cut: the base keeps the
+   outgoing cover while the float carries the incoming one and they trade opacity.
+   CRITICAL for smoothness: the drift animation runs on `transform` ONLY, never on
+   `filter` or `background`. `filter:blur(72px)` is expensive to rasterize, and if a
+   keyframe also animates filter/hue-rotate or a gradient's `at var()` position, the
+   browser has to re-blur this full-screen layer every frame - that is the jank. A
+   plain transform just slides the already-blurred texture in the compositor for free. */
+.bg{position:absolute;inset:-14% -10%;z-index:-2;background-size:cover;
+background-position:center top;filter:blur(72px) saturate(1.9) hue-rotate(-7deg);
+opacity:.66;transform:scale(1.08);transition:opacity .5s ease;will-change:transform;
+animation:tintdrift 14s ease-in-out infinite alternate}
+/* the float layer is a second copy of the same box: identical size and blur, so
+   the crossfade below never changes the look, only which cover wins. It sits
+   above the base (later in the DOM at the same z-index) and is hidden until a
+   track changes, at which point it fades in with the new cover over the old one. */
+.bg2{position:absolute;inset:-14% -10%;z-index:-2;background-size:cover;
+background-position:center top;filter:blur(72px) saturate(1.9) hue-rotate(-7deg);
+opacity:0;transform:scale(1.08);transition:opacity .45s ease;will-change:transform;
+animation:tintdrift 14s ease-in-out infinite alternate}
+/* the coloured glow lives on a STATIC layer (fixed gradient points, no animated
+   filter / no animated custom properties). It moves only because the blurred layer
+   above it is slid around by transform, so the two tints appear to travel across
+   the page without ever re-blurring. */
+.bg::after,.bg2::after{content:"";position:absolute;inset:-18% -14%;
+background:radial-gradient(120% 90% at 30% 20%,var(--tint) 0%,transparent 55%),
+radial-gradient(110% 80% at 80% 85%,var(--tint2) 0%,transparent 55%);
+mix-blend-mode:screen;opacity:.62}
+/* the playing colour breathes: the cover-derived tint drifts slowly across the
+   screen. 14s a side reads as ambient, not a busy page; and because only
+   `transform` is animated (translate3d + a slight scale), the compositor slides
+   the blurred wash and the glow around without re-computing the blur. */
+@keyframes tintdrift{
+0%{transform:translate3d(-2.5%,1.5%,0) scale(1.06)}
+100%{transform:translate3d(2.5%,-1.5%,0) scale(1.1)}}
+/* with no cover yet the wash is the two palette colours that tile would have used,
+   so the page is never the flat grey it looked before a thumbnail landed. We only
+   drop the cover image, not the glow: the tinted wash behind it stays and moves. */
+.bg.flat,.bg2.flat{background-image:none!important;opacity:.62}
+.scrim{position:absolute;inset:0;z-index:-1;
+background:linear-gradient(180deg,rgba(0,0,0,.26),rgba(18,18,18,.8) 42%,rgba(14,14,16,.96) 78%)}
+
+/* ---- left: your library ---- */
+.side{background:linear-gradient(165deg,rgba(28,28,34,.9),rgba(14,14,16,.96));
+display:flex;flex-direction:column;min-height:0}
+.side-head{display:flex;align-items:center;justify-content:space-between;padding:14px 14px 6px}
+.side-head .lt{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15.5px}
+.side-head .lt svg{width:22px;height:22px;color:var(--muted)}
+.iconbtn{width:32px;height:32px;border-radius:999px;display:grid;place-items:center;
+color:var(--muted)}
+.iconbtn svg{width:17px;height:17px}
+.iconbtn:hover{color:var(--text);background:var(--hover)}
+.iconbtn.on{color:var(--accent)}
+/* a loved song wears the palette's heart, not the green of a button */
+#b-love.on{color:var(--heart)}
+.card .a svg,.row .ar svg{width:13px;height:13px;color:#3ea4f5;flex:none}
+.iconbtn.big{width:36px;height:36px}
+.iconbtn.big svg{width:20px;height:20px}
+.filters{display:flex;gap:8px;padding:8px 14px;flex-wrap:wrap;scrollbar-width:none}
+.filters::-webkit-scrollbar{display:none}
+.chip{background:var(--hover);border-radius:999px;padding:6px 13px;color:var(--text);
+font-size:13px;white-space:nowrap;flex:none}
+.chip:hover{background:#2a2a2a}
+.chip.on{background:#fff;color:#000;font-weight:600}
+.libsort{display:flex;align-items:center;gap:6px;padding:2px 14px 8px;color:var(--muted);
+font-size:12.5px}
+.libsort button{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12.5px}
+.libsort button:hover{color:var(--text)}
+.libsort svg{width:14px;height:14px}
+.librows{overflow-y:auto;padding:0 8px 14px;display:flex;flex-direction:column;gap:2px;
+min-height:0;flex:1}
+.lib{display:grid;grid-template-columns:48px minmax(0,1fr) 26px;gap:12px;align-items:center;
+padding:7px 6px;border-radius:6px}
+.lib:hover{background:var(--hover)}
+.lib .name{color:var(--text);font-size:14px;font-weight:500;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.lib .meta{color:var(--muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap;display:flex;align-items:center;gap:6px}
+.lib .meta svg{width:13px;height:13px;color:#3ea4f5;flex:none}
+.lib.sel{background:var(--hover)}
+.lib .go{opacity:0;transition:opacity .12s}
+.lib:hover .go{opacity:1}
+.tile{width:48px;height:48px;border-radius:5px;overflow:hidden;flex:none;display:grid;
+place-items:center;font-weight:800;color:#0a0a0a;background:var(--card);position:relative}
+.tile.sq{border-radius:50%}
+.tile img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;z-index:1}
+/* any box that holds a cover is a box the picture has to fill. The hero and the
+   detail cover are .cover, not .tile, and had no rule of their own: the img sat at
+   its natural size in the corner on top of the gradient, which is the "what is that
+   little square" look. Letters sit behind it (z-index) so they only show alone. */
+.cover{position:relative;overflow:hidden}
+.cover img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+display:block;z-index:1}
+.tile.big{width:100%;height:100%;border-radius:6px;font-size:64px}
+.empty{color:var(--faint);font-size:13px;padding:18px 14px;line-height:1.6}
+.empty b{display:block;color:var(--text);font-size:14px;margin-bottom:6px}
+
+/* ---- middle: content ---- */
+/* the panel holds the wash, the scroller holds the page. They are separate on
+   purpose: an absolutely positioned backdrop inside a scroll container is sized
+   against the *content* (3 000 px on a long queue), so the cover was cropped to a
+   slice and scrolled off, which is why the blur looked absent below the fold. */
+#uph{display:flex;align-items:baseline;gap:6px}
+.main{display:flex;flex-direction:column;min-height:0}
+.scroller{overflow-y:auto;padding:0 0 22px;flex:1;min-height:0;display:flex;
+flex-direction:column}
+.top{display:flex;align-items:center;gap:12px;padding:10px 16px;position:sticky;top:0;z-index:6;
+background:linear-gradient(180deg,rgba(0,0,0,.42),rgba(0,0,0,0))}
+.main.up .top{background:rgba(10,10,10,.82);backdrop-filter:blur(14px);
+box-shadow:0 1px 0 rgba(255,255,255,.06)}
+.navb{display:flex;gap:8px}
+.navb .iconbtn{background:rgba(0,0,0,.5)}
+.search{flex:1;display:flex;align-items:center;gap:10px;background:var(--input);
+border:1px solid transparent;border-radius:999px;padding:0 14px;max-width:520px;height:42px}
+.search:focus-within{border-color:#fff;background:#2a2a2a}
+.search svg{width:18px;height:18px;color:var(--faint);flex:none}
+.search input{flex:1;background:none;border:0;color:var(--text);outline:none;font:inherit;
+font-size:14.5px;min-width:0}
+.search input::placeholder{color:var(--faint)}
+.topright{display:flex;align-items:center;gap:8px;margin-left:auto}
+.pill{border:1px solid var(--edge);border-radius:999px;padding:5px 11px;font-size:12px;
+color:var(--muted);white-space:nowrap;max-width:30ch;overflow:hidden;text-overflow:ellipsis;
+background:rgba(0,0,0,.35)}
+.pill.warn{border-color:var(--error);color:#ff8a8a}
+.pill.good{border-color:var(--accent);color:var(--accent)}
+.avatar{width:32px;height:32px;border-radius:50%;background:var(--accent);color:#000;
+font-weight:800;display:grid;place-items:center;font-size:13.5px}
+.avatar:hover{transform:scale(1.06)}
+.content{padding:0 16px}
+.greet{font-size:26px;font-weight:800;margin:6px 0 14px;letter-spacing:-.4px;
+display:flex;align-items:center;gap:12px}
+.greet>span:first-child{flex:1;text-align:left}
+h2{font-size:19px;font-weight:700;margin:22px 0 12px;letter-spacing:-.2px}
+h2 .sub{color:var(--faint);font-size:12.5px;font-weight:400;margin-left:8px}
+.quick{display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:10px}
+.qp{display:flex;align-items:center;gap:0;background:rgba(255,255,255,.09);border-radius:6px;
+height:56px;overflow:hidden;position:relative;transition:background .12s}
+.qp:hover{background:rgba(255,255,255,.18)}
+.qp .qt{flex:1;min-width:0;padding:0 10px;font-weight:700;font-size:14px;
+overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the right-hand chip: a 30px round mark, tinted from the same seed the tiles use.
+   A 64px gradient block with one letter in it is a placeholder, and six of them in
+   a row is what made the top of this page look unfinished next to the covers. */
+.qp .qi{position:relative;width:30px;height:30px;border-radius:50%;flex:none;
+margin-right:12px;display:grid;place-items:center;transition:opacity .12s}
+.qp .qi svg{width:14px;height:14px;color:#fff;opacity:.92}
+/* on hover the play control takes the chip's place, so the tile never grows */
+.qp .fab{position:absolute;right:11px;width:30px;height:30px;opacity:0;
+transform:translateY(4px);transition:opacity .12s,transform .12s}
+.qp:hover .qi{opacity:0}
+.qp:hover .fab{opacity:1;transform:none}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:18px}
+.card{background:var(--card);border-radius:8px;padding:12px;position:relative}
+.card:hover{background:#282828}
+/* while the artwork lane is still fetching this row's file, sweep a highlight
+   across the box: "coming" instead of "nothing here" */
+.card .cover.pending::after{content:"";position:absolute;inset:0;z-index:2;
+background:linear-gradient(100deg,transparent 22%,rgba(255,255,255,.07) 50%,
+transparent 78%);animation:sweep 1.5s ease-in-out infinite}
+@keyframes sweep{0%{transform:translateX(-70%)}100%{transform:translateX(70%)}}
+.card .cover{position:relative;aspect-ratio:1/1;border-radius:6px;overflow:hidden;
+background:var(--input);box-shadow:0 8px 24px rgba(0,0,0,.5)}
+.card .cover .tile{width:100%;height:100%;border-radius:6px;font-size:44px}
+.card .t{margin-top:11px;font-weight:700;font-size:14.5px;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.card .a{color:var(--muted);font-size:12.5px;margin-top:3px;overflow:hidden;
+text-overflow:ellipsis;white-space:nowrap}
+.fab{width:44px;height:44px;border-radius:50%;background:var(--tint);color:#fff;
+display:grid;place-items:center;box-shadow:0 8px 22px rgba(0,0,0,.5);
+transition:background .5s ease,transform .16s ease,box-shadow .16s ease}
+.fab svg{width:20px;height:20px}
+.fab:hover{transform:scale(1.06);background:var(--tint2);box-shadow:0 10px 26px rgba(0,0,0,.55)}
+.fab:active{transform:scale(.98)}
+.card .fab,.row .fab{position:absolute;right:14px;bottom:64px;opacity:0;
+transform:translateY(8px);transition:opacity .16s ease,transform .16s ease}
+.card:hover .fab{opacity:1;transform:none}
+.row .fab{right:44px;bottom:50%;transform:translateY(50%) scale(.9);width:34px;height:34px}
+.row .fab svg{width:15px;height:15px}
+.row:hover .fab{opacity:1;transform:translateY(50%) scale(1)}
+
+.rows{display:flex;flex-direction:column}
+.row{display:grid;grid-template-columns:22px 40px minmax(0,1.6fr) minmax(0,1fr) 52px auto;
+gap:14px;align-items:center;padding:6px 10px;border-radius:10px;position:relative}
+.row:hover{background:rgba(255,255,255,.08)}
+.row .n{color:var(--muted);font-size:13.5px;text-align:right;font-variant-numeric:tabular-nums}
+.row .tile{width:40px;height:40px;font-size:14px}
+.row .ti{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14.5px}
+.row .ar{color:var(--muted);font-size:13px;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap;display:flex;align-items:center;gap:7px}
+.row .du{color:var(--muted);font-size:13px;text-align:right;font-variant-numeric:tabular-nums}
+/* the trailing action cluster (dislike, remove, more) slides in on hover, the
+   same place a listener expects controls on a queue row in the apps they know */
+.rowacts{display:flex;align-items:center;gap:2px;opacity:0;justify-content:flex-end;
+transition:opacity .14s ease}
+.row:hover .rowacts,.row:focus-within .rowacts{opacity:1}
+.rowacts .iconbtn{width:26px;height:26px;border-radius:8px}
+.rowacts .iconbtn svg{width:14px;height:14px}
+.rowacts .grow{flex:0 0 12px}
+.row .more{width:26px;height:26px}
+.row.playing .ti{color:var(--tint)}
+.row.playing .n{color:var(--tint)}
+.eq{display:none;gap:2px;align-items:flex-end;height:13px;width:14px}
+.row.playing .eq{display:flex}
+.row.playing .n span{display:none}
+.eq i{width:3px;background:var(--tint);height:4px;animation:eq .9s ease-in-out infinite;
+border-radius:1px;transition:background .5s ease}
+.eq i:nth-child(2){animation-delay:.18s}
+.eq i:nth-child(3){animation-delay:.36s}
+@keyframes eq{0%,100%{height:4px}30%{height:13px}60%{height:7px}}
+.badge{display:inline-block;background:rgba(255,255,255,.12);border-radius:4px;padding:1px 6px;
+margin-left:7px;font-size:11px;color:var(--muted)}
+
+/* ---- right: now playing ---- */
+.detail{display:flex;flex-direction:column;min-height:0}
+.dhead{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 0}
+.dhead b{font-size:14px}
+.dhero{padding:10px 16px 14px}
+.dhero .cover{position:relative;aspect-ratio:1/1;max-height:300px;border-radius:8px;
+overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.6);background:var(--input)}
+.dhero .cover .tile{width:100%;height:100%;border-radius:8px;font-size:70px}
+.dtitle{font-size:22px;font-weight:800;line-height:1.25;margin:14px 0 6px;
+word-break:break-word}
+.dartist{display:flex;align-items:center;gap:6px;color:var(--text);font-size:14px;font-weight:600}
+.dartist svg{width:15px;height:15px;color:#3ea4f5}
+/* the Now Playing artist as a link to the in-app artist page: a button, but one
+   that reads as the name, and only grows a line on hover so it never shouts */
+.plink{font:inherit;color:var(--text);padding:0;border-bottom:1px solid transparent;
+transition:border-color .12s}
+.plink:hover{color:#fff;border-bottom-color:rgba(255,255,255,.4)}
+/* the right panel's content is one safe scroll container: `overflow-y:auto` plus a
+   definite height (flex:1;min-height:0) so it always scrolls inside the panel and
+   never walks the page. A thin visible scrollbar keeps it obvious you can get back
+   up to Now Playing, which is what "I can't scroll up anymore" was about. */
+.dbody{overflow-y:auto;overflow-x:hidden;padding:0 16px 18px;flex:1;min-height:0;
+scrollbar-width:thin;overscroll-behavior:contain}
+.sect{margin-top:16px}
+/* the panel's microcopy is read against a blurred cover, so it gets a real colour
+   and a wider track instead of the faint grey that disappeared behind the art */
+.sect h3{margin:0 0 8px;font-size:11.5px;text-transform:uppercase;letter-spacing:.14em;
+color:var(--muted);font-weight:700}
+.why{background:rgba(0,0,0,.42);border-radius:8px;padding:11px 12px;font-size:13px;
+line-height:1.55;color:#e8e8e8}
+.why b{color:var(--text)}
+/* Credits sits over a blurred cover that is usually near-black, so a faint grey
+   label ("album", "released") disappears into it. Make every line white so the
+   block reads on any background; the values stay a touch softer than the labels
+   so the pair is still legible as label-vs-value rather than one white wall. */
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 14px;font-size:13px}
+.kv dt{color:var(--text);font-weight:600}
+.kv dd{margin:0;color:#fff;overflow-wrap:anywhere;opacity:.92}
+.mini{display:flex;flex-direction:column;gap:2px}
+.mini .m{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:10px;align-items:center;
+padding:5px 6px;border-radius:6px;font-size:13px}
+.mini .m:hover{background:var(--hover)}
+/* the queue section that now lives in the right panel: a header with the track
+   count on the left and the clear button on the right, above the row list */
+.qh{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.qh h3{margin:0;font-size:12px;text-transform:uppercase;letter-spacing:.14em;
+color:var(--muted);font-weight:700}
+.qh .sub{color:var(--faint);font-size:12px;font-weight:400;letter-spacing:0;
+text-transform:none;margin-left:2px}
+.qh .iconbtn{margin-left:auto;width:26px;height:26px}
+.qh .iconbtn svg{width:14px;height:14px}
+#queue-sect .rows{display:flex;flex-direction:column;gap:1px}
+/* the queue sits in a 400px panel, so its rows drop the row number and use the
+   room for the song and a single actions column - the same shape Spotify's queue
+   uses, where the title is the thing a person scans for. The title gets the lion's
+   share (2.4fr) and the artist a quarter of it, so a song name reads without being
+   chopped a few characters in; the column gap is a little wider so the title is
+   not mashing into the artist's name. Each row is its own faint tile so the queue
+   reads as a list of entries against the tinted backdrop instead of text floating
+   on the blur. */
+#upnext .row{grid-template-columns:40px minmax(0,2.4fr) minmax(0,1fr) auto;gap:14px;
+background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.05);
+border-radius:10px;margin-bottom:6px;padding:7px 10px}
+#upnext .row:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.12)}
+#upnext .row .ti{font-weight:600}
+#upnext .row .ar{color:var(--muted)}
+#upnext .row .n{display:none}
+/* no per-track duration in the queue: a busy list is scanned by title, and the
+   panel is 400px - the seconds column is what used to crush the title and push the
+   play button over the actions. The row opens the song on a click instead. */
+#upnext .row .du{display:none}
+#upnext .row .fab{display:none}
+#upnext .row .rowacts .iconbtn{width:24px;height:24px}
+.acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.btn{display:inline-flex;align-items:center;gap:8px;background:var(--hover);
+border-radius:999px;padding:9px 16px;font-weight:700;font-size:13px}
+.btn:hover{background:#2f2f2f}
+.btn.prim{background:var(--accent);color:#000}
+.btn.prim:hover{background:#1fdf64}
+.btn svg{width:15px;height:15px}
+.btn.on{color:var(--accent)}
+.btn.ghost{border:1px solid var(--edge);background:none}
+.btn.ghost:hover{border-color:var(--text);background:var(--hover)}
+.bar2{height:4px;background:rgba(255,255,255,.16);border-radius:2px;overflow:hidden}
+.bar2 i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--heart))}
+.logbox{margin-top:12px;background:rgba(0,0,0,.35);border-radius:8px;padding:10px 12px;
+font:11.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted);
+max-height:220px;overflow:auto;white-space:pre-wrap}
+
+/* ---- bottom transport ---- */
+.player{display:grid;grid-template-columns:minmax(180px,1fr) minmax(320px,2fr)
+minmax(180px,1fr);gap:14px;align-items:center;padding:0 14px}
+.track{display:flex;align-items:center;gap:12px;min-width:0}
+.track .ti{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
+.track .ar{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;
+white-space:nowrap}
+.center{display:flex;flex-direction:column;align-items:center;gap:6px}
+.ctrls{display:flex;align-items:center;gap:16px}
+.ctrls .iconbtn.on{color:var(--tint);position:relative}
+.ctrls .iconbtn.on::after{content:"";position:absolute;bottom:-1px;left:50%;
+transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--tint)}
+.play{width:36px;height:36px;border-radius:50%;background:#fff;color:#000;display:grid;
+place-items:center}
+.play svg{width:17px;height:17px}
+.play:hover{transform:scale(1.07)}
+.seek{display:flex;align-items:center;gap:10px;width:100%;max-width:620px}
+.seek small{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums;min-width:34px}
+.seekbar{flex:1;height:14px;display:flex;align-items:center;cursor:pointer;position:relative}
+.seekbar .t{height:4px;width:100%;background:rgba(255,255,255,.22);border-radius:2px;
+overflow:hidden}
+.seekbar .f{height:100%;width:0;background:linear-gradient(90deg,var(--tint),var(--tint2));
+border-radius:2px;transition:background .5s ease}
+.seekbar:hover .f,.seekbar.kb .f{background:linear-gradient(90deg,var(--tint),#fff)}
+.seekbar .k{position:absolute;top:50%;width:12px;height:12px;border-radius:50%;background:#fff;
+transform:translate(-50%,-50%) scale(0);transition:transform .12s;pointer-events:none}
+.seekbar:hover .k{transform:translate(-50%,-50%) scale(1)}
+.right{display:flex;align-items:center;gap:10px;justify-content:flex-end}
+/* a pill that reads "0 stored, 0 d…" tells you nothing. The cache count is sized to
+   its content and the icons beside it give way; under 1000px the bar is too tight for
+   a number nobody acts on, so it steps aside entirely rather than truncating. */
+.right .pill{flex:0 0 auto;max-width:none}
+@media (max-width:1000px){.right .pill{display:none}}
+.vol{display:flex;align-items:center;gap:8px}
+/* a real volume slider: a track you can see and a thumb you can grab. The old
+   styling only set a background on the input and hid the thumb until hover, so
+   on Chromium there was nothing but a 4px grey line with an invisible knob. */
+input[type=range]{-webkit-appearance:none;appearance:none;height:18px;width:92px;
+background:transparent;outline:none;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:4px;border-radius:999px;
+background:linear-gradient(90deg,var(--tint) var(--vol,70%),rgba(255,255,255,.2) var(--vol,70%))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:13px;
+height:13px;border-radius:50%;background:#fff;margin-top:-4.5px;
+box-shadow:0 0 0 3px rgba(0,0,0,.35);opacity:1;transition:transform .12s}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.15)}
+input[type=range]::-moz-range-track{height:4px;border-radius:999px;background:rgba(255,255,255,.2)}
+input[type=range]::-moz-range-progress{height:4px;border-radius:999px;background:var(--tint)}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border:0;border-radius:50%;
+background:#fff;box-shadow:0 0 0 3px rgba(0,0,0,.35)}
+
+/* ---- menus, toasts, misc ---- */
+.menu{position:fixed;z-index:60;min-width:196px;background:#282828;border:1px solid rgba(0,0,0,.6);
+border-radius:6px;padding:4px;box-shadow:0 10px 34px rgba(0,0,0,.7)}
+.menu button{display:flex;align-items:center;gap:10px;width:100%;padding:9px 11px;
+border-radius:4px;color:var(--muted);font-size:13.5px;text-align:left}
+.menu button:hover{color:var(--text);background:rgba(255,255,255,.1)}
+.menu button svg{width:15px;height:15px;flex:none}
+.menu hr{border:0;border-top:1px solid rgba(255,255,255,.1);margin:4px 6px}
+.menu .bad{color:#ff8a8a}
+.toast{position:fixed;left:50%;bottom:96px;transform:translateX(-50%) translateY(12px);
+background:#fff;color:#000;padding:10px 16px;border-radius:8px;font-size:13.5px;font-weight:600;
+opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:70;max-width:80vw}
+.toast.show{opacity:1;transform:translateX(-50%)}
+.card.set{background:rgba(255,255,255,.04);border-radius:8px;padding:14px;margin-top:14px}
+.sech{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--faint);
+margin-bottom:10px}
+.setrow{display:grid;grid-template-columns:104px minmax(0,1fr);gap:12px;align-items:center;
+margin-top:10px}
+.setrow span{color:var(--faint);font-size:12.5px}
+.setrow input{background:var(--input);border:1px solid var(--edge);border-radius:6px;
+padding:9px 11px;color:var(--text);min-width:0;outline:none;width:100%}
+.setrow input:focus{border-color:#fff;background:#2a2a2a}
+.taste{display:flex;flex-wrap:wrap;gap:7px}
+.tk{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.07);
+border-radius:999px;padding:5px 11px;font-size:12.5px;color:var(--muted);max-width:100%}
+.tk b{color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tk i{display:block;height:4px;width:34px;background:var(--accent);border-radius:2px;
+opacity:.85;flex:none}
+.tk.neg i{background:var(--error)}
+body.busy .btn.prim{opacity:.55}
+[hidden]{display:none !important}
+/* a window too narrow to fit the three panels keeps the detail tucked away; the
+   queue button reveals it as an overlay that slides over the content (the same
+   small-screen shape the sidebar takes), so it never forces a 3-column grid at a
+   width that cannot hold one and never leaves a cut-off, unscrollable panel. */
+@media (max-width:1300px){.app{grid-template-columns:280px minmax(0,1fr)}
+.detail{display:none}.app.wide .detail{display:flex;position:absolute;top:0;right:0;
+bottom:0;width:400px;max-width:92vw;z-index:30;box-shadow:-18px 0 60px rgba(0,0,0,.6)}}
+@media (max-width:1000px){.app{grid-template-columns:minmax(0,1fr)}.side{display:none}
+.app.nav .side{display:flex;position:absolute;inset:8px auto 80px 8px;width:300px;z-index:20;
+box-shadow:0 18px 60px rgba(0,0,0,.8)}.cards{grid-template-columns:repeat(auto-fill,
+minmax(140px,1fr))}.row{grid-template-columns:22px 40px minmax(0,1fr) 52px auto}
+.row .ar{display:none}.right .vol input{width:60px} .app.wide .detail{width:min(400px,100%)}}
+@media (max-width:760px){.center{gap:2px}.player{grid-template-columns:1fr auto}
+.right .iconbtn:nth-child(-n+2){display:none}.quick{grid-template-columns:1fr}}
+/* the DJ, Spotify-style: a short banner that says why this song is playing and
+   what's coming next. It is always on (no box to type in), so it lives in the
+   detail pane as a friendly card between the hero and the "why" section. */
+.djline{margin:6px 0 2px;background:linear-gradient(90deg,var(--card),var(--accent2,var(--card)));
+border:1px solid var(--edge);border-radius:16px;padding:12px 14px;font-size:13px;
+line-height:1.5;color:var(--text)}
+.djline .djtag{display:inline-flex;align-items:center;gap:6px;font-size:11px;
+font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);
+margin-bottom:4px}
+.djline .djtag::before{content:"";width:8px;height:8px;border-radius:50%;
+background:var(--accent);box-shadow:0 0 8px var(--accent)}
+.djline .lh{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.djline .lh .djtag{margin-bottom:0}
+.djvnote{font-size:11px;color:var(--muted)}
+.djvoice{margin-left:auto;display:inline-flex;align-items:center;gap:5px;
+font-size:11px;padding:3px 8px;border-radius:999px;border:1px solid var(--edge);
+background:var(--card);color:var(--muted);cursor:pointer}
+.djvoice.on{color:var(--accent);border-color:var(--accent)}
+.djvoice svg{width:13px;height:13px}
