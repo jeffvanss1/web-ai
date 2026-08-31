@@ -28,6 +28,19 @@ same bug wearing a different hat:
   D1 gives it somewhere to live that survives a reinstall and can be read by a
   second machine.
 
+## Check before you deploy
+
+```bash
+npm run check     # node --check, then a real `wrangler deploy --dry-run`
+npm test          # 22 route tests
+```
+
+`node --check` alone is **not** enough and has already missed one deploy-blocking
+bug: it only parses, so `models = f(models)` against a `const models` sails
+through it and through the test suite, and only fails when esbuild builds the
+bundle (`errorType: BuildFailure` in wrangler's output, with no line number).
+The dry-run needs no Cloudflare account - it builds locally and exits.
+
 ## Deploy
 
 ```bash
@@ -49,6 +62,9 @@ Then point the app at it, once, from Settings → Worker (or `~/.spotube-dj/conf
   "WORKER_TOKEN": "the same WORKER_TOKEN",
   "WORKER_PROFILE": "default" }
 ```
+
+If `wrangler deploy` fails with `BuildFailure` and no useful message, run
+`npx wrangler deploy --dry-run` - the dry-run prints the file and line.
 
 `spotube-dj --doctor` prints a `worker` line, and the page's header pill says
 which planner is live. `Test the worker` in Settings runs `/v1/health` and the

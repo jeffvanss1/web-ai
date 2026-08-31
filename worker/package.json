@@ -8,7 +8,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "check": "node --check src/index.js"
+    "test": "node --test \"test/*.mjs\"",
+    "check": "node --check src/index.js && wrangler deploy --dry-run --outdir .build"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

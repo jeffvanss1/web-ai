@@ -838,8 +838,10 @@ switch is reported in an `X-Voice-Notes` header.
 | `Worker: timed out after 45s` | `SPOTUBE_DJ_LLM_TIMEOUT`, or a smaller model |
 
 The full contract - every route, error kind and env var - is in
-[`worker/README.md`](worker/README.md), and `cd worker && node --test "test/*.mjs"`
-runs its 21 tests with no network and no Cloudflare account.
+[`worker/README.md`](worker/README.md). `cd worker && npm test` runs its 22 tests
+and `npm run check` does a real `wrangler deploy --dry-run`; neither needs a
+network or a Cloudflare account. Run `check` before `deploy`: it is the only
+thing that builds the bundle the way Cloudflare will.
 
 ## Files
 
@@ -873,11 +875,12 @@ runs its 21 tests with no network and no Cloudflare account.
 | `tests/test_desktop.py` | 15 tests: the .desktop file and the icon, in a temp $XDG_DATA_HOME |
 | `tests/test_web.py` | 200 tests: the clear-queue verb and its job lane, the published snapshot, every routed action, the transport verbs, library rows, artwork lanes, path traversal, the Host guard, the settings route, one real socket over the routes |
 | `tests/test_worker.py` | 53 tests: the Worker client - key custody, error kinds, D1 sync and adopt, the asset split, the voice bus |
-| `worker/test/smoke.mjs` | 21 tests: the Worker's routes, token gate, model ladder and WAV wrapping, under `node --test` |
+| `worker/test/smoke.mjs` | 22 tests: the Worker's routes, token gate, model ladder and WAV wrapping, under `node --test` |
 
 ```bash
 python3 -m unittest discover -s tests -t .     # from the repo root: 767 tests
-cd worker && node --test "test/*.mjs"          # 21 more, no network
+cd worker && npm test                          # 22 more, no network
+cd worker && npm run check                     # + a real wrangler build (no account)
 ```
 
 No test touches the network: `tests/__init__.py` points the state dir at a scratch

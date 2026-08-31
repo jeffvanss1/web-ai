@@ -2,6 +2,7 @@
 #
 # First time:
 #   npm install                       # just wrangler
+#   npm run check                     # dry-run build - needs no account, do it first
 #   npx wrangler login
 #   npx wrangler d1 create spotube-dj # paste the database_id below
 #   npx wrangler r2 bucket create spotube-dj-clips   # optional: spoken-line cache

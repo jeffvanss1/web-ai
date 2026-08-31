@@ -325,6 +325,25 @@ test("POST /v1/text returns prose and walks the ladder to get it", async () => {
   assert.equal(body.text.length <= 400, true);
 });
 
+// /v1/text and /v1/plan hold the same model ladder, and for a while they held a
+// *different copy* of it: handleText declared the list `const` and then
+// reassigned it, which is a TypeError the moment the first model is retired.
+// `node --check` cannot see it (it only parses) and the text tests below only
+// ever ran the happy path, so it shipped - `wrangler deploy` was the first
+// thing to notice, as a BuildFailure with no line number in the app's output.
+test("a retired model is walked by /v1/text too, not just by /v1/plan", async () => {
+  state.scenario = "retired";
+  const res = await call("POST", "/v1/text", { body: { prompt: "write a DJ line" } });
+  const body = await res.json();
+  assert.equal(body.ok, true, JSON.stringify(body));
+  assert.equal(body.model, "gemini-3.6-flash", "the API's own hint is tried first");
+  assert.ok(
+    body.notes.some((n) => n.includes("retired") && n.includes("gemini-3.6-flash")),
+    `notes: ${JSON.stringify(body.notes)}`,
+  );
+  assert.equal(state.calls.length, 2);
+});
+
 test("POST /v1/speech returns a real WAV and caches it in R2", async () => {
   state.scenario = "audio";
   const env = envWith();

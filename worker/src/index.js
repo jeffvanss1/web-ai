@@ -471,7 +471,9 @@ async function handleText(request, env, body) {
 
   const timeoutMs = Math.max(5, Math.min(Number(body.timeoutMs) || 45, 120)) * 1000;
   const maxChars = Math.max(1, Math.min(Number(body.maxChars) || 600, 8000));
-  const models = modelList(body.model, env);
+  // `let`, not `const`: the ladder below replaces the list when the API names a
+  // replacement model. `handlePlan` is the same loop - keep the two in step.
+  let models = modelList(body.model, env);
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
