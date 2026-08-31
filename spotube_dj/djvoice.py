@@ -36,6 +36,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import wave
 from pathlib import Path
@@ -325,6 +326,47 @@ def _engine() -> str:
     return "gemini" if config.LLM_API_KEY else ""
 
 
+# HTTP statuses worth a short retry: a rate limit (429) or a transient server
+# blip (5xx) can clear in a couple of seconds. A 4xx like a bad key or a missing
+# model is NOT retried - that needs a human fix, and hammering it is pointless.
+_TRANSIENT_HTTP = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _post_retry(url: str, payload: dict, headers: dict, retries: int = 2, base_wait: float = 2.0) -> dict:
+    """POST to Gemini, retrying transient 429/5xx with a backoff.
+
+    The DJ pre-synthesizes at track start while the station-build / queue-topup
+    Gemini calls also run, so a short burst can trip the free-tier 429. A couple
+    of bounded retries let that pass instead of quietly silencing the DJ.
+    """
+    import brain
+    for attempt in range(retries + 1):
+        try:
+            return brain._post(url, payload, headers)
+        except urllib.error.HTTPError as e:
+            if e.code not in _TRANSIENT_HTTP or attempt >= retries:
+                raise
+            delay = base_wait * (2 ** attempt)        # 2s, 4s
+            try:
+                ra = float(e.headers.get("Retry-After") or 0)
+                if ra > 0:
+                    delay = ra
+            except Exception:
+                pass
+            delay = max(0.5, min(delay, 30.0))
+            _info(f"gemini (generateContent): HTTP {e.code} - retrying in {delay:.0f}s "
+                  f"(attempt {attempt + 1}/{retries})")
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt >= retries:
+                raise
+            delay = max(0.5, min(base_wait * (2 ** attempt), 30.0))
+            _info(f"gemini (generateContent): transient "
+                  f"{e.__class__.__name__} - retrying in {delay:.0f}s")
+            time.sleep(delay)
+    raise RuntimeError("unreachable")   # pragma: no cover
+
+
 def _gemini_synth(text: str, path: Path) -> bool:
     """Ask Gemini's speech model to speak `text` with the configured voice.
 
@@ -348,7 +390,7 @@ def _gemini_synth(text: str, path: Path) -> bool:
                            }
                        },
                    }}
-        data = brain._post(url, payload, brain._gemini_headers())
+        data = _post_retry(url, payload, brain._gemini_headers())
     except Exception as e:
         _info(f"gemini (generateContent) failed: {e.__class__.__name__}: {e}")
         return False
