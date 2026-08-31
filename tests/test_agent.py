@@ -227,6 +227,34 @@ class SpeechTests(unittest.TestCase):
         dj.player = None
         self.assertFalse(djvoice._wait_lead(dj, "v9"))
 
+    def test_lead_in_wait_does_not_bail_at_60s_on_a_normal_track(self):
+        # The clip is pre-synthesized at track START, so on a normal 3-5 min song
+        # _wait_lead must keep polling until the track nears its END (~lead secs
+        # before it ends). The old fixed-60s cap gave up mid-song and the DJ never
+        # spoke on anything longer than a minute. Advancing a 200s track one second
+        # per poll, the lead window (<=10s left) only arrives after polling well past
+        # 60s, and it must still fire.
+        import djvoice
+        from unittest import mock
+        dj = _dj()
+        clock = {"t": 0.0}
+        pos = {"v": 0.0}
+        def tick():
+            clock["t"] += 1.0
+            return clock["t"]
+        def progress():
+            pos["v"] = min(pos["v"] + 1.0, 200.0)
+            return (pos["v"], 200.0)
+        class P:
+            def progress(self): return progress()
+        dj.player = P()
+        with mock.patch.object(djvoice, "time") as tm:
+            tm.monotonic.side_effect = tick
+            tm.sleep.return_value = None
+            self.assertTrue(djvoice._wait_lead(dj, "v1"))
+        # prove the clock really did advance well past 60s before the lead window
+        self.assertGreater(clock["t"], 60.0)
+
     def test_lead_line_beats_the_intro_when_handing_over(self):
         import djvoice
         dj = _dj()

@@ -228,8 +228,15 @@ def _wait_lead(dj, current_id: str) -> bool:
     if prog is None:
         return False
     lead = lead_secs()
-    deadline = time.monotonic() + 60.0        # a hard cap so a dead beat cannot hang
-    while time.monotonic() < deadline:
+    # The clip is pre-synthesized at track START, so the wait must last the whole
+    # song to reach the lead-in window near its END - a fixed short cap only ever
+    # fired on sub-minute tracks and left every normal (3-5 min) song silent. Once
+    # we can read a length we bound the wait by that track's own remaining time
+    # (+ the lead + a small margin) so a dead beat cannot hang the thread forever;
+    # a skip/advance (or the main loop's stall watchdog) changes `current.id` and
+    # aborts anyway. Until we know the length we fall back to ~2 minutes.
+    deadline = time.monotonic() + 120.0
+    while True:
         if (dj.current or {}).get("id") != current_id:
             return False                      # advanced/skipped; the line is stale
         if getattr(dj, "paused", False):
@@ -240,13 +247,18 @@ def _wait_lead(dj, current_id: str) -> bool:
         except Exception:
             return False
         if not dur or dur <= 0:
+            if time.monotonic() >= deadline:
+                return False
             time.sleep(0.5)
             continue
         remaining = dur - pos
         if remaining <= min(lead, max(0.0, dur * 0.3)):   # short tracks lead sooner
             return True
+        # follow the song to its end: extend the bound past the remaining time
+        deadline = max(deadline, time.monotonic() + remaining + lead + 2.0)
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.25)
-    return False
 
 
 def _creative_line(dj, agent, next_up: bool = False) -> str:
