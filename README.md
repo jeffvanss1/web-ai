@@ -114,11 +114,8 @@ the same document the server sends.
 |---|---|
 | **Left - Your Library** | filter chips (`All / Music / Artists / Moods / Loved`), a *Recents ⇄ Name* sort, and the rows this app actually knows: what you heard (history), the artists the profile leans on with their love counts, the moods you asked for, your loved songs. Hover a row for `▶`; its `⋯` menu offers *Mix from this*, *Search for it* and *Forget this artist* - which drops the leaning and never the loved songs. |
 | **Top** | Back / forward over the four views, the search box (`What do you want to play?`), and a pill that always says which planner is live - `smart search: failed` in red when a key is saved and the calls are not working. |
-| **Middle** | The greeting the hour deserves, quick picks (your own moods and loved songs as tiles), the queue as a card grid with real artwork, and *Up next* as track rows with index,
-art, source note and duration, with a `✕` in its header that clears the list (the
-song that is playing keeps playing; with keep mixing on, the refill is queued straight
-away - on the job lane, never inside the button's own request). The header goes solid as you scroll; the row being heard gets animated bars instead of a number. |
-| **Right - Now playing** | The cover, who it is by, *why this song* in the DJ's own words, credits (channel, the search that found it, cached or streamed, the cache line) and *More by this artist* from your likes. The blurred cover behind the middle column is that same file. |
+| **Middle** | The greeting the hour deserves, quick picks (your own moods and loved songs as tiles), and *Made for you* as a card grid with real artwork. The queue is no longer here - it lives in the right-hand panel now, the way Spotify keeps it, so the middle is just the set being built. | 
+| **Right - Now playing + Queue** | The cover, who it is by, *why this song* in the DJ's own words, credits (channel, the search that found it, cached or streamed, the cache line), and *More by this artist* from your likes. Below that is the **Queue**: the up-next rows as compact rows with art, duration and a hover action cluster - `✕ Remove from queue`, `👎 Not for me`, `⋯`. Clicking a row plays it; the row being heard gets animated bars tinted to its cover instead of a number. The blurred, cover-coloured backdrop you see is the same artwork. |
 | **Bottom** | shuffle · prev · play/pause · next · repeat (`off → all → one`), a draggable seek bar with times, love, a `⋯` menu (pause/resume, *this is not for me*, unlove, leave the station, stop), Keep mixing, queue, the Spotube handoff, volume with mute, fullscreen. |
 
 Keys: `space` play/pause, `n`/`p` next/previous, `l` love, `s` shuffle, `r` repeat,
@@ -127,9 +124,17 @@ and typing in a box never steals a shortcut.
 
 Rows behave the way a listener expects, which is more than "double-click works":
 the play button slides out of the card on hover, `⋯` offers *Play now / Queue next /
-Love this / Start a station*, a loved row plays that song and mixes around it, and
-every one of those is one POST to `/api/action` - there is no client-side state that
-can drift from the engine.
+Love this / Start a station*, a loved row plays that song and mixes around it. A queue
+row also gets a `✕` and a `👎`: `✕` pulls that one track out of the queue, and `👎`
+records a real dislike - `-2.4` on the artist, written into the profile as
+`reason: "dislike"` - and removes the row, so the next mix leans away instead of
+re-proposing it. Every one of those is one POST to `/api/action`; there is no
+client-side state that can drift from the engine.
+
+The playing colour follows the artwork: the equaliser bars, the round play buttons
+and the seek bar read the cover's palette, so a warm record glows warm and a blue one
+blue. A track change crossfades the blurred backdrop (two layers trade opacity) rather
+than cutting between two album colours, which is what made it look like it stuttered.
 
 Album art is fetched for the rows you can see, and a tile of the track's initial on
 a per-artist colour is drawn whenever there is no art - so a blocked image host costs

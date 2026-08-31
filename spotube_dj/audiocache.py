@@ -9,8 +9,8 @@ signature, no 403 halfway through.
 
 So: while a track plays, the next couple are downloaded as m4a into
 ~/.spotube-dj/audio/, and the player is handed the local path when one exists.
-At ~128 kbps a 3-minute song is about 3 MB, so the default 512 MB ceiling is a
-hundred-plus tracks; oldest-out, because the DJ will not want them again.
+At ~128 kbps a 3-minute song is about 3 MB, so the default 2 GB ceiling is over
+six hundred tracks; oldest-out, because the DJ will not want them again.
 
 Two rules that keep this from being worse than not doing it:
   * one download at a time, rate-limited - a prefetch that saturates the pipe
@@ -34,7 +34,7 @@ import config
 _FORMAT = "bestaudio[ext=m4a]/bestaudio/best"
 _TIMEOUT = 240
 _LIMIT_RATE = "1500K"          # keep the playing stream's bandwidth free
-_DEFAULT_CAP_MB = 512
+_DEFAULT_CAP_MB = 2048
 
 _lock = threading.Lock()
 _start_lock = threading.Lock()   # only for creating/replacing the worker thread

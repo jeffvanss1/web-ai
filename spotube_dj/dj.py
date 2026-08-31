@@ -25,7 +25,21 @@ import taste
 
 # how much of a track you must hear before we count it as "enough"
 HEARD_ENOUGH = 0.72
+HEARD_FULL = 0.92
 HEARD_BARELY = 0.28
+
+
+def _ref(t: dict | None):
+    """A stable key for "which track is this" while we group/weave a set.
+
+    Prefer the catalog id (so a copied dict still matches its original), and fall
+    back to object identity for a row that never had a video id. The previous code
+    used bare `id()` everywhere, which is only correct while the very same dict
+    object is reused - a `dict(t)` copy silently stopped matching.
+    """
+    if isinstance(t, dict) and t.get("id"):
+        return t["id"]
+    return id(t)
 
 
 class Queue:
@@ -95,6 +109,27 @@ class Queue:
             n = len(self.items) - kept
             del self.items[kept:]
             return n
+
+    def remove_id(self, vid: str) -> dict | None:
+        """
+        Drop one queued row by its video id; -> the row, or None if it is not there.
+
+        Only rows at or after the cursor are removable - that is what "still
+        queued" means. The row being heard was already popped out of `items`
+        (so `pos` is the next one to play), and the rows before the cursor are
+        history that a Remove button must not touch. This is what a per-row
+        "Remove from queue" button needs that `clear_ahead()` does not offer:
+        one row, not everything after the cursor.
+        """
+        vid = str(vid or "")
+        if not vid:
+            return None
+        with self._lock:
+            for i in range(self.pos, len(self.items)):
+                t = self.items[i]
+                if str(t.get("id") or "") == vid:
+                    return self.items.pop(i)
+        return None
 
 
 # Words that appear in a *request* but never in a legit track title - if a
@@ -279,6 +314,10 @@ def build_queue(request: str, seed_refs: list[str] | None = None,
         "off_topic_filtered": filtered,
         "streams_dropped": streams,
         "spotify": "metadata on" if sp_available else "off (no client id)",
+        # the Daylist-style name for this set: mood/artist + time of day.
+        # `why` may be detached from the request (an LLM rewrote it), so prefer
+        # the query the set was actually built from when naming the vibe.
+        "vibe": taste.mix_vibe((request or "").strip() or ""),
     }
     return out, info
 
@@ -318,9 +357,9 @@ def _weave(rows: list[dict], mixed: list[dict], every: int = 3) -> list[dict]:
     """
     if not mixed:
         return list(rows)
-    pick = {id(t) for t in mixed}
-    plain = [x for x in rows if id(x) not in pick]
-    taste_rows = [x for x in rows if id(x) in pick]
+    pick = {_ref(t) for t in mixed}
+    plain = [x for x in rows if _ref(x) not in pick]
+    taste_rows = [x for x in rows if _ref(x) in pick]
     out: list[dict] = []
     while plain or taste_rows:
         out += plain[:every]
@@ -335,10 +374,10 @@ def _interleave(ranked: list[dict], buckets: list[list[dict]], count: int) -> li
     Round-robin across the query buckets so the set doesn't become 20 tracks
     from one search. Global artist cap keeps it from feeling repetitive.
     """
-    by_id = {id(t): t for t in ranked}
+    by_id = {_ref(t): t for t in ranked}
     queues: list[list[dict]] = []
     for b in buckets:
-        q = [t for t in b if id(t) in by_id]
+        q = [t for t in b if _ref(t) in by_id]
         q.sort(key=lambda x: -x.get("score", 0.0))
         if q:
             queues.append(q)
@@ -373,6 +412,10 @@ class DJ:
     # station names the row a "start a station from this song" set was built around.
     progress = None
     station = ""
+    # the exact song a station was built around (title/artist), so a refill keeps
+    # returning *that* vibe rather than the last typed mood or the general profile.
+    # On the class as well: status()/status reads it for doubles with DJ.__new__.
+    station_seed: dict | None = None
     # read by status() and next() on doubles built with DJ.__new__, so the defaults
     # live on the class and not only in __init__
     repeat = "off"
@@ -392,6 +435,7 @@ class DJ:
         self.headless = headless or backend == "none"
         self.player = None
         self.current: dict | None = None
+        self.station_seed: dict | None = None
         # "" while playing; "finished" / "no stream would start" when a move
         # could not be made. The panel needs the reason, not a blank box.
         self.idle = ""
@@ -410,6 +454,16 @@ class DJ:
         self.request = ""
         self.seed_refs: list[str] | None = None
         self.info: dict = {}
+        # The audio-advance loop must never block on the network/LLM. `_topup_async`
+        # runs the (potentially slow) refill on one daemon thread at a time and the
+        # play loop carries on, so a next-track that needs a mix-build starts the
+        # current track immediately instead of waiting for the planner.
+        self._refill: threading.Thread | None = None
+        self._refill_lock = threading.Lock()
+        # one advance at a time. `_topup_async` can finish and want to start the row
+        # it just queued from a background thread while the play loop is already
+        # mid-`next()`; without a guard both would pop and start two tracks.
+        self._advancing = threading.Lock()
         # bounded on purpose: `_note` is called from the refill loop, the search
         # lane and every click, and a --daemon that runs for a week would otherwise
         # carry a year of timestamps in RAM to serve the last 40 of them. A list
@@ -482,7 +536,12 @@ class DJ:
             taste.record_skip(t, "early-skip" if ratio < 0.35 else "skip")
             self._note(f"  learned: skipped by hand (heard {ratio * 100:.0f}%)")
             return
-        if ratio >= HEARD_ENOUGH:
+        if ratio >= HEARD_FULL:
+            # heard the whole thing - the strongest signal there is, so it counts
+            # harder than a track that merely crossed the "enough" line
+            taste.record_like(t, strength=1.6)
+            self._note(f"  learned: loved (heard {ratio*100:.0f}%)")
+        elif ratio >= HEARD_ENOUGH:
             taste.record_like(t)
             self._note(f"  learned: liked (heard {ratio*100:.0f}%)")
         elif ratio <= HEARD_BARELY:
@@ -514,13 +573,26 @@ class DJ:
         # typed nothing got a queue that never refilled - the taste model had the
         # answer and nobody asked it. `run()` also leans on this call, so the same
         # gate silently turned "--daemon" into "plays one track and stops".
-        request = self.request or str(config.load_state().get("last_request") or "")
+        request = ""
         pool: list[dict] = []
         info: dict = {}
-        if request:
-            tracks, info = build_queue(request, seed_refs=self.seed_refs,
+        # A station refills toward the song it was built around, not the last typed
+        # mood ("if i station the queue for certain music, the next queue must be
+        # similar or related to the vibes, not general vibes"). The seed travels
+        # with build_queue so the planner keeps returning that song's neighbours.
+        if self.station and self.station_seed:
+            request = f"more like {self.station}"
+            tracks, info = build_queue(request, seeds=[self.station_seed],
                                        count=keep * 2)
             pool += tracks or []
+            # don't re-ask the station's own queries on the next refill
+            self._mix_used |= set(info.get("queries") or [])
+        else:
+            request = self.request or str(config.load_state().get("last_request") or "")
+            if request:
+                tracks, info = build_queue(request, seed_refs=self.seed_refs,
+                                           count=keep * 2)
+                pool += tracks or []
         mixed: list[dict] = []
         if self.auto:
             mixed = self._auto_mix(keep)
@@ -547,6 +619,33 @@ class DJ:
         n_mix = sum(1 for x in fresh if x.get("mixed"))
         self._note(f"queue topped up: +{len(fresh)} tracks"
                    + (f" ({n_mix} from what you like)" if n_mix else ""))
+
+    def _topup_async(self, keep: int = 12, force: bool = False) -> None:
+        """
+        Refill the queue on a background thread, never holding the play loop.
+
+        `next()` calls this instead of `_topup()` directly. The user-facing fix was
+        "the audio freezes while the AI is processing the queue": when the queue ran
+        low, a track change ran `build_queue` -> `brain.plan` (an LLM HTTP call, 5-30 s)
+        synchronously on the DJ loop, so the next song waited for the planner and the
+        player sat silent. Now the next row starts what is already queued and the
+        refill happens alongside it. `_start_if_idle` restarts playback if this fill
+        is what first gave the queue something to play.
+        """
+        with self._refill_lock:
+            if self._refill is not None and self._refill.is_alive():
+                return                  # one refill at a time; the running one covers it
+            def work():
+                before = len(self.queue.items)
+                try:
+                    self._topup(keep=keep, force=force)
+                except Exception as e:
+                    # a failed refill must never end the loop or go un-reported
+                    self._note(f"[warn] background top-up failed: "
+                               f"{e.__class__.__name__}: {e}")
+                self._start_if_idle(len(self.queue.items) - before)
+            self._refill = threading.Thread(target=work, daemon=True)
+            self._refill.start()
 
     def _fresh(self, tracks: list[dict]) -> list[dict]:
         """
@@ -584,7 +683,16 @@ class DJ:
         loved"; the exception is an artist you loved *twice*, which is a much
         stronger signal than one heart and can carry a couple of rows.
         """
-        qs = taste.next_queries(avoid=sorted(self._mix_used), limit=4)
+        if self.station:
+            # a station's auto-DJ keeps searching *around* the seed, not the whole
+            # library - the "general vibes" the report was about. Fall back to the
+            # profile only when the seed itself has nothing searchable, so the queue
+            # never dead-ends on an obscure one-off.
+            qs = self._station_queries(limit=4)
+            if not qs:
+                qs = taste.next_queries(avoid=sorted(self._mix_used), limit=4)
+        else:
+            qs = taste.next_queries(avoid=sorted(self._mix_used), limit=4)
         if not qs:
             return []
         want = max(4, keep // 2)        # a top-up that returns one row is noise
@@ -620,6 +728,45 @@ class DJ:
                 break                   # enough for this refill; the next one widens
         return out
 
+    def _station_queries(self, limit: int = 4) -> list[str]:
+        """
+        Widen a station beyond the seed's own top songs, without a similarity API.
+
+        `build_queue` already searches "<artist> top songs" for the seed; these are
+        the *neighbours* - the radio/essential/related phrasings YouTube indexes,
+        and a "more like this exact song" anchor. They are the query-driven stand-in
+        for "fans also like", which the project deliberately does not scrape off the
+        internal YTM browse endpoint (it is undocumented and changes shape).
+
+        Returns [] when the seed has nothing to go on, so the caller can fall back
+        to the profile rather than guessing.
+        """
+        seed = self.station_seed or {}
+        artist = str(seed.get("artist") or "").split(",")[0].strip()
+        title = str(seed.get("title") or "").strip()
+        used = {taste.norm(q) for q in self._mix_used}
+        out: list[str] = []
+
+        def add(q: str) -> None:
+            q = " ".join((q or "").split()).strip()
+            if q and taste.norm(q) not in used and len(out) < limit:
+                used.add(taste.norm(q))
+                out.append(q)
+
+        if artist:
+            add(f"radio {artist}")
+            add(f"{artist} essential songs")
+            add(f"similar to {artist}")
+            add(f"{artist} hits")
+        if title and artist:
+            # anchor on the exact track, so a station that was started from a deep
+            # cut finds that cut's mood, not just the band's biggest hits
+            add(f"more like {title} {artist}")
+        if not out:
+            # no artist on the seed: point the refill at the words we do have
+            add("more like " + (title or artist or "that song"))
+        return out
+
     LOG_LINES = 400      # what one DJ process keeps in memory for the log drawer
 
     # Signed googlevideo URLs expire (usually ~6h); refresh well before that.
@@ -643,8 +790,13 @@ class DJ:
     def start(self, request: str, seed_refs: list[str] | None = None,
               count: int = 20, extra_queries: list[str] | None = None,
               on_progress=None) -> dict:
+        prev = self.request
         self.request = request
         self.seed_refs = seed_refs
+        # a typed mood is its own vibe: leaving a station's seed attached here would
+        # keep the refill drifting toward the station instead of what was just asked
+        self.station = ""
+        self.station_seed = None
         config.touch_last_request(request)
         self._note(f"planning: {request!r}")
         tracks, info = build_queue(request, seed_refs=seed_refs, count=count,
@@ -655,6 +807,14 @@ class DJ:
         if not tracks:
             self._note("no candidates found - try a different phrasing")
             return {"ok": False, "info": info, "tracks": []}
+        # a new request is its own vibe: drop the previous request's queued rows so
+        # the next thing heard is *this* search's set, not a blend of the last one
+        # ("search 'sad lofi' then 'high energy' should be two different mixes").
+        # The audible track keeps playing (clear_ahead only clears past the cursor),
+        # and we only clear once we know there are new rows, so a search that finds
+        # nothing never wipes a queue someone was still enjoying.
+        if prev and prev != request:
+            self.queue.clear_ahead()
         self.queue.extend(tracks)
         self._note(f"{info['engine']}: {info['why'] or 'queued'}")
         self._note(f"queries: {', '.join(info['queries'][:6])}")
@@ -683,6 +843,10 @@ class DJ:
         Returns {"ok", "reason", "tracks", "info"}. The empty-profile case answers
         with a sentence, because "the queue is empty" is not information.
         """
+        # "make a mix" is a fresh set from the whole profile, not a continuation of
+        # whatever station was playing, so the station's seed must not steer it
+        self.station = ""
+        self.station_seed = None
         state = config.load_state()
         liked = [{"title": r.get("display_title") or r.get("title") or "",
                   "artist": r.get("display_artist") or r.get("artist") or ""}
@@ -716,6 +880,11 @@ class DJ:
                        "more songs, or type a mood to widen the net")
             return {"ok": False, "reason": "nothing new found", "tracks": [],
                     "info": info}
+        # a fresh "make a mix" is its own set, not a blend of whatever a previous
+        # request left queued - same rule as start(), so switching vibe is one press.
+        # This deliberately does NOT re-run a typed request: mix is "from my likes",
+        # it is not a refinement of the last search.
+        self.queue.clear_ahead()
         self.queue.extend(_spread(fresh))
         # a count belongs in the log: "mixing from your likes" on its own reads like
         # a promise the app never closed, and this is the line both skins show
@@ -723,19 +892,21 @@ class DJ:
         self._start_if_idle(len(fresh))
         return {"ok": True, "tracks": fresh, "info": info}
 
-    def radio_from(self, track: dict | None, count: int = 20) -> dict:
+    def radio_from(self, track: dict | None, count: int = 20,
+                   replace: bool = False) -> dict:
         """
         "Start a station from this song", for both skins.
 
         One row of the queue becomes the seed: the planner is told the artist and
         title, `build_queue` adds the "<artist> top songs" searches that actually
         return that artist's music, and the taste ranking then pulls in the
-        neighbours. It lands in the queue rather than replacing it, so pressing it
-        mid-album cannot lose the rest of what you were about to hear.
+        neighbours.
 
-        It used to be duplicated in each skin, and both copies were broken in their
-        own way - the Tk one passed a keyword that did not exist, the web one built
-        a station nobody ever started.
+        By default it lands in the queue rather than replacing it, so pressing a
+        station mid-album cannot lose the rest of what you were about to hear. With
+        `replace=True` (a plain pick of a song) the tracks queued ahead of it are
+        dropped and the next ones come from this build - "if i chose a song, the
+        songs next to it build around it".
         """
         t = track or {}
         if not (t.get("title") or t.get("artist") or t.get("channel")):
@@ -745,6 +916,10 @@ class DJ:
         seed = {"title": t.get("title", ""), "artist": t.get("artist") or t.get("channel", ""),
                 "url": t.get("url", "")}
         self.station = label
+        # the refill needs the seed, not just the label string: an off-theme queue
+        # was the report, and the root cause was _topup consulting the *previous*
+        # request (or the general profile) instead of the song the station is about
+        self.station_seed = seed
         self._note(f"building a station around: {label}")
         try:
             tracks, info = build_queue(f"more like {label}", count=count, seeds=[seed],
@@ -753,7 +928,7 @@ class DJ:
             self._note(f"[warn] the station could not be built: {e.__class__.__name__}: {e}")
             return {"ok": False, "reason": f"{e.__class__.__name__}", "tracks": []}
         self.info = dict(self.info or {})
-        self.info.update({k: info[k] for k in ("engine", "why", "queries") if k in info})
+        self.info.update({k: info[k] for k in ("engine", "why", "queries", "vibe") if k in info})
         # a station should persist: if there was no mood at all, this becomes it
         self.request = self.request or f"more like {label}"
         fresh = self._fresh(tracks)
@@ -762,6 +937,10 @@ class DJ:
                        "different row")
             return {"ok": False, "reason": "nothing similar found", "tracks": [],
                     "info": info}
+        if replace:
+            # the picked song is the anchor: what was queued after it is dropped so
+            # the next tracks are *this* build, not the mix it happened to sit in
+            self.queue.clear_ahead()
         self.queue.extend(_spread(fresh, cap=2))
         self._note(f"station ready: {len(fresh)} tracks around {label}")
         self._start_if_idle(len(fresh))
@@ -788,13 +967,31 @@ class DJ:
         dead. A forced call drops the hold and tries once more (re-holding if it
         still fails), which is why a manual skip must pass force=True.
         """
+        # If the play loop (or the background refill) is already moving to the next
+        # row, this call is a no-op rather than a second advance. The no-op returns
+        # None, which the caller that raced in treats as "didn't move" and retries on
+        # the next tick - so nothing is ever skipped or double-started.
+        if not self._advancing.acquire(blocking=False):
+            return None
+        try:
+            return self._next_locked(force)
+        finally:
+            self._advancing.release()
+
+    def _next_locked(self, force: bool = False) -> dict | None:
+        """Body of `next`, run only while holding the single-advance guard."""
+        # was anything playing when we were asked to move? The very first track
+        # (came up from idle/empty) gets an intro now; every later advance is a
+        # hand-off, so the DJ leads into the NEXT song ~lead seconds before this
+        # one ends instead of talking after it started.
+        was_playing = bool(self.current)
         if self._hold_until and time.time() < self._hold_until:
             if not force:
                 return None
             self._hold_until = 0.0
             self._note("manual change during the cooldown - retrying the resolver now")
         self._learn_from_heard()
-        self._topup()
+        self._topup_async()
         if self.repeat == "one" and not force and self.current:
             # repeat-one is about a track ending, not about a button: pressing next
             # still moves on, exactly like the player everybody already knows
@@ -831,6 +1028,22 @@ class DJ:
                                        "query": t.get("query", "")})
                 self._note(f"playing: {self._label(t)}"
                            + ("  [from cache]" if t.get("from_cache") else ""))
+                # the DJ says why this song is playing and what's next, out loud,
+                # over the music. It's a nicety (it degrades to silence if there is
+                # no TTS/player), so a fault here must never stop the song. The
+                # line is captured synchronously; the synth/play happens on a
+                # background thread so it cannot stall the engine.
+                if not self.headless and self.player:
+                    try:
+                        import djvoice
+                        if was_playing:
+                            # a hand-off: lead into the next song before this ends
+                            djvoice.schedule_next(self)
+                        else:
+                            # the very first track of a set: introduce it now
+                            djvoice.speak_intro(self)
+                    except Exception:
+                        pass
                 # while this one plays, the next two go onto disk - at the *front* of
                 # the lane. Appending behind rows from the end of the set is what made
                 # an active skipper wait: the row they were about to hear was 14th in

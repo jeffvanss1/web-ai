@@ -36,6 +36,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import agent as agent_mod
 import config
 import covers
 import player as player_mod
@@ -55,6 +56,7 @@ TICK = 0.7
 def row_view(t: dict, *, note: str = "", liked: bool | None = None) -> dict:
     """One queue/search row, as the page draws it (never a raw internal dict)."""
     t = t or {}
+    thumb = str(t.get("thumbnail") or "")
     out = {
         "id": str(t.get("id") or ""),
         "title": str(t.get("title") or "?"),
@@ -63,10 +65,26 @@ def row_view(t: dict, *, note: str = "", liked: bool | None = None) -> dict:
         "dur": vm.mmss(t.get("duration") or 0) if t.get("duration") else "",
         "found": str(t.get("query") or ""),        # which search turned this up
         "cached": bool(t.get("cached") or t.get("from_cache")),
-        "art": "",                       # the 40px list slot, filled by the lane
-        "art_card": "",                  # and the 190px grid slot, same thread
-        "note": note,
+        # the row's own cover is shown immediately (a search/album/discography row
+        # carries one); the artwork lane still upgrades it to the cached album art
+        # when that lands, and to nothing smarter if the row has no url
+        "art": thumb if thumb.startswith("http") else "",
+        "art_card": thumb if thumb.startswith("http") else "",
+        # the raw innerTube thumbnail rides along too, so the page's art() has a
+        # last-resort URL even if some later pass blanked the two slots above: a
+        # queue row or an album-page row that only carried `thumbnail` must still
+        # be dressed rather than drawn as a tinted initial.
+        "thumbnail": thumb if thumb.startswith("http") else "",
+        # a page row may carry its own badge (a discography entry's year, an album
+        # track's record name); an explicit `note` from the caller wins, else use it
+        "note": note or (str(t.get("note") or "") if isinstance(t.get("note"), str)
+                         else ""),
     }
+    # page rows are not always a playable song: a discography entry is an *album*
+    # that opens on a click, so its kind / browse id / record facts travel with it
+    for extra in ("kind", "album", "browse_id", "release_year"):
+        if t.get(extra) is not None:
+            out[extra] = t[extra]
     if liked is not None:
         out["liked"] = bool(liked)
     return out
@@ -180,6 +198,14 @@ def settings_view() -> dict:
             "base": str(config.LLM_BASE_URL or data.get("LLM_BASE_URL") or ""),
             "model": str(data.get("LLM_MODEL") or config.LLM_MODEL
                          or config.GEMINI_DEFAULT_MODEL),
+            "dj_voice": config.load_dj_voice(),
+            "dj_lang": config.load_dj_lang(),
+            "dj_langs": list(config.DJ_LANG_CHOICES),
+            "dj_voice_model": str(config.GEMINI_DEFAULT_TTS_MODEL),
+            "dj_voices": [{"name": name, "gender": gender, "trait": trait,
+                           "lang": lang if lang != "English" else ""}
+                          for name, gender, trait, lang in config.GEMINI_TTS_VOICES],
+            "dj_lead": float(config.DJ_LEAD_SECS or 10.0),
             "engine": brain.configured_engine(),
             "note": brain.why_offline()}
 
@@ -213,6 +239,14 @@ def engine_pill(info: dict) -> str:
         if head:
             return head[:34]
     return note[:34]
+
+
+def dj_line(ctx) -> str:
+    """A short Spotify-DJ-style line: why this song is playing + what's next."""
+    try:
+        return agent_mod.narrate(agent_mod.dj_snapshot(ctx))
+    except Exception:
+        return ""                       # a broken snapshot must not take the page down
 
 
 def find_track(ctx, tid: str) -> dict | None:
@@ -291,6 +325,11 @@ def build_state(ctx) -> dict:
         note = "cached" if t.get("cached") else ("from your likes" if t.get("mixed") else "")
         rows.append(row_view(t, note=note))
     now = row_view(np, liked=dj.is_liked(np)) if np else {}   # {} = nothing playing
+    if now:
+        # album / release-year are fetched once per track on a background lane and
+        # merged in here, so the Credits block can name the record without ever
+        # holding the state socket open
+        now = {**now, **ctx.meta_for(np)}
     idle = str(st.get("idle") or "")
     why = {"finished": "the queue ran out - press Play or type a mood to keep going",
            "no stream would start": ("this song is still playing; the next few streams "
@@ -316,11 +355,24 @@ def build_state(ctx) -> dict:
     # and request_art is a dict probe per row, so calling it every tick is free.
     # card first: it is what the eye is on, and once a 256px file exists a 40px row
     # borrows it instead of downloading a second copy of the same picture
-    ctx.request_art(upcoming, "card", limit=12)
-    ctx.request_art(upcoming, "row", limit=14)
-    ctx.request_art(lib_loved + lib_recents, "card", limit=10)
+    # Warm every row a person can see, not just the first screenful. The old caps
+    # (12 card / 14 row) were the "covers don't show on every song" report: a 40
+    # track queue dressed the first screen, and the rows past the cap stayed as
+    # coloured initials for the whole session. The lane is still bounded by its
+    # own queue size and the seen-set, so this is "all of them in order", not
+    # "an unbounded burst".
+    ctx.request_art(upcoming, "card", limit=200)
+    ctx.request_art(upcoming, "row", limit=200)
+    ctx.request_art(lib_loved + lib_recents, "card", limit=60)
+    ctx.request_art(lib_loved + lib_recents, "row", limit=60)
     if np:
         ctx.request_art([np], "big", limit=1)
+    # the in-app album/artist page: warm the covers too, so an album tracklist or a
+    # discography is dressed rather than a column of initial tiles
+    if isinstance(ctx.page, dict) and ctx.page.get("rows"):
+        pg_rows = [x for x in ctx.page["rows"] if (x or {}).get("id")]
+        ctx.request_art(pg_rows, "card", limit=60)
+        ctx.request_art(pg_rows, "row", limit=60)
     return {
         "now": now,
         "up_next": rows,
@@ -329,11 +381,18 @@ def build_state(ctx) -> dict:
         "duration": float(st.get("duration") or 0),
         "paused": bool(st.get("paused")),
         "auto": bool(st.get("auto")),
+        "autoplay": bool((dj.state or {}).get("autoplay")),
+        "voice": bool((dj.state or {}).get("voice", True)),
+        "voice_note": (("gemini · " + config.load_dj_voice() + " · " +
+                        config.load_dj_lang()) if config.LLM_API_KEY
+                       else "off (no key)"),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
         "idle": idle,
         "idle_note": why,
         "why": why,
+        "vibe": str((dj.info or {}).get("vibe") or ""),   # "lofi tuesday night"
+        "dj_line": dj_line(ctx),    # the DJ says why this song + what's next
         "request": str(st.get("request") or ""),
         "queries": list(st.get("queries") or []),
         "engine_note": engine_note(dj.info),
@@ -347,6 +406,7 @@ def build_state(ctx) -> dict:
                    "q": str(ctx.search.get("q") or ""),
                    "note": str(ctx.search.get("note") or ""),
                    "rows": [row_view(t) for t in (ctx.search.get("rows") or [])]},
+        "page": dict(ctx.page) if ctx.page else None,
         "loved": loved_rows(state=prof),
         "station": str(st.get("station") or ""),
         "repeat": str(st.get("repeat") or "off"),
@@ -394,11 +454,19 @@ def with_art(state: dict, ctx) -> dict:
     lib = state.get("library")
     if isinstance(lib, dict):
         lists += [lib.get(key) or [] for key in ("loved", "recents")]
+    if isinstance(state.get("page"), dict):
+        lists.append(state["page"].get("rows") or [])
     for rows in lists:
         for t in rows:
             if not isinstance(t, dict):
                 continue
             for slot, size in (("art", "row"), ("art_card", "card")):
+                # the artwork lane's own file is preferred the moment it exists: it is
+                # served from this same origin (so it never fights a cross-origin image
+                # CDN that some browsers/network paths refuse), and at `card` size it is
+                # the album art rather than a video frame. Until a file is on disk the
+                # row's own thumbnail (or nothing) shows, so a good picture is never
+                # replaced by a *worse* one before the lane has something better.
                 href = ctx.art_href(t.get("id") or "", size)
                 if href:
                     t[slot] = href
@@ -417,12 +485,17 @@ class Context:
         self.dj = dj
         self.volume = int(volume)
         self.search = {"pending": False, "q": "", "rows": [], "note": ""}
+        # the in-app album/artist page: filled on a background thread the same way
+        # search is, so opening "See album" or an artist never holds the socket.
+        self.page = None            # {"kind","title","sub","rows","pending",...} or None
+        self._page_seq = 0
         self._search_seq = 0                  # which search is allowed to land
         self.job = None                       # the thread building a mix
         self._job_lock = threading.Lock()     # who is allowed to start the next one
         self.art: queue.Queue = queue.Queue(maxsize=128)   # (track, size) pairs
-        self._seen_art: set[tuple[str, str]] = set()       # already drawn
+        self._seen_art: set[tuple[str, str]] = set()       # already drawn / gave up
         self._want_art: set[tuple[str, str]] = set()       # queued, not drawn yet
+        self._art_retry: dict[tuple[str, str], int] = {}   # (id, size) -> miss count
         try:
             # a cover that lands late still has to reach the page; this callback runs
             # on the covers thread and only touches the two dicts below
@@ -430,6 +503,16 @@ class Context:
         except Exception:
             pass
         self._hrefs: dict[str, dict[str, str]] = {}    # id -> {size: artwork href}
+        self._meta: dict[str, dict] = {}               # id -> {album, release_year, ...}
+        self._meta_inflight: set[str] = set()          # ids being fetched right now
+        # metadata lookups run on ONE worker, not a thread per unseen id: a 40-row
+        # queue used to spawn 40 subprocesses at once (each a yt-dlp metadata call),
+        # which is the kind of burst that makes a laptop fan scream and a server fall
+        # over. One paced lane keeps it stable; `_meta_inflight` still dedupes. The
+        # queue is bounded so a feed that outruns the lane (say, a 200-row album page
+        # that wants Credits for every row) drops old asks instead of growing memory.
+        self._meta_queue: queue.Queue = queue.Queue(maxsize=64)
+        self._meta_started = False            # the lane starts on first need
         self._subs: list[queue.Queue] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -478,6 +561,54 @@ class Context:
             return {"row": have}
         return have if isinstance(have, dict) else {}
 
+    def meta_for(self, track) -> dict:
+        """
+        The album / release-year facts for one track, or {} before they land.
+
+        Called from build_state every tick, so it has to be a dict lookup. The first
+        time an id is seen a background thread fetches it once (yt-dlp on the video's
+        own metadata, ~1 s at most) and caches it; a slow or missing answer is a blank
+        line in Credits, never a stalled /api/state. This deliberately never blocks the
+        state socket, the same rule the artwork lane follows.
+        """
+        vid = str((track or {}).get("id") or "") if isinstance(track, dict) else ""
+        if not vid:
+            return {}
+        with self._lock:
+            if vid in self._meta:
+                return dict(self._meta[vid])
+            if vid not in self._meta_inflight:
+                self._meta_inflight.add(vid)
+                try:
+                    self._meta_queue.put_nowait(vid)
+                except queue.Full:
+                    self._meta_inflight.discard(vid)   # full: retry next tick
+                    return {}
+                if not self._meta_started:
+                    self._meta_started = True
+                    threading.Thread(target=self._meta_loop, daemon=True).start()
+        return {}
+
+    def _fetch_meta(self, vid) -> None:
+        """One best-effort album/release-year lookup, cached under the id."""
+        try:
+            meta = prov.yt_track_meta(vid)
+        except Exception:
+            meta = {}
+        with self._lock:
+            self._meta[vid] = meta
+            self._meta_inflight.discard(vid)
+
+    def _meta_loop(self) -> None:
+        """One paced lane for album/release-year lookups (never a thread per row)."""
+        while not self._stop.is_set():
+            try:
+                vid = self._meta_queue.get(timeout=0.4)
+            except queue.Empty:
+                continue
+            if not self._stop.is_set():
+                self._fetch_meta(vid)
+
     def request_art(self, tracks, size: str = "row", limit: int = 14) -> int:
         """
         Tell the artwork lane which rows still have no picture at `size`.
@@ -494,7 +625,8 @@ class Context:
             for t in tracks:
                 if wanted >= limit:
                     break
-                vid = str((t or {}).get("id") or "") if isinstance(t, dict) else ""
+                t = t if isinstance(t, dict) else {}
+                vid = str(t.get("id") or "")
                 if not vid or (vid, size) in self._seen_art:
                     continue
                 if self._slots(vid).get(size) or (vid, size) in self._want_art:
@@ -518,12 +650,20 @@ class Context:
         name = Path(text).name
         return "/art/" + name if ART_NAME.match(name) else ""
 
-    def _store_href(self, vid: str, path: str, size: str = "row") -> None:
+    def _store_href(self, vid: str, path: str, size: str = "row") -> bool:
+        """
+        Record one cached picture for a row, and say whether it stored.
+
+        Returns False when there was nothing to store (no path, not a safe name),
+        which is the signal `_art_loop` uses to know a fetch *failed* and should
+        be retried rather than remembered as "this row has no art".
+        """
         href = self._href_for(path)
         if not vid or not href:
-            return
+            return False
         with self._lock:
             self._hrefs.setdefault(str(vid), {})[size] = href
+        return True
 
     def _art_loop(self) -> None:
         # Two sources, in the order that makes the window look right: the Cover Art
@@ -541,17 +681,32 @@ class Context:
             self._want_art.discard((vid, size))
             if not vid or (vid, size) in self._seen_art:
                 continue
-            self._seen_art.add((vid, size))
             current = vid == str((self.dj.current or {}).get("id") or "")
             # the picture that can be shown *now* is fetched first: a frame off the
             # video CDN answers in ~15 ms, while the archive hop is MusicBrainz (paced
             # at one call per second, per its docs), a redirect, then the image - and
             # doing that first is what made a page of fresh tracks take minutes to
             # dress. The archive still wins when it lands, through the notifier below.
+            stored = False
             try:
-                self._store_href(vid, thumbs.get(t, size), size)
+                stored = self._store_href(vid, thumbs.get(t, size), size)
             except Exception:
-                pass                     # no art is a look, not a failure
+                stored = False          # no art is a look, not a failure
+            if stored:
+                # a real file landed: done with this slot, and clear the miss count
+                self._seen_art.add((vid, size))
+                self._art_retry.pop((vid, size), None)
+            else:
+                # no picture *yet* (CDN miss, ffmpeg absent, a row that just showed
+                # up). Retry a bounded number of times so a transient miss does not
+                # leave the row as a coloured initial forever, then give up so the
+                # tick does not keep re-asking for a cover that does not exist.
+                tries = self._art_retry.get((vid, size), 0) + 1
+                if tries >= 3:
+                    self._seen_art.add((vid, size))
+                    self._art_retry.pop((vid, size), None)
+                else:
+                    self._art_retry[(vid, size)] = tries
             try:
                 covers.remember_track(t)          # one album may dress its whole set
                 # the card slot is where a wrong cover shows most, so the archive is
@@ -712,13 +867,40 @@ def action_radio(ctx, fields: dict) -> str:
 
 
 def action_play_row(ctx, fields: dict) -> str:
-    t = _row_ids(ctx).get((fields.get("id") or [""])[0])
+    tid = str((fields.get("id") or [""])[0])
+    t = _row_ids(ctx).get(tid)
     if not t:
         return "that row is gone"
     q = ctx.dj.queue
+    # "what if i chose a song? the songs next to it build around it" - a plain pick
+    # of a song anchors the queue: the upcoming rows are replaced by a tight build
+    # around this exact song (radio/similar-to), not left as whatever mix the song
+    # happened to sit in. The anchor is set *before* the track is started, so even
+    # the refill `next()` triggers reads this song and keeps the queue on its vibe,
+    # and it stays set if a build is already running - the set is then built off the
+    # socket's thread.
+    label = f"{t.get('artist') or t.get('channel') or ''} - {t.get('title')}".strip(" -")
+    ctx.dj.station = label
+    ctx.dj.station_seed = {"title": t.get("title", ""),
+                           "artist": t.get("artist") or t.get("channel", ""),
+                           "url": t.get("url", "")}
+    # A queued row clicked again used to be copied on top of itself: the original
+    # stayed ahead of the cursor, so the same song came up twice in a row. Drop it
+    # from wherever it sits first, then put the one copy at the head and play it.
+    q.remove_id(tid)
     q.insert_at(q.pos, dict(t))
     ctx.dj.next(force=True)
-    return f"playing {t.get('title')}"
+    def job():
+        try:
+            ctx.dj.radio_from(dict(t), count=20, replace=True)
+        except Exception as e:
+            ctx.dj._note(f"[warn] building around '{t.get('title')}' failed: "
+                         f"{e.__class__.__name__}: {e}")
+    if not ctx.start_job(job):
+        # a build is already running; the picked song plays and the anchor is set, so
+        # when the queue runs low the refill still builds around it
+        return f"playing {t.get('title')} - anchored on {label or 'this'}; the set is building"
+    return f"playing {t.get('title')} - building {label or 'similar'} around it"
 
 
 def action_queue_next(ctx, fields: dict) -> str:
@@ -737,6 +919,45 @@ def action_row_love(ctx, fields: dict) -> str:
     taste.record_like(t)
     ctx.dj.state = config.load_state()      # same reload DJ.like() does
     return "loved - it will pull the mix that way"
+
+
+def action_row_remove(ctx, fields: dict) -> str:
+    """
+    Remove one row from the queue, leaving the song that is playing alone.
+
+    The row a person clicks is in the queue by id; `remove_id` only drops things
+    at or after the cursor, so it can never delete the audible track or rewrite
+    history. The answer says what left the list, which is the one fact a Remove
+    button has to be honest about - a silent success looks like a dead button.
+    """
+    t = _row_ids(ctx).get((fields.get("id") or [""])[0])
+    if not t:
+        return "that row is gone"
+    removed = ctx.dj.queue.remove_id(str(t.get("id") or ""))
+    if not removed:
+        return "that row is no longer queued - the song here already left the list"
+    ctx.dj._note(f"removed from queue: {removed.get('title') or '?'}")
+    return f"removed '{removed.get('title') or '?'}' from the queue"
+
+
+def action_row_dislike(ctx, fields: dict) -> str:
+    """
+    The explicit "never again" on one row: teaches the taste model and removes it.
+
+    This is the complement of the heart. A dislike is a *verdict*, not just a
+    skip: it drops the row from the queue and the artist/title weight in the
+    profile, so the next mix leans away from that sound instead of re-proposing
+    it. The row is removed from the queue either way - a track you pressed 👎 on
+    should not sit in the list waiting to play.
+    """
+    t = _row_ids(ctx).get((fields.get("id") or [""])[0])
+    if not t:
+        return "that row is gone"
+    taste.record_dislike(t)
+    ctx.dj.state = config.load_state()      # same reload DJ.like() does
+    ctx.dj.queue.remove_id(str(t.get("id") or ""))
+    ctx.dj._note(f"disliked: {t.get('title') or '?'}")
+    return f"won't suggest '{t.get('title') or '?'}' again"
 
 
 def action_like(ctx, fields: dict) -> str:
@@ -798,6 +1019,50 @@ def action_auto(ctx, fields: dict) -> str:
     return "keep mixing: on" if want else "keep mixing: off"
 
 
+def action_autoplay(ctx, fields: dict) -> str:
+    """
+    Whether opening the app should start a mix and play, or wait for a press.
+
+    The complaint was "when the first start the queue start mixing and playing even
+    i dont start the button yet". One tap stops that; the setting is persisted in
+    the same state file as volume/repeat, so it sticks across reloads.
+    """
+    raw = str((fields.get("on") or [""])[0]).strip().lower()
+    cur = bool((ctx.dj.state or {}).get("autoplay"))
+    if raw in _ON:
+        want = True
+    elif raw in _OFF:
+        want = False
+    elif raw in ("", "toggle", "flip"):
+        want = not cur
+    else:
+        return (f"{raw[:12]!r} is not on or off - autoplay is already "
+                f"{'on' if cur else 'off'}")
+    ctx.dj.state["autoplay"] = want
+    config.save_state(ctx.dj.state)
+    return ("autoplay on - it starts a mix on open" if want
+            else "autoplay off - press Play or type a mood first")
+
+
+def action_voice(ctx, fields: dict) -> str:
+    """Turn the spoken DJ on/off. Persisted with autoplay/volume/repeat."""
+    raw = str((fields.get("on") or [""])[0]).strip().lower()
+    cur = bool((ctx.dj.state or {}).get("voice", True))
+    if raw in _ON:
+        want = True
+    elif raw in _OFF:
+        want = False
+    elif raw in ("", "toggle", "flip"):
+        want = not cur
+    else:
+        return (f"{raw[:12]!r} is not on or off - the DJ voice is already "
+                f"{'on' if cur else 'off'}")
+    ctx.dj.state["voice"] = want
+    config.save_state(ctx.dj.state)
+    return ("the DJ will talk about the songs now" if want
+            else "the DJ voice is off - it only shows the line")
+
+
 def action_open(ctx, fields: dict) -> str:
     """
     Hand the current track to a real client: Spotube or the browser.
@@ -808,8 +1073,8 @@ def action_open(ctx, fields: dict) -> str:
     not resume a player the user paused on purpose.
     """
     t = ctx.dj.current or {}
-    url = t.get("url") or (f"https://music.youtube.com/watch?v={t.get('id')}"
-                           if t.get("id") else "")
+    url = (fields.get("url") or [""])[0] or t.get("url") or \
+        (f"https://music.youtube.com/watch?v={t.get('id')}" if t.get("id") else "")
     if not url:
         return "nothing playing to open"
     return "" if player_mod.open_externally(url) else \
@@ -937,7 +1202,52 @@ def action_unfollow(ctx, fields: dict) -> str:
 
 def _clear_station(ctx) -> str:
     ctx.dj.station = ""
+    ctx.dj.station_seed = None
     return "station label cleared"
+
+
+def _clean_name(s: str) -> str:
+    return " ".join(str(s or "").split()).strip()
+
+
+def action_open_album(ctx, fields: dict) -> str:
+    """
+    Open the album/record behind the playing track as an in-app page.
+
+    The album name comes from the track's own metadata (already fetched for Credits);
+    this searches "<album> <artist>" on the trusted Music endpoint and presents the
+    rows as a page. If no album is known yet, fall back to a plain "song" search so
+    the button always does something rather than silently doing nothing.
+    """
+    album = _clean_name((fields.get("album") or [""])[0])
+    artist = _clean_name((fields.get("artist") or [""])[0])
+    if not album:
+        # no album metadata yet: treat it as a page for the current track's artist
+        if artist:
+            start_page(ctx, "artist", f"{artist} songs", artist, "discography")
+            return f"showing {artist} - albums and songs"
+        return "no album or artist to show for the current track"
+    title = album
+    sub = artist or "album"
+    start_page(ctx, "album", f"{album} {artist}".strip(), title, sub)
+    return f"showing album '{album}'" + (f" by {artist}" if artist else "")
+
+
+def action_open_artist(ctx, fields: dict) -> str:
+    """
+    Open an artist as an in-app page: "Songs by <artist>" on the Music endpoint.
+
+    This is the clickable artist name in Now Playing - what the user asked for when
+    they said "the artist page you didnt make it". It uses the same reliable search
+    that the Search tab uses, so it works without a separate browse endpoint.
+    """
+    artist = _clean_name((fields.get("artist") or [""])[0])
+    if not artist:
+        return "no artist to show"
+    # query carries "<artist> songs" for the search fallback; the bare name goes in
+    # `title` so page_rows can drive the browse discography by the artist alone
+    start_page(ctx, "artist", f"{artist} songs", artist, "discography")
+    return f"showing {artist} - albums and songs"
 
 
 def action_test_brain(ctx, fields: dict) -> str:
@@ -977,6 +1287,8 @@ ACTIONS = {
     "like": action_like,
     "unlike": lambda c, f: _do(c.dj.unlike, "unloved"),
     "auto": action_auto,
+    "autoplay": action_autoplay,
+    "voice": action_voice,
     "seek": action_seek,
     "volume": action_volume,
     "request": action_request,
@@ -985,7 +1297,11 @@ ACTIONS = {
     "play_row": action_play_row,
     "queue_next": action_queue_next,
     "love_row": action_row_love,
+    "remove_queue": action_row_remove,
+    "dislike": action_row_dislike,
     "open": action_open,
+    "open_album": action_open_album,
+    "open_artist": action_open_artist,
     "test_brain": action_test_brain,
     "clear_station": lambda c, f: _clear_station(c),
     "shuffle": action_shuffle,
@@ -1018,11 +1334,26 @@ def save_settings(fields: dict) -> tuple[int, dict]:
         vals["LLM_BASE_URL"] = one("base")
     if "model" in fields:
         vals["LLM_MODEL"] = one("model")
+    if "voice" in fields:
+        voice = one("voice")
+        names = [n.lower() for n in config.GEMINI_TTS_VOICE_NAMES]
+        if voice.lower() not in names:
+            return 400, {"error": (f"unknown TTS voice {voice!r}; pick one of the "
+                                   "voices in the dropdown")}
+        vals["DJ_VOICE"] = config.GEMINI_TTS_VOICE_NAMES[names.index(voice.lower())]
+    if "lang" in fields:
+        lang = one("lang")
+        langs = [l.lower() for l in config.DJ_LANG_CHOICES]
+        if lang.lower() not in langs:
+            return 400, {"error": (f"unknown DJ language {lang!r}; pick one of the "
+                                   "languages in the dropdown")}
+        vals["DJ_LANG"] = config.DJ_LANG_CHOICES[langs.index(lang.lower())]
     if one("clear_key") == "1":
         vals["LLM_API_KEY"] = ""
     elif one("key"):
         vals["LLM_API_KEY"] = one("key")
-    if not vals:
+    key_touched = ("key" in fields) or ("clear_key" in fields)
+    if not vals and not key_touched:
         return 400, {"error": "nothing to save - send key, base, model or clear_key"}
     try:
         config.save_llm_config(**vals)
@@ -1031,7 +1362,8 @@ def save_settings(fields: dict) -> tuple[int, dict]:
         # class name leaves "could not write the config" and no idea which file stuck
         return 500, {"error": f"could not write the config: {e.__class__.__name__}: {e}"}
     return 200, {"settings": settings_view(),
-                 "note": "saved" if "LLM_API_KEY" in vals else "saved (key kept as it was)"}
+                 "note": ("saved" if (("LLM_API_KEY" in vals) or not key_touched)
+                          else "saved (key kept as it was)")}
 
 
 def run_action(ctx, name: str, fields: dict) -> tuple[int, dict]:
@@ -1066,6 +1398,51 @@ def do_search(ctx, text: str) -> tuple[int, dict]:
     start_search(ctx, text)
     return HTTPStatus.OK, {"search": {"pending": True, "q": text, "rows": [], "note": ""},
                            "note": "searching - the results land in the Search tab"}
+
+
+def start_page(ctx, kind: str, query: str, title: str, sub: str = "") -> None:
+    """
+    Build the in-app Artist / Album page on a thread.
+
+    A page is a hand onto the *same* trusted search endpoint the Search tab uses, so
+    it works offline-friendly and never depends on fragile InnerTube browse parsing:
+    "Songs by <artist>" for an artist, "<album> <artist>" for an album. The result
+    goes in `ctx.page`, which /api/state exposes and the `page` view renders. Only
+    the latest open wins (a second click during a lookup discards the first), exactly
+    like search.
+    """
+    with ctx._lock:
+        ctx._page_seq += 1
+        mine = ctx._page_seq
+    ctx.page = {"kind": kind, "title": title, "sub": sub, "rows": [],
+                "pending": True, "note": ""}
+    ctx.broadcast(json.dumps({"page": dict(ctx.page)}))
+
+    def job():
+        try:
+            # a page is a hand into the browse endpoint when that answers (an album
+            # tracklist, an artist's discography) and the same trusted search when it
+            # doesn't - so "deep" never costs a dead page when browse has nothing
+            rows = prov.page_rows(kind, query, title, sub)
+        except Exception as e:
+            rows, note = [], (f"lookup failed: {e.__class__.__name__}"
+                              + (f": {e}" if str(e) else ""))
+        else:
+            note = ("" if rows else
+                    "no tracks came back for that - try a better-known artist or album")
+        for t in rows or []:
+            try:
+                ctx.art.put_nowait(t)
+            except queue.Full:
+                pass
+        if mine != ctx._page_seq:
+            return                     # a newer page was opened; drop this one
+        ctx.page = {"kind": kind, "title": title, "sub": sub,
+                    "rows": [row_view(t) for t in (rows or [])],
+                    "pending": False, "note": note}
+        ctx.broadcast(json.dumps({"page": dict(ctx.page)}))
+
+    threading.Thread(target=job, daemon=True).start()
 
 
 def start_search(ctx, text: str) -> None:
@@ -1159,8 +1536,15 @@ def host_ok(header: str | None, allow_any_host: bool = False) -> bool:
 
 
 HTML_HEADERS = {
+    # `img-src` opens the cover CDNs as well as 'self': a row's own thumbnail only
+    # ever rendered after the artwork lane copied it to /art/ before, because the
+    # strict 'self' allowance silently blocked every i.ytimg.com / googleusercontent
+    # cover (the img fired onerror and was removed, leaving the tinted tile). Now the
+    # row's picture can load straight away and the lane still dresses the rest.
     "Content-Security-Policy": ("default-src 'none'; style-src 'unsafe-inline'; "
-                               "script-src 'unsafe-inline'; img-src 'self' data:; "
+                               "script-src 'unsafe-inline'; "
+                               "img-src 'self' data: https://i.ytimg.com "
+                               "https://lh3.googleusercontent.com https://yt3.ggpht.com; "
                                "connect-src 'self'; font-src 'self'"),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
@@ -1477,11 +1861,13 @@ def serve(dj, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
         # page already showing results, not open it and wait for a click
         start_search(ctx, search_for)
     if request or playlist:
+        # an explicit --request / --playlist IS the user pressing a button; play it
         ctx.job = threading.Thread(
             target=lambda: _first_mix(dj, request, playlist, count), daemon=True)
         ctx.job.start()
-    elif _has_profile():
-        # open the app, hear music: the profile is a perfectly good request
+    elif bool((dj.state or {}).get("autoplay")) and _has_profile():
+        # autoplay is off by default: opening the app must not start a mix and play
+        # before the listener asks. With it on, the profile is a fine request.
         ctx.job = threading.Thread(target=lambda: _auto_open(dj), daemon=True)
         ctx.job.start()
     bound = getattr(httpd, "display_host", host)

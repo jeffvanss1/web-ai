@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import subprocess
 import urllib.request
 
@@ -30,12 +31,26 @@ import config
 # really serves (front-250, front-500), so a release cover is never upscaled.
 SIZES = {"row": 72, "card": 256, "big": 512}
 _TIMEOUT = 6.0
-_MAX_BYTES = 400_000
-_MAX_FILES = 400
+_MAX_BYTES = 400_000            # the per-image read cap, not the cache's
+# The whole cover cache is credited to one number: how many megabytes it may use,
+# not how many files it holds. 500 MB is far more covers than one person needs
+# on disk, and bounding by bytes (rather than the old 400-file cap) is what stops
+# an HD rung being pruned and then re-downloaded on the next refresh.
+_DEFAULT_ART_CAP_MB = 500
 
 
 def cache_dir() -> "object":
     return config.APP_DIR / "thumbs"
+
+
+def art_cap_bytes() -> int:
+    """How many bytes the cover cache may use. `SPOTUBE_DJ_ART_CACHE_MB` overrides."""
+    raw = (os.environ.get("SPOTUBE_DJ_ART_CACHE_MB") or "").strip()
+    try:
+        mb = float(raw) if raw else float(_DEFAULT_ART_CAP_MB)
+    except ValueError:
+        mb = float(_DEFAULT_ART_CAP_MB)
+    return max(0, int(mb * 1024 * 1024))
 
 
 def enabled() -> bool:
@@ -155,8 +170,7 @@ def cached_path(track: dict, size: str = "row") -> str | None:
     vid = str(track.get("id") or "")
     if not vid:
         return None
-    tag, _url = source_of(track)
-    out = _cached(vid, size, tag)
+    out = _any_cached(vid)
     return str(out) if out else None
 
 
@@ -174,7 +188,17 @@ def download_url(url: str, track: dict, size: str = "row",
     out = _cached(vid, size, tag)
     if out:
         return str(out)
-    return _store(url, path_for(vid, size, tag), SIZES.get(size, SIZES["row"]))
+    # one source: a cover the lane already landed for this song wins; do not ask
+    # the Archive for a second (HD) copy on a later pass.
+    any_file = _any_cached(vid)
+    if any_file:
+        return any_file
+    path = _store(url, path_for(vid, size, tag), SIZES.get(size, SIZES["row"]))
+    if path:
+        return path
+    # the archive (or a CDN) refused this one; the video id always has a frame.
+    frame = _frame_url(vid, size)
+    return _store(frame, path_for(vid, size, "yt"), SIZES.get(size, SIZES["row"]))
 
 
 def have(track: dict, size: str = "row") -> bool:
@@ -188,7 +212,20 @@ def have(track: dict, size: str = "row") -> bool:
     vid = str(track.get("id") or "")
     if not vid:
         return False
-    return bool(_cached(vid, size, source_of(track, size)[0]))
+    return bool(_any_cached(vid))
+
+
+def _frame_url(vid: str, size: str = "row") -> str:
+    """A YouTube frame URL for a video id - the fallback that always exists.
+
+    A row's thumbnail is often a CDN the lane or the browser cannot reach (a
+    googleusercontent album-art URL, or a signed copy). A video id is not so
+    fickle: YouTube serves its frame rung for any real upload, so this is what a
+    row gets when its own picture will not load.
+    """
+    px = SIZES.get(size, SIZES["row"])
+    name = "mqdefault.jpg" if px <= 96 else "maxresdefault.jpg"
+    return f"https://i.ytimg.com/vi/{vid}/{name}"
 
 
 def get(track: dict, size: str = "row") -> str | None:
@@ -210,37 +247,59 @@ def get(track: dict, size: str = "row") -> str | None:
     have = _cached(vid, size, tag)
     if have:
         return str(have)
-    bigger = _bigger_cached(vid, SIZES.get(size, SIZES["row"]))
-    if bigger:
-        return bigger
-    if not url:
-        return None
-    return _store(url, path_for(vid, size, tag), SIZES.get(size, SIZES["row"]))
+    # one source: if this song already has a picture (whatever size/tag), reuse it
+    # instead of asking the CDN for another - and possibly HD - rung on the next
+    # refresh. The row and the card borrow the largest file down; the hero reuses
+    # it too (it is a blurred backdrop, so the modest downgrade is invisible).
+    any_file = _any_cached(vid)
+    if any_file:
+        return any_file
+    # "only cache the HD cover": on the first fetch, store the single biggest rung
+    # (512px) so a song's one cover is the sharpest image it will ever need; every
+    # slot reuses it from then on. If the HD rung does not exist, _store steps down
+    # the ladder on its own.
+    px = SIZES["big"]
+    big_url = art_url(track, "big")
+    path = _store(big_url or url, path_for(vid, "big", rung_of(big_url or url)), px)
+    if path:
+        return path
+    # the row's own thumbnail can be a CDN the lane (or the view) cannot reach.
+    # A video id always has a YouTube frame - try that as the same-origin cover so a
+    # row is never a bare initial just because one host refused it.
+    frame = _frame_url(vid, size)
+    return _store(frame, path_for(vid, size, "yt"), SIZES.get(size, SIZES["row"]))
 
 
-def _bigger_cached(vid: str, px: int) -> str:
-    """
-    The largest picture already on disk for this id that is at least `px` wide.
+def _px_of(path) -> int:
+    """> the slot pixel size in a cache filename (`vid-tag-72.png` -> 72), or 0."""
+    m = re.search(r"-(\d+)\.", path.name)
+    return int(m.group(1)) if m else 0
 
-    Deliberately not scoped to one source tag: a 72px row can absolutely be drawn
-    from the frame cached for the card, and refusing it because the filename names a
-    different rung is exactly the "why did it download the same art twice" waste.
-    Never the other way round - a smaller file is not stretched into a bigger box.
+
+def _any_cached(vid: str) -> str:
+    """The single best image already on disk for this video, whatever its size/tag.
+
+    This is the \"one source\" rule: a song keeps one cover. Whichever picture lands
+    first (ideally the release art, fetched at the card rung) is its cover for every
+    slot, so a refresh never re-downloads a different/HD rung and the row, the card
+    and the hero never disagree about what the record looks like. The largest file
+    wins because a big cover downscales cleanly into every smaller box.
     """
     d = cache_dir()
     if not d.exists():
         return ""
-    best, best_px = "", px
-    for name, size in SIZES.items():
-        if size <= best_px:
+    best, best_px = "", 0
+    for path in d.glob(f"{vid}-*.*"):
+        if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".gif"):
             continue
-        for path in d.iterdir():
-            stem = path.stem                       # name without the extension
-            if (stem.startswith(f"{vid}-") and stem.endswith(f"-{size}")
-                    and path.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif")
-                    and path.stat().st_size > 0):
-                best, best_px = str(path), size
-                break
+        try:
+            if path.stat().st_size <= 0:
+                continue
+            size = _px_of(path)
+        except OSError:
+            continue
+        if size > best_px:
+            best, best_px = str(path), size
     return best
 
 
@@ -403,15 +462,34 @@ def _to_png(blob: bytes, px: int) -> bytes:
 
 
 def _prune(directory) -> None:
-    """Keep the cache from growing forever; art is disposable by definition."""
+    """Keep the cache under `art_cap_bytes()`; art is disposable by definition.
+
+    Bounding by bytes - and the newest byte counts - is what keeps a refresh from
+    re-downloading an HD rung: with a 500 MB ceiling the cover that just dressed a
+    card is never evicted (and then fetched again) just because a deeper list of
+    rows pushed the file count past a fixed cap.
+    """
+    cap = art_cap_bytes()
     try:
-        files = sorted([p for pat in ("*.png", "*.jpg", "*.gif")
-                        for p in directory.glob(pat)], key=lambda p: p.stat().st_mtime)
+        files = [p for pat in ("*.png", "*.jpg", "*.jpeg", "*.gif")
+                 for p in directory.glob(pat)]
+        files.sort(key=lambda p: p.stat().st_mtime)
     except OSError:
         return
-    for old in files[: max(0, len(files) - _MAX_FILES)]:
+    total = 0
+    try:
+        for p in files:
+            total += p.stat().st_size
+    except OSError:
+        pass
+    # oldest out first, but never trim below the young files in use
+    for old in files:
+        if total <= cap:
+            break
         try:
+            size = old.stat().st_size
             old.unlink()
+            total -= size
         except OSError:
             pass
 

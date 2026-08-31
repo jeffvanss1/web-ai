@@ -36,6 +36,82 @@ def _script(html: str) -> str:
     return m.group(1)
 
 
+# A naive `re.sub` of string literals does not survive this page: the SVG paths in
+# ICONS carry escaped quotes, and a stray apostrophe in a path can make a
+# single-quote regex swallow a whole function body, so a balanced script reads as
+# unbalanced. Tokenize instead of regex: drop string literals (double, single and
+# template), line and block comments, and regex literals, so the count below only
+# ever sees real code, exactly the way `node --check` does.
+_CODE_OPERAND = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$)]}")
+
+
+def _strip_non_code(js: str) -> str:
+    out: list[str] = []
+    i = 0
+    n = len(js)
+    last = ""
+    while i < n:
+        c = js[i]
+        if c in ('"', "'"):
+            q = c
+            i += 1
+            while i < n and js[i] != q:
+                i += 2 if js[i] == "\\" else 1
+            i += 1
+            out.append('""' if c == '"' else "''")
+            last = '"'
+        elif c == "`":
+            i += 1
+            while i < n and js[i] != "`":
+                i += 2 if js[i] == "\\" else 1
+            i += 1
+            out.append("``")
+            last = "`"
+        elif c == "/" and i + 1 < n and js[i + 1] == "/":
+            i += 2
+            while i < n and js[i] != "\n":
+                i += 1
+        elif c == "/" and i + 1 < n and js[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (js[i] == "*" and js[i + 1] == "/"):
+                i += 1
+            i += 2
+        elif c == "/" and i + 1 < n and last not in _CODE_OPERAND:
+            # a division operator could follow an operand; a regex literal cannot
+            i += 1
+            in_class = False
+            closed = False
+            while i < n:
+                c2 = js[i]
+                if c2 == "\\":
+                    i += 2
+                    continue
+                if c2 == "[":
+                    in_class = True
+                elif c2 == "]":
+                    in_class = False
+                elif c2 == "/" and not in_class:
+                    i += 1
+                    closed = True
+                    break
+                i += 1
+            if not closed:
+                i -= 1
+                out.append("/")
+                last = "/"
+                continue
+            while i < n and js[i] in "gimsuy":
+                i += 1
+            out.append("/ /")
+            last = '"'
+        else:
+            out.append(c)
+            if not c.isspace():
+                last = c
+            i += 1
+    return "".join(out)
+
+
 class PageShapeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -79,6 +155,23 @@ class PageShapeTests(unittest.TestCase):
             self.assertIn("</svg>", svg, name)
             self.assertNotIn("@@", svg, name)
 
+    def test_the_dj_is_an_always_on_announcer_not_a_chat_box(self):
+        body = self.html.split("<body>", 1)[1]
+        # the announcer card lives in the Now Playing pane and has no input to type in
+        self.assertIn('id="djline"', body, "the DJ announcer card is missing")
+        self.assertIn('id="djtext"', body, "the DJ announcement text is missing")
+        # the chat box, the Talk button and the live-model setting are all gone
+        for gone in ("chat-open", "chat-log", "chat-in", "chat-send", "chat-sub",
+                     "in-live", "id=\"chat\""):
+            self.assertNotIn(f'id="{gone}"', body, f"the chat surface {gone} is still here")
+        self.assertNotIn("Talk", body, "the Talk button is still here")
+        # the announcer is filled from the server's dj_line, never typed into and
+        # never sent to /api/chat
+        self.assertIn("dj_line", self.js)
+        self.assertNotIn("/api/chat", self.js, "no chat endpoint may be reached")
+        self.assertNotIn("chatBubble", self.js)
+        self.assertNotIn("chatSend", self.js)
+
     def test_every_icon_the_markup_asks_for_exists(self):
         # `svg("play")`, ICONS.play, ICONS["play"], the icon a menu item asks for,
         # and every `@@token@@` in the markup. The helper's own definition
@@ -99,6 +192,69 @@ class PageShapeTests(unittest.TestCase):
         self.assertIn("saturate(", css)
         self.assertIn(".scrim{", css, "the backdrop has nothing darkening it")
         self.assertIn("backgroundImage", self.js, "nothing ever sets the backdrop image")
+
+    def test_the_playing_color_drifts_slowly_instead_of_holding_still(self):
+        # the cover-derived tint should be alive, not a fixed gradient: a slow
+        # keyframes animation moves the wash across the page. The drift must be a
+        # pure `transform` animation - animating filter/background-position on a
+        # blurred layer re-rasterizes the blur every frame and is the source of jank.
+        css = re.search(r"<style>([\s\S]*)</style>", self.html).group(1)
+        self.assertIn("@keyframes tintdrift", css,
+                      "the backdrop has no slow colour drift animation")
+        self.assertIn("animation:tintdrift", css,
+                      "the backdrop layer never runs the tint animation")
+        # "slow" is a stated requirement: a 1-2s loop reads as a busy page, a 20s+ one as ambient
+        m = re.search(r"animation:tintdrift\s+([\d.]+)s", css)
+        self.assertIsNotNone(m, "the tint animation has no duration")
+        self.assertGreaterEqual(float(m.group(1)), 8,
+                                f"the tint animation cycles every {m.group(1)}s "
+                                "- far too fast to feel ambient")
+        # smoothness: the keyframes move only `transform`, never `filter`/hue-rotate
+        # (a static hue tint is allowed on the base layer; an animated one is not)
+        kf = re.search(r"@keyframes tintdrift\{([\s\S]*?)\}\s*$", css)
+        self.assertIsNotNone(kf, "the tintdrift keyframes block is missing")
+        kf_body = kf.group(1)
+        self.assertIn("transform:", kf_body, "the drift does not move the backdrop")
+        self.assertNotIn("hue-rotate(", kf_body,
+                         "the keyframes animate filter/hue-rotate - that re-blurs "
+                         "the 72px backdrop every frame and causes lag")
+        self.assertNotIn("--gx", kf_body,
+                         "the keyframes animate custom gradient properties - that "
+                         "re-blurs the backdrop every frame and causes lag")
+
+    def test_credits_carry_only_the_record_facts(self):
+        # the transport bar already shows progress, length and cache state, so the
+        # Credits block should name the record, not re-print those three
+        self.assertIn('"released", np.release_year', self.js,
+                      "Credits lost the release year")
+        for banned in ('["length"', '["audio"', 'el("dt", null, "position")'):
+            self.assertNotIn(banned, self.js,
+                             f"Credits still re-presents the transport: {banned}")
+
+    def test_the_queued_header_can_carry_the_mix_name(self):
+        # the Daylist-style title ("lofi tuesday night") must be readable in the
+        # Up Next header, not just carried in state nobody paints. The page builds
+        # that line from s.vibe, prefixing it to the count when present.
+        self.assertIn("(s.vibe || \"\")", self.js,
+                      "the header never reads the mix name the engine computed")
+        self.assertIn('"").trim()', self.js,
+                      "a blank vibe must not render the word 'undefined'")
+
+    def test_a_row_with_only_a_thumbnail_still_gets_a_cover(self):
+        # `art` used to read `track.art` alone, so a queue row that only carried
+        # `art_card`, or an album/discography row that only carried the raw
+        # `thumbnail`, was drawn as a tinted initial even though the art was there
+        js = self.js
+        self.assertIn("track.art_card", js, "art() never falls back to the card picture")
+        self.assertIn("track.thumbnail", js, "art() never falls back to the raw thumbnail")
+        self.assertIn("function cover(", js,
+                      "there is no onerror retry for a blank thumbnail")
+        self.assertIn("hqdefault.jpg", js,
+                      "the fallback never tries the reliably-served frame")
+        self.assertIn('img.loading = "eager"', js,
+                      "a small row tile must not wait for a scroll event that never comes")
+        self.assertIn("track.id ? \"https://i.ytimg.com/vi/\" + track.id", js,
+                      "art() has no id-derived last-resort hqdefault when every field is blank")
 
     def test_the_cache_pill_is_never_squeezed_into_an_ellipsis(self):
         # it said "0 stored, 0 d…" because flex let the icons beside it take the
@@ -156,7 +312,9 @@ class IdContractTests(unittest.TestCase):
 
     def test_unreferenced_sections_would_be_dead_weight(self):
         have = set(re.findall(r'id="view-([a-z]+)"', self.html))
-        self.assertEqual(have, set(vm.VIEWS),
+        # "page" is the dynamic album/artist view: reachable via setView("page"),
+        # but not a permanent nav destination, so it is the one allowed extra.
+        self.assertEqual(have, set(vm.VIEWS) | {"page"},
                          "the page has a section no view can reach, or a view with no section")
 
 
@@ -192,6 +350,15 @@ class VerbContractTests(unittest.TestCase):
     def test_data_view_targets_are_real_views(self):
         for view in re.findall(r'data-view="([a-z]+)"', self.html):
             self.assertIn(view, vm.VIEWS, f"data-view={view} has nowhere to go")
+
+    def test_the_back_button_has_a_target_from_the_first_navigation(self):
+        # the initial view must be the first history entry, or the first push leaves
+        # hist=["search"] hix=0 and nav-back is born disabled: "page loads -> search,
+        # back does nothing". The history must seed with "home" so back always works.
+        self.assertIn('hist:["home"], hix:0', self.js,
+                      "the view history does not seed with the initial view")
+        self.assertIn("navSync()", self.js,
+                      "the nav states are set at boot and after every view change")
 
 
 class SafetyTests(unittest.TestCase):
@@ -245,10 +412,10 @@ class JsSyntaxTests(unittest.TestCase):
 
     def test_balanced_braces_and_parens(self):
         js = _script(webapp.page())
-        # crude but effective against a dropped brace, and strings never hold one
-        stripped = re.sub(r'"(?:[^"\\]|\\.)*"', '""', js)
-        stripped = re.sub(r"'(?:[^'\\]|\\.)*'", "''", stripped)
-        stripped = re.sub(r"//[^\n]*", "", stripped)
+        # strings, comments and regex literals could each hold a brace, so strip
+        # them with a tokenizer and count only the code that remains. This is the
+        # same set of braces `node --check` balances.
+        stripped = _strip_non_code(js)
         for open_c, close_c in (("{", "}"), ("(", ")"), ("[", "]")):
             self.assertEqual(stripped.count(open_c), stripped.count(close_c),
                              f"unbalanced {open_c}{close_c} in the script")
@@ -589,6 +756,26 @@ class ArtSlotTests(unittest.TestCase):
         why = self.rule(".why")
         self.assertIn("color:#e8e8e8", why)
         self.assertIn("line-height", why)
+
+    def test_the_playing_colour_comes_from_the_cover_not_a_palette_hash(self):
+        # "match the color with majority color every single cover": the page must
+        # read the cover's dominant colours and feed --tint/--tint2 from them, with
+        # the palette only as a fallback while a picture has not yet been decoded.
+        self.assertIn("const coverColors = {}", self.js,
+                      "there is no per-video cover colour cache")
+        self.assertIn("function dominantColor(img, vid)", self.js,
+                      "the cover's dominant colour is never extracted")
+        self.assertIn("function normColor", self.js,
+                      "the extracted colour is never normalised to a usable accent")
+        self.assertIn("img.onload = () => dominantColor(img, vid)", self.js,
+                      "a loaded cover never samples its own colour")
+        self.assertIn("coverColors[track.id]", self.js,
+                      "backdrop() does not read the cover's own colour")
+        self.assertNotIn("dominantColor(img, vid) ;", self.js)
+        # the wash gradient composes tint+alpha as 8-digit hex, so the colour must be
+        # hex (an rgb() string would make `tint+"00"` invalid)
+        self.assertIn('"#" + hx(r) + hx(g) + hx(b)', self.js,
+                      "the dominant colour is not emitted as hex, so the wash breaks")
 
 
 if __name__ == "__main__":

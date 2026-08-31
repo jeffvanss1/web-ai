@@ -483,5 +483,45 @@ class AudioCacheTests(unittest.TestCase):
         self.assertIsInstance(audiocache.brief(), tuple)
 
 
+class CacheCapTests(unittest.TestCase):
+    """The two ceilings a listener set in plain words: covers 500 MB, audio 2 GB."""
+
+    def test_art_cache_defaults_to_500mb(self):
+        with mock.patch.object(thumbs, "_DEFAULT_ART_CAP_MB", 500):
+            self.assertEqual(thumbs.art_cap_bytes(), 500 * 1024 * 1024)
+
+    def test_art_cache_obeys_the_env_override(self):
+        with mock.patch.dict(os.environ, {"SPOTUBE_DJ_ART_CACHE_MB": "250"}):
+            self.assertEqual(thumbs.art_cap_bytes(), 250 * 1024 * 1024)
+
+    def test_audio_cache_defaults_to_2gb(self):
+        with mock.patch.object(audiocache, "_DEFAULT_CAP_MB", 2048):
+            self.assertEqual(audiocache.cap_bytes(), 2048 * 1024 * 1024)
+
+    def test_audio_cache_obeys_the_env_override(self):
+        with mock.patch.dict(os.environ, {"SPOTUBE_DJ_CACHE_MB": "100"}):
+            self.assertEqual(audiocache.cap_bytes(), 100 * 1024 * 1024)
+
+    def test_prune_tracks_bytes_not_file_count(self):
+        # the old cap was 400 *files*; now it is a byte ceiling, so a fresh HD rung
+        # is evicted only when the cache really is over budget - and oldest first
+        d = Path(self._tmp()) / "thumbs"
+        d.mkdir(parents=True, exist_ok=True)
+        old, new = d / "a-yt-max-256.jpg", d / "b-yt-max-256.jpg"
+        old.write_bytes(b"0" * 6000)
+        new.write_bytes(b"0" * 6000)
+        os.utime(old, (1, 1))
+        with mock.patch.object(thumbs, "cache_dir", return_value=str(d)), \
+                mock.patch.object(thumbs, "art_cap_bytes", return_value=6000):
+            thumbs._prune(d)
+        self.assertFalse(old.exists(), "oldest evicted first")
+        self.assertTrue(new.exists(), "kept while under the byte cap")
+
+    def _tmp(self):
+        d = tempfile.mkdtemp(prefix="dj-caps-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        return d
+
+
 if __name__ == "__main__":
     unittest.main()

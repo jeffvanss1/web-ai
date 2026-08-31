@@ -50,7 +50,15 @@ class MPVPlayer:
         # the loop waits for an end-of-file that has already been forgotten. Kept open,
         # the last frame (and `time-pos`) stays readable and the flag survives.
         cmd = [self.exe, "--idle=yes", "--keep-open=yes", f"--volume={volume}",
-               "--no-terminal", f"--input-ipc-server={self.sock_path}", "--really-quiet"]
+               "--no-terminal", f"--input-ipc-server={self.sock_path}", "--really-quiet",
+               # a network stream starts playing while it buffers; with a small read-ahead
+               # mpv delivers the first `cache secs` and starts sooner instead of waiting
+               # on a tiny chunk. Kept modest so a long listening session does not pin RAM.
+               # SPOTUBE_DJ_CACHE_SECS overrides for a fast link (more buffer = smoother
+               # first second) or a RAM-lean one (fewer seconds = less memory).
+               "--cache=yes",
+               "--cache-secs=" + str(self._cache_secs()),
+               f"--demuxer-max-bytes={self._cache_bytes()}MiB"]
         if not video:
             cmd += ["--force-window=no", "--no-video"]
         if os.environ.get("SPOTUBE_DJ_AO"):
@@ -63,6 +71,26 @@ class MPVPlayer:
         # song never started", which is the difference between advancing and waiting.
         self._played = False
         self._load_at = time.time()
+
+    @staticmethod
+    def _cache_secs() -> int:
+        """How many seconds of a stream mpv reads ahead before playing; tunable."""
+        raw = (os.environ.get("SPOTUBE_DJ_CACHE_SECS") or "").strip()
+        try:
+            secs = int(float(raw))
+        except ValueError:
+            secs = 8
+        return max(0, min(secs, 120))
+
+    @staticmethod
+    def _cache_bytes() -> int:
+        """MiB cap on the read-ahead demuxer buffer; tunable."""
+        raw = (os.environ.get("SPOTUBE_DJ_CACHE_MB_USED") or "").strip()
+        try:
+            mi = int(float(raw))
+        except ValueError:
+            mi = 32
+        return max(0, min(mi, 2048))
 
     def alive(self) -> bool:
         return self.proc.poll() is None

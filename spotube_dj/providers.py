@@ -145,46 +145,37 @@ def _ytm_thumb(row: dict, vid: str) -> str:
     """
     The row's own artwork, biggest offered size, else a URL derived from the id.
 
-    InnerTube puts the sizes under `musicThumbnailRenderer.thumbnail.thumbnails`
-    and older responses spelled it `sources`; reading only the second one meant
-    every row from the music search arrived art-less, and the panel drew a
-    coloured initial for anything that had no MusicBrainz release to look up.
-    A `Song` row's thumbnail is the album cover, which is the better picture for
-    a now-playing card anyway, so it wins over the derived video frame.
+    InnerTube spells the sizes under `musicThumbnailRenderer.thumbnail.thumbnails`,
+    `videoThumbnailRenderer`, a bare `{url,width,height}` object, or the older
+    `sources` list, and the art itself can live on `i.ytimg.com` or Google's
+    `lh3.googleusercontent.com` / `ggpht.com`. Reading only one shape on one host
+    meant every row that arrived via the browse endpoint (an album tracklist, a
+    discography entry) came back art-less, and the panel drew a coloured initial
+    for anything that had no MusicBrainz release to look up. A `Song` row's
+    thumbnail is the album cover, which is the better picture for a now-playing
+    card anyway, so it wins over the derived video frame.
     """
-    node = ((row.get("thumbnail") or {}).get("musicThumbnailRenderer") or {})
-    node = node.get("thumbnail") or {}
-    cands = [c for c in (list(node.get("thumbnails") or [])
-                         + list(node.get("sources") or []))
-             if isinstance(c, dict) and str(c.get("url") or "").startswith("http")]
+    cands = _ytm_image_candidates(row.get("thumbnail") or {})
 
-    def area(c):
-        try:
-            return int(c.get("width") or 0) * int(c.get("height") or 0)
-        except (TypeError, ValueError):
-            return 0
-    # The search rows offer 60 and 120 px tiles, which for a `Song` is the
+    # the search rows offer 60 and 120 px tiles, which for a `Song` is the
     # *artist avatar* (three different songs, one identical URL) - too small and
     # the wrong picture. Only take the row's own art when it is big enough to be
     # the cover, which is what the Album rows carry at 544 px.
     def clean(url: str) -> str:
         # YouTube's own URLs come signed (`?sqp=..&rs=..`) and a signed URL is one
         # that can expire; the thumbnail cache keeps the filename, not the fetch,
-        # so strip it back to the plain form for the same picture.
-        base = str(url or "").split("?", 1)[0]
-        if "ytimg.com/vi/" in base and base.endswith((".jpg", ".png", ".webp")):
-            return base
-        return base
+        # so strip it back to the plain form for the same picture. The same rule
+        # drops a `=s544` size suffix off a Google lh3 URL (its default is large).
+        return str(url or "").split("?", 1)[0]
 
-    best = max(cands, key=area) if cands else None
-    if best is not None and (area(best) >= 160 * 160 or not (
-            best.get("width") or best.get("height"))):
+    best = max(cands, key=lambda c: c[0]) if cands else None
+    if best is not None and (best[0] >= 160 * 160 or best[0] == 0):
         # an advertised size under 160 px is the artist avatar, not the cover:
         # three different songs came back with one identical 120 px URL
-        return clean(best["url"])
+        return clean(best[1])
     if vid and vid.replace("-", "").replace("_", "").isalnum():
         return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
-    return clean(best["url"]) if best else ""
+    return clean(best[1]) if best else ""
 
 
 def _ytm_artist(row: dict, title: str) -> str:
@@ -210,6 +201,57 @@ def _ytm_artist(row: dict, title: str) -> str:
                 if name and name.lower() != (title or "").lower():
                     return name
     return ""
+
+
+def _is_origin(t: dict) -> bool:
+    """
+    True when a row is the artist's own recording, not a fan upload of it.
+
+    A YTM `Song` row is the artist's catalog entry; the sparse ` - topic` channel is
+    its official audio channel. A cover/remix/live upload is neither, and when a
+    search returns both, the originals are the ones Apple Music would show.
+    """
+    if (t or {}).get("official"):
+        return True
+    ch = str((t or {}).get("channel") or (t or {}).get("uploader") or "")
+    return bool(filters._TOP_CHANNEL.search(ch))
+
+
+# A shortened-to-radio/single version of the song. Still the artist's own recording
+# (so `_is_origin` says yes), but when the full-length catalog version is also in the
+# results the app should play that one - "why it plays the radio edit, not the
+# unedited, like YouTube Music does". The album version is what a mood mix is for.
+_EDITED = re.compile(
+    r"\b(?:radio\s+edit|radio\s+version|single\s+edit|single\s+version"
+    r"|short\s+version|edited\s+version|album\s+edit|compact\s+version"
+    r"|extended\s+edit|7[\"']\s+edit)\b", re.I)
+
+
+def _is_edited(t: dict) -> bool:
+    """True when a row title advertises a trimmed radio/single version of a song."""
+    return bool(_EDITED.search(str((t or {}).get("title") or "")))
+
+
+def _prefer_originals(rows: list[dict]) -> list[dict]:
+    """
+    Keep only the artist's own recordings when a search returned any.
+
+    The complaint was the queue being filled with "whatever youtuber doing remix of
+    that songs or doing cover of the original". The recording's catalog entry is the
+    one a mood mix is for, so when at least one original exists the rest is dropped
+    rather than ranked - a cover scoring -1.5 still makes the queue otherwise. A
+    search that returns *only* covers/live keeps them, because silence is worse.
+
+    The same rule then walks down the version ladder: among the artist's own
+    recordings, a "radio edit" / trimmed single is only a shade worse than the full
+    one more familiar from a record, so when the un-edited version is there too the
+    edits are passed over and the album-length recording is the one that plays.
+    """
+    origin = [x for x in (rows or []) if _is_origin(x)]
+    if not origin:
+        return list(rows or [])
+    unedited = [x for x in origin if not _is_edited(x)]
+    return unedited if unedited else origin
 
 
 def ytm_search(query: str, limit: int = 12) -> list[dict]:
@@ -322,10 +364,17 @@ def yt_search(query: str, limit: int = 12, min_dur: int = 45, max_dur: int = 360
                   not in (x.get("why") or [])]
         if len(strong) >= min(3, limit):
             kept = strong
+        # only the artist's own recordings when the search returned any: covers and
+        # remixes were filling the queue ("whatever youtuber doing remix of that
+        # songs or doing cover of the original"), so the originals win - even if
+        # that means fewer than the fallback threshold, because a plain YouTube
+        # sweep would only re-introduce the uploads we just removed.
+        origin = _prefer_originals(kept)
         # Two or three acceptable rows from a music-only catalogue still beat a
         # slower, dirtier plain-YouTube sweep, so don't fall back just because a
         # sparse query only had three songs on its first page.
         if len(kept) >= min(max(1, limit // 3), 3):
+            kept = origin
             for t in kept:
                 t.pop("_score", None)
             return kept[: limit]
@@ -391,7 +440,9 @@ def yt_search(query: str, limit: int = 12, min_dur: int = 45, max_dur: int = 360
     # could not positively identify as a music upload waits behind everything it
     # could: a fight scene only reaches the queue when there is no music at all.
     strong = [x for x in kept if "not shaped like a track" not in (x.get("why") or [])]
-    out = (strong if len(strong) >= min(3, limit) else kept)[:limit]
+    out = _prefer_originals(
+        (strong if len(strong) >= min(3, limit) else kept))
+    out = out[:limit]
     for t in out:
         t.pop("_score", None)
     if out:
@@ -419,6 +470,444 @@ def yt_stream_url(video_id: str, fmt: str = "bestaudio[ext=m4a]/bestaudio/best")
                timeout=150)
     url = out.strip().splitlines()
     return url[0] if url else None
+
+
+# a release year is the one line "album" adds to the credits. It is fetched
+# best-effort on its own lane, never in the search path, so a slow or empty
+# answer costs the panel a blank line and never a row.
+def _release_year(d: dict) -> int | None:
+    for key in ("release_year", "release_date", "upload_date", "year"):
+        v = d.get(key)
+        if isinstance(v, int) and 1900 <= v <= 2099:
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            # yt-dlp dates arrive as "19940822", "1994-08-22" or "1994"; take the
+            # leading 4 digits so the year is read out of all three cleanly
+            m = re.match(r"\s*(\d{4})", s)
+            if m:
+                y = int(m.group(1))
+                if 1900 <= y <= 2099:
+                    return y
+            # otherwise a "Aug 22, 1994" style string: a 4-digit year on its own
+            m = re.search(r"(?<!\d)(19|20)\d{2}(?!\d)", s)
+            if m:
+                return int(m.group(0))
+    return None
+
+
+def yt_track_meta(video_id: str) -> dict:
+    """
+    Best-effort album + release-year for one video, from yt-dlp's own metadata.
+
+    A full (not `--flat-playlist`) yt-dlp query on a music video returns `album`,
+    `release_date`/`release_year`, `track` and `artist`; the flat search path that
+    fills the queue does not. This only runs once per track and is guarded so a
+    missing album, a rate limit or no yt-dlp is a blank line, never a failure.
+    Returns {} when nothing useful came back.
+    """
+    if not video_id:
+        return {}
+    out = _run(_YTDLP + ["--dump-json", "--no-warnings", "--no-playlist",
+                         "--skip-download",
+                         f"https://music.youtube.com/watch?v={video_id}"],
+               timeout=25)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        album = d.get("album") or ""
+        if isinstance(album, dict):            # some providers nest it
+            album = album.get("name") or album.get("title") or ""
+        year = _release_year(d)
+        meta = {}
+        if album:
+            meta["album"] = str(album)
+        year = _release_year(d)
+        if year:
+            meta["release_year"] = year
+        artist = d.get("artist") or d.get("creator") or d.get("uploader") or ""
+        if artist:
+            meta["artist"] = str(artist)
+        track = d.get("track") or d.get("title") or ""
+        if track:
+            meta["track"] = str(track)
+        # a reliable "album page" URL is rarely exposed, but a Music search for
+        # "<album> <artist>" almost always lands on it - good enough for a
+        # "See album" handoff that is one click, never a dead link
+        if album:
+            q = urllib.parse.quote(f"{album} {artist}".strip())
+            meta["album_url"] = f"https://music.youtube.com/search?q={q}"
+        return meta
+    return {}
+
+
+# --------------------------------------------------- browse (album/artist pages)
+# The search endpoint answers with *songs*; a deep Artist / Album page needs the
+# browse endpoint, which returns the tracks of one album and an artist's
+# discography. Both reuse the same InnerTube row walkers as search, so the parsing
+# is one shape and the rows are the same normalised dicts the queue uses.
+YTM_BROWSE = "https://music.youtube.com/youtubei/v1/browse"
+
+
+def ytm_browse(browse_id: str, params: str | None = None, timeout: int = 25) -> dict | None:
+    """POST the browse endpoint for one browseId; -> the response dict or None."""
+    if not browse_id:
+        return None
+    body: dict = {"context": {"client": YTM_CLIENT}, "browseId": str(browse_id)}
+    if params:
+        body["params"] = params
+    return _http_json(YTM_BROWSE, body, timeout=timeout)
+
+
+def _ytm_any_rows(data: dict) -> list[dict]:
+    """
+    Every track *or* card renderer in a response, in the order the page lists them.
+
+    `_ytm_rows` only keeps `musicResponsiveListItemRenderer` (the song rows); the
+    search endpoint answers an album/artist query with `musicTwoRowItemRenderer`
+    *cards* too (an album/artist result is not a playable row), so a page builder
+    needs both. Same structural walk, one extra key.
+    """
+    out: list[dict] = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            for key, val in node.items():
+                if key in ("musicResponsiveListItemRenderer", "musicTwoRowItemRenderer"):
+                    out.append(val)
+                else:
+                    walk(val)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data or {})
+    return out
+
+
+def _ytm_card_text(node, key: str) -> str:
+    """The text of a `musicTwoRowItemRenderer` title/subtitle block."""
+    sub = node.get(key) or {}
+    runs = sub.get("runs") if isinstance(sub, dict) else None
+    if isinstance(runs, list):
+        return "".join(str(r.get("text") or "") for r in runs)
+    if isinstance(sub, dict) and isinstance(sub.get("text"), str):
+        return sub["text"]
+    return ""
+
+
+def _ytm_card_info(row: dict) -> tuple[str, str, str]:
+    """
+    -> (title, subtitle, browse_id) for any renderer row.
+
+    `musicTwoRowItemRenderer` cards put the name in `title`/`subtitle`; the list
+    items `_ytm_rows` already knows put it in the flex columns. Reading both means
+    one card reader for the search result that happened to be a song or an album.
+    """
+    bid = ((row.get("navigationEndpoint") or {}).get("browseEndpoint") or {}).get(
+        "browseId") or ""
+    title = _ytm_card_text(row, "title")
+    subtitle = _ytm_card_text(row, "subtitle")
+    if not title:
+        cols = _ytm_columns(row)
+        if cols:
+            title = cols[0]
+            subtitle = cols[1] if len(cols) > 1 else ""
+    return title.strip(), subtitle.strip(), bid
+
+
+def _img_ok(u) -> bool:
+    """
+    True for an image URL the page can actually be handed over as a row's art.
+
+    We only ever call this on URLs found *inside* an InnerTube thumbnail subtree
+    (thumbnails / sources / a thumbnail renderer), so an http URL there is an image.
+    Reading only one host was the bug: YouTube Music serves album and artist art
+    from `lh3.googleusercontent.com` / `ggpht.com` as well as `i.ytimg.com`, and a
+    card built purely from the Google CDN came back with a coloured initial even
+    though the art was present.
+    """
+    return isinstance(u, str) and u.startswith("http")
+
+
+def _ytm_image_candidates(node: dict) -> list[tuple[int, str]]:
+    """
+    Every (area, url) in an InnerTube thumbnail subtree.
+
+    `musicTwoRowItemRenderer.thumbnail` has been spelled `musicThumbnailRenderer`,
+    `videoThumbnailRenderer`, a single `{url,width,height}` object, or the older
+    `sources` list across the years, and the art itself can live on `i.ytimg.com` or
+    on Google's `lh3.googleusercontent.com` / `ggpht.com`. Reading one shape on one
+    host is exactly why a discography entry, an album row or a track that arrives via
+    the browse page came back with no cover - the art was there, in a branch the
+    parser was not looking at.
+    """
+    out: list[tuple[int, str]] = []
+    if not isinstance(node, dict):
+        return out
+    def area(c):
+        try:
+            return int(c.get("width") or 0) * int(c.get("height") or 0)
+        except (TypeError, ValueError):
+            return 0
+    url = node.get("url")
+    if _img_ok(url):
+        out.append((area(node), url))
+    for key in ("thumbnails", "sources"):
+        for c in node.get(key) or []:
+            if not isinstance(c, dict):
+                continue
+            u = c.get("url")
+            if _img_ok(u):
+                out.append((area(c), u))
+            out += _ytm_image_candidates(c)
+    for key in ("thumbnail", "musicThumbnailRenderer", "videoThumbnailRenderer",
+                "musicTwoRowItemRenderer", "musicMultiSelectItemRenderer"):
+        sub = node.get(key)
+        if isinstance(sub, dict):
+            out += _ytm_image_candidates(sub)
+    return out
+
+
+def _ytm_card_thumb(row: dict) -> str:
+    """
+    The artwork of a `musicTwoRowItemRenderer` card (an album / artist result).
+
+    Search rows' small tiles are the artist avatar; an Album card's art *is* the
+    cover, so a discography entry and the album page can show it right away instead
+    of a coloured initial until the cover lane catches up.
+    """
+    cands = _ytm_image_candidates(row.get("thumbnail") or {})
+    if not cands:
+        return ""
+    best = max(cands, key=lambda c: c[0])
+    # strip the signed query back so the URL is stable to cache/reuse
+    return str(best[1]).split("?", 1)[0]
+
+
+def _year_in(text) -> int | None:
+    """The 4-digit year in a subtitle like 'Album • Portishead • 1994'."""
+    m = re.search(r"(?<!\d)(19|20)\d{2}(?!\d)", str(text or ""))
+    return int(m.group(0)) if m else None
+
+
+def _clean_artist(name: str) -> str:
+    """'Portishead songs' / 'Radiohead top songs' -> 'Portishead'."""
+    name = str(name or "").strip()
+    # longest first: "radiohead top songs" must lose " top songs", not " songs"
+    for tail in (" top songs", " best songs", " songs", " music", " discography"):
+        if name.lower().endswith(tail):
+            return name[: -len(tail)].strip()
+    return name
+
+
+def _find_card_album(data: dict, album: str, artist: str) -> tuple[str, str, str, str]:
+    """The album card's (title, subtitle, browseId, cover_url), or all blank."""
+    want = str(album or "").strip().lower()
+    best: tuple[str, str, str, str] = ("", "", "", "")
+    for row in _ytm_any_rows(data):
+        title, subtitle, bid = _ytm_card_info(row)
+        if not bid:
+            continue
+        subtitle_l = subtitle.lower()
+        # an album result is a browseable card, and its subtitle says "Album";
+        # a raw "Album of the year" playlists row can too, so prefer the one whose
+        # title actually matches what was asked for
+        if "album" not in subtitle_l:
+            continue
+        thumb = _ytm_card_thumb(row)
+        if want and (title.lower() in want or want in title.lower()):
+            return title, subtitle, bid, thumb
+        if not best[0] or "album" in subtitle_l:
+            best = (title, subtitle, bid, thumb)
+    if best and (not want or not best[0]):
+        return best
+    return best if best[0] else ("", "", "", "")
+
+
+def _ytm_browse_tracks(data: dict, album: str = "", artist: str = "",
+                       year: int | None = None, cover: str = "") -> list[dict]:
+    """The rows of one album page (the tracklist) -> normalised track dicts."""
+    tracks: list[dict] = []
+    for row in _ytm_rows(data):
+        vid = (row.get("playlistItemData") or {}).get("videoId") or ""
+        cols = _ytm_columns(row)
+        if not vid or not cols:
+            continue
+        title = cols[0]
+        sub = cols[1] if len(cols) > 1 else ""
+        parts = [x.strip() for x in re.split(r"\u2022|\u00b7|\|", sub) if x.strip()]
+        # album-page rows are "Title | Artist • Album • 5:03"; the artist is the
+        # first field that is not the album we already know and not a duration
+        track_artist = artist
+        if not track_artist:
+            for part in parts:
+                if filters.parse_duration(part):
+                    break
+                if part.lower() != (album or "").lower():
+                    track_artist = part
+                    break
+        duration = 0
+        for part in reversed(parts):
+            if not duration:
+                duration = filters.parse_duration(part)
+        # the record's own cover is the right picture for every track on the album,
+        # so the album card's art is preferred over a per-track video frame
+        thumb = cover or _ytm_thumb(row, vid)
+        track = {
+            "id": vid,
+            "source": "youtube-music",
+            "endpoint": "browse-album",
+            "url": f"https://music.youtube.com/watch?v={vid}",
+            "title": title,
+            "artist": track_artist,
+            "duration": duration,
+            "channel": track_artist,
+            "thumbnail": thumb,
+            "album": album,
+            # the release year travels with the row so the page can badge it, and it
+            # is exactly the "Albums in the right order with dates" a deep page wants
+            "release_year": year or _year_in(sub),
+        }
+        if album:
+            row_year = year or _year_in(sub)
+            track["note"] = (f"{album}" + (f" \u00b7 {row_year}" if row_year else ""))
+        tracks.append(track)
+    return tracks
+
+
+def ytm_album_tracklist(album: str, artist: str = "") -> list[dict]:
+    """
+    The tracks of one album, from YouTube Music's own album page (browse).
+
+    A plain search of "<album> <artist>" returns songs from wherever; a browse of
+    the album's own id returns the record's tracklist in release order with the
+    right artist. Returns [] when no album card can be found or the page gives
+    nothing - the caller falls back to a search, so a hand-to-the-album never
+    turns into a dead end. One network round trip, no yt-dlp.
+    """
+    album = str(album or "").strip()
+    if not album:
+        return []
+    q = f"{album} {artist}".strip()
+    data = _http_json(YTM_ENDPOINT, {"context": {"client": YTM_CLIENT}, "query": q})
+    if not data:
+        return []
+    title, subtitle, browse_id, cover = _find_card_album(data, album, artist)
+    if not browse_id:
+        return []
+    page = ytm_browse(browse_id)
+    if not page:
+        return []
+    # the year lives on the album *card* ("Album • Portishead • 1994"); the browse
+    # page's own track rows usually omit it, so thread it onto every track
+    year = _year_in(subtitle)
+    rows = _ytm_browse_tracks(page, album=title or album,
+                              artist=artist or _clean_artist(subtitle), year=year,
+                              cover=cover)
+    # the album page can carry non-track rows (the header card itself); drop them
+    return [r for r in rows if r.get("id")]
+
+
+def _ytm_browse_discography(data: dict, artist: str = "") -> list[dict]:
+    """The albums of an artist's browse page -> page-row dicts, each with a year."""
+    albums: list[dict] = []
+    singles: list[dict] = []
+    seen: set[str] = set()
+    for row in _ytm_any_rows(data):
+        title, subtitle, bid = _ytm_card_info(row)
+        if not title or not bid:
+            continue
+        subtitle_l = subtitle.lower()
+        # an artist browse page is a stack of sections (top songs, albums, singles);
+        # only album and single rows belong on a release list - a song row is a track
+        if "album" not in subtitle_l and "single" not in subtitle_l \
+                and _year_in(subtitle) is None:
+            continue
+        year = _year_in(subtitle)
+        is_album = "album" in subtitle_l
+        badge = ("album" if is_album else "single")
+        if year:
+            badge = f"{year} \u00b7 {badge}"
+        key = f"{title.lower()}|{artist.lower()}|{year or ''}"
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
+            "id": "",
+            "source": "youtube-music",
+            "endpoint": "browse-artist",
+            "title": title,
+            "artist": artist,
+            "album": title,
+            "release_year": year,
+            "browse_id": bid,
+            "dur": "",
+            # the album card's own art is the cover, so the row is not a blank tile
+            "thumbnail": _ytm_card_thumb(row),
+            "note": badge,
+            "kind": "album",
+        }
+        (albums if is_album else singles).append(entry)
+    # a discography is the artist's *albums*; singles (and EPs) only appear when
+    # they never cut an album - "why its show all single" was the Singles & EPs
+    # shelf outranking the records
+    return albums or singles
+
+
+def ytm_artist_discography(artist: str) -> list[dict]:
+    """
+    An artist's discography (their albums with release dates) from the browse page.
+
+    Searches for the artist to get their browseId, then reads the album rows off
+    the artist's own page - the same page that lists top songs - and returns them
+    as page rows. Each carries `album`, `release_year` and `browse_id`, so the page
+    can list a release by date and open one on a click. Returns [] when the browse
+    gives nothing useful; the caller falls back to a songs search.
+    """
+    artist = _clean_artist(str(artist or "").strip())
+    if not artist:
+        return []
+    data = _http_json(YTM_ENDPOINT, {"context": {"client": YTM_CLIENT},
+                                     "query": artist})
+    if not data:
+        return []
+    browse_id = ""
+    for row in _ytm_any_rows(data):
+        title, subtitle, bid = _ytm_card_info(row)
+        if bid and (subtitle.lower() == "artist" or "artist" in subtitle.lower()
+                    or not subtitle):
+            browse_id = bid
+            break
+    if not browse_id:
+        return []
+    page = ytm_browse(browse_id)
+    if not page:
+        return []
+    return _ytm_browse_discography(page, artist=artist)
+
+
+# One dispatcher the web layer hands a page's kind to: try the deep browse path,
+# then fall back to the ordinary search that a page used before, so "no browse
+# data" degrades to the songs the UI already knew how to show.
+def page_rows(kind: str, query: str, title: str = "", sub: str = "") -> list[dict]:
+    kind = str(kind or "").strip().lower()
+    if kind == "album":
+        rows = ytm_album_tracklist(title or query, artist=sub)
+        if rows:
+            return rows
+    elif kind == "artist":
+        rows = ytm_artist_discography(title or _clean_artist(query))
+        if rows:
+            return rows
+    return yt_search(query, limit=20)
 
 
 def is_playlist_ref(ref: str) -> bool:

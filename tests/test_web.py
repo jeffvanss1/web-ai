@@ -76,6 +76,32 @@ class RowViewTests(unittest.TestCase):
         self.assertNotIn("liked", web.row_view(track(1)))
         self.assertTrue(web.row_view(track(1), liked=True)["liked"])
 
+    def test_a_row_with_a_cover_shows_it_immediately(self):
+        # an album tracklist / discography row carries its own art, so it must not
+        # wait for the artwork lane (that was "album page rows show no cover")
+        r = web.row_view({"id": "x", "title": "Dummy", "artist": "Portishead",
+                          "thumbnail": "https://i.ytimg.com/vi/x/hqdefault.jpg"})
+        self.assertTrue(r["art"].startswith("http"))
+        self.assertTrue(r["art_card"].startswith("http"))
+        # the raw thumbnail also rides along, so the page's art() has a last-resort
+        # URL if the two slots above ever get erased by a later pass
+        self.assertEqual(r["thumbnail"], "https://i.ytimg.com/vi/x/hqdefault.jpg")
+
+    def test_a_page_row_carries_its_album_identity(self):
+        # the front-end needs `kind`/`album`/`browse_id` to open a discography row on
+        # a click and to know it is an album, not a playable song
+        r = web.row_view({"id": "", "title": "Dummy", "artist": "Portishead",
+                          "kind": "album", "album": "Dummy", "browse_id": "B1",
+                          "release_year": 1994, "note": "1994 · album"})
+        self.assertEqual(r["kind"], "album")
+        self.assertEqual(r["album"], "Dummy")
+        self.assertEqual(r["browse_id"], "B1")
+        self.assertEqual(r["release_year"], 1994)
+        self.assertEqual(r["note"], "1994 · album")
+
+    def test_a_row_without_a_cover_has_blank_not_broken_art(self):
+        self.assertEqual(web.row_view({"id": "x", "title": "t"})["art"], "")
+
 
 class BuildStateTests(unittest.TestCase):
     def setUp(self):
@@ -87,12 +113,24 @@ class BuildStateTests(unittest.TestCase):
         for key in ("now", "up_next", "queued", "position", "duration", "paused",
                     "auto", "volume", "backend", "idle", "idle_note", "why", "request",
                     "queries", "engine_note", "cache_note", "foot", "log", "search",
-                    "loved"):
+                    "loved", "vibe", "dj_line", "voice"):
             self.assertIn(key, s, key)
 
     def test_json_encodes_it(self):
         # a raw track dict anywhere in here would blow up on bytes/objects instead
         json.dumps(web.build_state(self.ctx))
+
+    def test_the_mix_name_reaches_the_page(self):
+        # the Daylist-style title is computed in the build_queue info and has to
+        # ride the same state object that paints the header under Up Next
+        self.dj.info["vibe"] = "lofi tuesday night"
+        s = web.build_state(self.ctx)
+        self.assertEqual(s["vibe"], "lofi tuesday night")
+
+    def test_missing_vibe_is_a_blank_string(self):
+        # no name yet literally means "no name", not the word "None" on the page
+        self.dj.info = {}
+        self.assertEqual(web.build_state(self.ctx)["vibe"], "")
 
     def test_playing_track_is_not_also_in_up_next(self):
         # the chronology complaint: Up Next shows what comes *after* this song
@@ -160,6 +198,126 @@ class BuildStateTests(unittest.TestCase):
         self.assertIsInstance(web.build_state(self.ctx)["loved"], list)
 
 
+class AutoplayTests(unittest.TestCase):
+    """'when the first start the queue start mixing and playing even i dont start
+    the button yet': opening the app must not play before a press. The switch is
+    persisted like volume/repeat and exposed on the page."""
+
+    def setUp(self):
+        self.dj = fake_dj()
+        self.ctx = web.Context(self.dj)
+        self.dj.state["autoplay"] = False
+
+    def test_it_does_not_auto_open_when_off(self):
+        import inspect
+        src = inspect.getsource(web.serve)
+        self.assertIn("autoplay", src, "serve() gates the opening mix on autoplay")
+
+    def test_action_autoplay_turns_it_on_and_off(self):
+        code, _ = web.run_action(self.ctx, "autoplay", {"on": ["on"]})
+        self.assertEqual(code, 200)
+        self.assertTrue(self.dj.state["autoplay"])
+        code, _ = web.run_action(self.ctx, "autoplay", {"on": ["off"]})
+        self.assertEqual(code, 200)
+        self.assertFalse(self.dj.state["autoplay"])
+
+    def test_action_autoplay_flips_without_a_value(self):
+        code, payload = web.run_action(self.ctx, "autoplay", {})
+        self.assertEqual(code, 200)
+        self.assertTrue(self.dj.state["autoplay"])
+        self.assertIn("autoplay on", payload["note"])
+        code, payload = web.run_action(self.ctx, "autoplay", {})
+        self.assertIn("autoplay off", payload["note"])
+
+    def test_action_voice_turns_the_spoken_dj_on_and_off(self):
+        self.dj.state["voice"] = True          # the persisted default
+        self.assertIn("voice", web.build_state(self.ctx))
+        self.assertTrue(web.build_state(self.ctx)["voice"])
+        code, payload = web.run_action(self.ctx, "voice", {"on": ["off"]})
+        self.assertEqual(code, 200)
+        self.assertIn("off", payload["note"])
+        self.assertFalse(self.dj.state["voice"])
+        self.assertFalse(web.build_state(self.ctx)["voice"])
+        code, payload = web.run_action(self.ctx, "voice", {"on": ["on"]})
+        self.assertEqual(code, 200)
+        self.assertIn("talk", payload["note"])
+        self.assertTrue(self.dj.state["voice"])
+
+    def test_action_voice_flips_without_a_value(self):
+        self.dj.state["voice"] = True
+        code, payload = web.run_action(self.ctx, "voice", {})
+        self.assertEqual(code, 200)
+        self.assertFalse(self.dj.state["voice"], "default on should flip to off")
+        self.assertFalse(self.dj.state["autoplay"])
+
+    def test_a_nonsense_value_is_not_a_settings_change(self):
+        code, payload = web.run_action(self.ctx, "autoplay", {"on": ["maybe"]})
+        self.assertEqual(code, 200)
+        self.assertFalse(self.dj.state["autoplay"], "garbage must not flip autoplay")
+        self.assertIn("is not on or off", payload["note"])
+
+    def test_build_state_exposes_autoplay(self):
+        self.dj.state["autoplay"] = True
+        self.assertTrue(web.build_state(self.ctx)["autoplay"])
+
+    def test_configured_default_is_off(self):
+        # the core fix: a fresh install starts quiet, not with a mix already playing
+        missing = Path(tempfile.mkdtemp()) / "state.json"
+        with mock.patch.object(config, "STATE_FILE", missing):
+            self.assertFalse(config.load_state()["autoplay"])
+
+
+class MetaLookupTests(unittest.TestCase):
+    """
+    The "released" / "album" lines in Credits come from a one-per-track lookup that
+    runs on its own thread - /api/state must never be held open by it (same rule as
+    artwork), and it must be fetched once per id, not once per 700 ms tick.
+    """
+
+    def setUp(self):
+        self.dj = fake_dj()
+        self.ctx = web.Context(self.dj)
+
+    def test_build_state_merges_album_and_release_year_into_now(self):
+        with mock.patch("web.prov.yt_track_meta",
+                        return_value={"album": "Dummy", "release_year": 1994,
+                                      "artist": "Portishead", "album_url": "https://a"}):
+            self.ctx._meta["vid0"] = {"album": "Dummy", "release_year": 1994,
+                                      "artist": "Portishead", "album_url": "https://a"}
+        s = web.build_state(self.ctx)
+        self.assertEqual(s["now"]["album"], "Dummy")
+        self.assertEqual(s["now"]["release_year"], 1994)
+        self.assertEqual(s["now"]["album_url"], "https://a")
+
+    def test_meta_for_fetches_once_and_caches(self):
+        # simulate a slow provider so the first call returns {} (fetch in flight)
+        with mock.patch("web.prov.yt_track_meta",
+                        side_effect=lambda v: {"album": "Dummy", "release_year": 1994}):
+            # first call: no cache yet, kernel a background fetch, answer {} now
+            self.assertEqual(self.ctx.meta_for({"id": "vid0"}), {})
+            import time
+            time.sleep(0.3)                       # let the background fetch finish
+            got = self.ctx.meta_for({"id": "vid0"})
+            self.assertEqual(got.get("album"), "Dummy")
+            self.assertEqual(got.get("release_year"), 1994)
+            self.assertIn("vid0", self.ctx._meta, "the result is cached by id")
+
+    def test_meta_for_does_not_fetch_the_same_id_twice(self):
+        with mock.patch("web.prov.yt_track_meta",
+                        side_effect=lambda v: {"album": "A"}) as m:
+            self.ctx.meta_for({"id": "vid0"})
+            self.ctx.meta_for({"id": "vid0"})       # in flight, must not refetch
+            self.ctx.meta_for({"id": "vid0"})
+            self.assertEqual(m.call_count, 1, "one lookup per id, not per tick")
+
+    def test_open_accepts_an_explicit_url_for_the_album(self):
+        with mock.patch("web.player_mod.open_externally", return_value=True) as oe:
+            code, payload = web.run_action(
+                self.ctx, "open", {"url": ["https://music.youtube.com/search?q=x"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(oe.call_args[0][0], "https://music.youtube.com/search?q=x")
+
+
 class ArtStampingTests(unittest.TestCase):
     def setUp(self):
         self.dj = fake_dj()
@@ -198,6 +356,23 @@ class ArtStampingTests(unittest.TestCase):
                          "a 48px row must not pull the card file")
         self.assertEqual(s["up_next"][0]["art_card"], "/art/next2.png",
                          "the grid tile needs the 256px file")
+
+    def test_with_art_prefers_the_lanes_own_file_when_it_exists(self):
+        # a row may arrive with a cross-origin cover in `art`/`art_card`; once the
+        # artwork lane has a file on disk it is the same-origin href that wins, so a
+        # queue/card row is never left on an image CDN some browsers/network paths
+        # refuse. Until then the row's own picture (or nothing) shows.
+        self.ctx._hrefs = {"vid0": {"row": "/art/frame.jpg", "card": "/art/frame2.jpg"}}
+        s = web.build_state(self.ctx)
+        row = dict(s["up_next"][0])
+        row["id"] = "vid0"
+        row["art"] = "https://i.ytimg.com/cover.jpg"
+        row["art_card"] = "https://i.ytimg.com/cover-card.jpg"
+        s["up_next"][0] = row
+        web.with_art(s, self.ctx)
+        self.assertEqual(s["up_next"][0]["art"], "/art/frame.jpg",
+                         "the lane's own file must win over a cross-origin cover")
+        self.assertEqual(s["up_next"][0]["art_card"], "/art/frame2.jpg")
 
     def test_a_hero_never_upscale_a_row_thumbnail(self):
         # the old behaviour, written down as a test so it cannot come back: with
@@ -352,8 +527,14 @@ class ActionTests(unittest.TestCase):
 
     def test_play_row_jumps_the_queue_to_it_and_forces_the_move(self):
         target = self.dj.queue.items[3]
-        with mock.patch.object(self.dj, "next", return_value=None) as n:
+        # a pick anchors the queue around the song; stub the (off-socket) build so the
+        # queue-jump is what is asserted and no worker leaks past this test
+        with mock.patch.object(self.dj, "next", return_value=None) as n, \
+                mock.patch.object(self.dj, "radio_from",
+                                  return_value={"ok": True, "tracks": []}):
             code, payload = self.run_it("play_row", id=target["id"])
+            if self.ctx.job:
+                self.ctx.job.join(2)
         self.assertEqual(code, 200)
         self.assertIn("Track 3", payload["note"])
         self.assertEqual(self.dj.queue.items[self.dj.queue.pos]["id"], target["id"])
@@ -550,11 +731,27 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(web.mask("short"), "·····")
         self.assertNotIn("S3cr3tKey", json.dumps({"m": web.mask("AIzaSyS3cr3tKey123")}))
 
+        # the DJ chat is gone, so the settings panel no longer reports a live model
+        self.assertNotIn("live_model", view)
+
+        # the TTS voice rides the settings so a browser dropdown can change it
+        self.assertEqual(view["dj_voice"], config.load_dj_voice())
+        self.assertIsInstance(view["dj_voices"], list)
+        self.assertGreaterEqual(len(view["dj_voices"]), 5)
+        names = {v["name"] for v in view["dj_voices"]}
+        self.assertIn("Despina", names)
+        self.assertEqual(view["dj_lead"], float(config.DJ_LEAD_SECS))
+        # the spoken language is its own setting, exposed for the dropdown
+        self.assertEqual(view["dj_lang"], config.load_dj_lang())
+        self.assertIn(view["dj_lang"], view["dj_langs"])
+        self.assertGreaterEqual(len(view["dj_langs"]), 3)
+
         with mock.patch("web.config.save_llm_config") as save:
             code, payload = web.save_settings({"model": ["gemini-3.6-flash"],
                                                "key": ["  spaced  "]})
         self.assertEqual(code, 200)
         self.assertEqual(save.call_args.kwargs["LLM_MODEL"], "gemini-3.6-flash")
+        self.assertNotIn("LIVE_MODEL", save.call_args.kwargs)
         self.assertEqual(save.call_args.kwargs["LLM_API_KEY"], "spaced", "trimmed")
         self.assertNotIn("spaced", json.dumps(payload))
         self.assertEqual(payload["note"], "saved")
@@ -575,6 +772,44 @@ class ActionTests(unittest.TestCase):
         with mock.patch("web.config.save_llm_config") as save3:
             self.assertEqual(web.save_settings({"base": [""]})[0], 200)
         self.assertEqual(save3.call_args.kwargs["LLM_BASE_URL"], "")
+
+    def test_a_tts_voice_is_saved_as_dj_voice(self):
+        # the Settings dropdown posts its voice name; it is validated against the
+        # catalog and written as DJ_VOICE (never as a raw arbitrary string)
+        with mock.patch("web.config.save_llm_config") as save:
+            code, payload = web.save_settings({"voice": ["Achernar"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(save.call_args.kwargs, {"DJ_VOICE": "Achernar"})
+        self.assertEqual(payload["note"], "saved")
+        # a code point not in the catalog is rejected, not silently stored
+        with mock.patch("web.config.save_llm_config") as save2:
+            code, payload = web.save_settings({"voice": ["Not A Voice"]})
+        self.assertEqual(code, 400)
+        save2.assert_not_called()
+        self.assertIn("unknown TTS voice", payload["error"])
+        # case is tolerated: 'despina' is stored with the canonical name
+        with mock.patch("web.config.save_llm_config") as save3:
+            self.assertEqual(web.save_settings({"voice": ["sulafat"]})[0], 200)
+        self.assertEqual(save3.call_args.kwargs["DJ_VOICE"], "Sulafat")
+
+    def test_the_dj_language_is_saved_and_validated(self):
+        # the Settings language dropdown posts its value; it is checked against the
+        # catalog and written as DJ_LANG (never as a raw arbitrary string)
+        with mock.patch("web.config.save_llm_config") as save:
+            code, payload = web.save_settings({"lang": ["indonesian"]})
+        self.assertEqual(code, 200)
+        self.assertEqual(save.call_args.kwargs, {"DJ_LANG": "Indonesian"})
+        self.assertEqual(payload["note"], "saved")
+        # case is tolerated and the canonical form is stored
+        with mock.patch("web.config.save_llm_config") as save2:
+            self.assertEqual(web.save_settings({"lang": ["english"]})[0], 200)
+        self.assertEqual(save2.call_args.kwargs["DJ_LANG"], "English")
+        # a language not in the catalog is rejected, not silently stored
+        with mock.patch("web.config.save_llm_config") as save3:
+            code, payload = web.save_settings({"lang": ["Klingon"]})
+        self.assertEqual(code, 400)
+        save3.assert_not_called()
+        self.assertIn("unknown DJ language", payload["error"])
 
     def test_settings_write_failures_are_500_not_a_broken_tab(self):
         with mock.patch("web.config.save_llm_config", side_effect=OSError("read-only")):
@@ -767,6 +1002,120 @@ class ActionTests(unittest.TestCase):
             self.assertIn(verb, web.ACTIONS, verb)
 
 
+class DJLineTests(unittest.TestCase):
+    """The local Spotify-DJ announcer: a read-only line, no model, no websocket."""
+
+    def setUp(self):
+        import agent
+        self.agent = agent
+        self.dj = fake_dj()
+        self.ctx = web.Context(self.dj, volume=42)
+
+    def test_a_playing_track_gives_why_and_whats_next(self):
+        line = web.dj_line(self.ctx)
+        self.assertIn("Now playing", line)
+        self.assertIn("Up next:", line)
+        self.assertIn("why", line.lower())
+        # it is built from the real facts (the request), not a model reply
+        self.assertIn("90s trip hop", line)
+
+    def test_nothing_playing_says_so_without_crashing(self):
+        self.dj.current = None
+        self.dj.info = {}
+        line = web.dj_line(self.ctx)
+        self.assertIn("Nothing playing", line)
+
+    def test_narrate_never_raises_and_always_returns_text(self):
+        # even an empty snapshot is a sentence, not a traceback
+        self.assertIsInstance(self.agent.narrate({}), str)
+        self.assertIsInstance(self.agent.narrate({"now": "A - B", "why": "you asked for x",
+                                                  "next": "C - D"}), str)
+
+    def test_snapshot_names_the_set_and_the_picks(self):
+        self.dj.info["vibe"] = "lofi tuesday night"
+        self.dj.current["mixed"] = True          # a pick from the user's likes
+        snap = self.agent.dj_snapshot(self.ctx)
+        self.assertEqual(snap["vibe"], "lofi tuesday night")
+        self.assertIn("from your likes", snap["why"])
+
+    def test_removing_the_chat_took_the_endpoint_with_it(self):
+        # /api/chat no longer exists, so a posting skin cannot reach an agent
+        self.assertNotIn("/api/chat", web.ROUTES)
+        self.assertFalse(hasattr(web, "chat_endpoint"))
+        self.assertFalse(hasattr(web, "get_agent"))
+
+
+class QueueRowActionTests(unittest.TestCase):
+    """The remove / dislike verbs the queue rows expose, and the play-one-twice fix."""
+
+    def setUp(self):
+        self.dj = fake_dj([track(i) for i in range(6)])
+        self.dj.auto = False
+        self.dj._topup = lambda **k: None          # a row action must not search
+        self.ctx = web.Context(self.dj)
+        import taste
+        taste.clear()
+        try:
+            taste.undo_file().unlink()
+        except OSError:
+            pass
+
+    def run_it(self, name, **fields):
+        form = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in fields.items())
+        return web.run_action(self.ctx, name, urllib.parse.parse_qs(form))
+
+    def test_remove_queue_drops_the_one_row_and_keeps_the_song(self):
+        code, payload = self.run_it("remove_queue", id="vid2")
+        self.assertEqual(code, 200)
+        self.assertNotIn("vid2", [t["id"] for t in self.dj.queue.items])
+        self.assertEqual(self.dj.current["title"], track(0)["title"],
+                         "the audible track is not touched by a row removal")
+        self.assertEqual(len(self.dj.queue), 4)
+
+    def test_remove_queue_says_when_the_row_left_already(self):
+        _code, payload = self.run_it("remove_queue", id="vid99")
+        self.assertIn("that row is gone", payload["note"])
+        self.assertEqual(len(self.dj.queue), 5)
+
+    def test_dislike_records_taste_and_removes_the_row(self):
+        code, payload = self.run_it("dislike", id="vid3")
+        self.assertEqual(code, 200)
+        self.assertEqual(payload["note"], "won't suggest 'Track 3' again")
+        self.assertNotIn("vid3", [t["id"] for t in (self.dj.queue.items or [])])
+        import taste
+        state = taste.load_state()
+        self.assertIn("dislike", [s.get("reason") for s in state.get("skipped", [])])
+
+    def test_play_row_does_not_duplicate_a_queued_row(self):
+        # "the queue UI bug when click": clicking the same queued row used to copy it
+        # on top of itself, so it played twice in a row. remove_id first, then play.
+        web.run_action(self.ctx, "play_row", {"id": [""]})  # no-op guard path
+        # a pick anchors the queue around the song (radio_from, off the socket), so
+        # stub that build; the duplicate fix is what this asserts
+        with mock.patch.object(self.dj, "radio_from",
+                               return_value={"ok": True, "tracks": []}):
+            _code, payload = self.run_it("play_row", id="vid1")
+            if self.ctx.job:
+                self.ctx.job.join(2)
+        self.assertIn("playing Track 1", payload["note"])
+        self.assertEqual(
+            [t["id"] for t in self.dj.queue.upcoming(10)].count("vid1"), 0,
+            "the row that just played must not still be waiting in the queue")
+
+    def test_play_row_anchors_the_queue_on_the_picked_song(self):
+        # "what if i chose a song? the songs next to it build around it" - a pick
+        # hands the song to radio_from with replace=True (build the upcoming set
+        # around it) rather than leaving whatever mix the row happened to sit in
+        with mock.patch.object(self.dj, "radio_from") as rf:
+            _code, payload = self.run_it("play_row", id="vid1")
+            if self.ctx.job:
+                self.ctx.job.join(2)
+        rf.assert_called_once()
+        self.assertEqual(rf.call_args[0][0]["title"], "Track 1",
+                         "the picked song is the anchor, not a generic vibe")
+        self.assertTrue(rf.call_args[1]["replace"])
+
+
 class SearchTests(unittest.TestCase):
     def setUp(self):
         self.ctx = web.Context(fake_dj())
@@ -843,6 +1192,104 @@ class SearchTests(unittest.TestCase):
             web.start_search(self.ctx, "anything")
             self.assertTrue(self.wait())
         self.assertIn("429", self.ctx.search["note"])
+
+
+class OpenPageTests(unittest.TestCase):
+    """
+    The in-app album / artist page: start_page builds it off the trusted search
+    endpoint, the latest open wins, and /api/state exposes it for the `page` view.
+    """
+
+    def setUp(self):
+        self.ctx = web.Context(fake_dj())
+        self.bcast: list[str] = []
+        self._real = self.ctx.broadcast
+        self.ctx.broadcast = self.bcast.append
+
+    def wait(self, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not (self.ctx.page or {}).get("pending", False):
+                return True
+            time.sleep(0.01)
+        return False
+
+    def tearDown(self):
+        self.ctx.broadcast = self._real
+
+    def test_start_page_builds_rows_and_clears_pending(self):
+        with mock.patch("web.prov.yt_search", return_value=[track(7), track(8)]) as ys:
+            web.start_page(self.ctx, "artist", "Radiohead songs", "Radiohead")
+            self.assertTrue(self.wait())
+        ys.assert_called_once()
+        self.assertEqual(self.ctx.page["kind"], "artist")
+        self.assertEqual(self.ctx.page["title"], "Radiohead")
+        self.assertEqual(len(self.ctx.page["rows"]), 2)
+        self.assertEqual(self.ctx.page["rows"][0]["title"], "Track 7")
+
+    def test_a_newer_page_open_discards_an_older_one(self):
+        first = threading.Event()
+        def slow(q, limit=20, **k):
+            first.wait(3)
+            return [track(1)]
+        with mock.patch("web.prov.yt_search", side_effect=slow) as ys:
+            web.start_page(self.ctx, "artist", "old", "Old")
+            web.start_page(self.ctx, "album", "fake album", "Fake")
+            first.set()
+            self.assertTrue(self.wait())
+            # both workers run through the search fallback (browse gives nothing in
+            # the sandbox); wait for the older one too so it cannot still be calling
+            # yt_search after `with` restores the real function and leak onto the
+            # next test's mock
+            deadline = time.monotonic() + 3
+            while ys.call_count < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertEqual(self.ctx.page["title"], "Fake", "the newer page wins")
+
+    def test_open_album_falls_back_to_artist_page_when_no_album(self):
+        with mock.patch("web.start_page") as sp, \
+             mock.patch("web.prov.yt_search", return_value=[]):
+            code, payload = web.run_action(self.ctx, "open_album",
+                                           {"album": [""], "artist": ["Portishead"]})
+        self.assertEqual(code, 200)
+        self.assertIn("Portishead - albums and songs", payload["note"])
+        sp.assert_called_once()
+        self.assertEqual(sp.call_args[0][1], "artist", "falls back to an artist page")
+        self.assertEqual(sp.call_args[0][4], "discography",
+                         "the artist page is a discography, not a songs list")
+
+    def test_open_artist_delegates_to_start_page(self):
+        with mock.patch("web.start_page") as sp, \
+             mock.patch("web.prov.yt_search", return_value=[]):
+            code, payload = web.run_action(self.ctx, "open_artist",
+                                           {"artist": ["Nirvana"]})
+        self.assertEqual(code, 200)
+        self.assertIn("Nirvana - albums and songs", payload["note"])
+        sp.assert_called_once()
+        self.assertEqual(sp.call_args[0][4], "discography")
+
+    def test_start_page_prefers_the_browse_discography_over_a_song_search(self):
+        # a deep artist page is a discography (browse), not a songs search; the
+        # browse path wins and the search fallback is never asked
+        disc = [{"id": "", "title": "Dummy", "artist": "Portishead",
+                 "release_year": 1994, "browse_id": "B1", "note": "1994 · album",
+                 "kind": "album"}]
+        with mock.patch("web.prov.page_rows", return_value=[web.row_view(x) for x in disc]) as pr:
+            web.start_page(self.ctx, "artist", "Portishead songs", "Portishead",
+                           "discography")
+            self.assertTrue(self.wait())
+        pr.assert_called_once_with("artist", "Portishead songs", "Portishead",
+                                   "discography")
+        self.assertEqual(self.ctx.page["rows"][0]["kind"], "album")
+        self.assertEqual(self.ctx.page["rows"][0]["release_year"], 1994)
+
+    def test_build_state_exposes_the_page(self):
+        self.ctx.page = {"kind": "album", "title": "Dummy",
+                         "sub": "Portishead", "rows": [web.row_view(track(1))],
+                         "pending": False, "note": ""}
+        s = web.build_state(self.ctx)
+        self.assertEqual(s["page"]["title"], "Dummy")
+        self.assertEqual(s["page"]["kind"], "album")
 
 
 class TraversalTests(unittest.TestCase):
@@ -1618,6 +2065,21 @@ class ArtLaneTests(unittest.TestCase):
         self.ctx._seen_art.add(("v3", "row"))
         self.assertEqual(self.ctx.request_art([{"id": "v3"}], "row"), 0,
                          "work the lane has drawn is not work to repeat")
+
+    def test_a_row_that_carries_a_thumbnail_is_still_queued_for_its_own_file(self):
+        # a row may carry a `thumbnail`, but that is a cross-origin URL that can be
+        # refused in the browser; the lane still fetches a same-origin file for it so
+        # the queue/cards are never stuck on a cross-origin image CDN. `thumbnail`
+        # alone never keeps a row off the lane.
+        tracks = [{"id": "v1", "thumbnail": "https://i.ytimg.com/cover.jpg"},
+                  {"id": "v2", "thumbnail": ""},
+                  {"id": "v3"}]
+        self.assertEqual(self.ctx.request_art(tracks, "row"), 3)
+        got = []
+        while not self.ctx.art.empty():
+            got.append(self.ctx.art.get_nowait())
+        self.assertEqual([g[0]["id"] for g in got], ["v1", "v2", "v3"],
+                         "a row with a thumbnail must still get the lane's same-origin file")
 
     def test_only_the_visible_rows_are_warmed(self):
         tracks = [{"id": f"v{i}"} for i in range(60)]

@@ -24,6 +24,7 @@ PKG_DIR = tests.PKG
 
 import brain
 import config
+import filters
 import providers as prov
 import taste
 import dj as dj_mod
@@ -162,6 +163,17 @@ class TasteTests(_TmpHome):
         self.assertLess(late, 0)
         self.assertGreater(late, early, f"partial={late} should be milder than early={early}")
 
+    def test_dislike_is_stronger_than_any_skip_and_is_remembered(self):
+        # the 👎 on a queue row is a verdict, not a "done" skip: it must cost the
+        # artist more than even an early skip, and it has to be visible as a reason
+        taste.record_skip({"title": "p", "artist": "Skip Artist"}, "early-skip")
+        early = config.load_state()["artists"]["skip artist"]
+        taste.record_dislike({"title": "q", "artist": "Hated Artist"})
+        st = config.load_state()
+        self.assertEqual(st["artists"]["hated artist"], -2.4)
+        self.assertLess(st["artists"]["hated artist"], early)
+        self.assertIn("dislike", [s.get("reason") for s in st["skipped"]])
+
     def test_fingerprint_merges_the_same_song_from_two_channels(self):
         a = taste.fingerprint("Joji - SLOW DANCING IN THE DARK")
         b = taste.fingerprint("SLOW DANCING IN THE DARK (Official Video)")
@@ -243,6 +255,57 @@ class TasteTests(_TmpHome):
         st = config.load_state()
         self.assertEqual(st["liked"], [])
         taste.record_like({"title": "a", "artist": "b"})  # must not explode
+
+
+# --------------------------------------------------------------- mix names
+
+
+class MixVibeTests(_TmpHome):
+    def test_empty_profile_still_gets_a_name(self):
+        # with nothing learned, the mix still needs a title, not an empty string
+        name = taste.mix_vibe("", when=time.mktime(time.strptime("2026-03-10 23:00", "%Y-%m-%d %H:%M")))
+        self.assertTrue(name.strip())
+        self.assertIn("night", name)
+
+    def test_mix_vibe_uses_weekday_and_daypart(self):
+        # "lofi tuesday morning" - a short mood from the profile + the clock,
+        # the way Spotify titles a Daylist, not a sentence with the artist in it
+        taste.record_like({"title": "lofi beats", "artist": "Boards of Canada"})
+        when = time.mktime(time.strptime("2026-03-10 09:00", "%Y-%m-%d %H:%M"))  # a tuesday
+        name = taste.mix_vibe("", when=when)
+        lowered = name.lower()
+        self.assertEqual(lowered, "lofi tuesday morning", name)
+        self.assertNotIn("boards", lowered, "a Daylist name is a mood, not a credits line")
+
+    def test_mix_vibe_uses_a_loved_artist_when_there_is_no_mood_yet(self):
+        # fresh profile with just a love: the artist stands in as the name so a
+        # first listener sees "radiohead saturday night", not a bare "night"
+        taste.record_like({"title": "Everything In Its Right Place",
+                           "artist": "Radiohead"})
+        when = time.mktime(time.strptime("2026-03-14 23:00", "%Y-%m-%d %H:%M"))  # a saturday
+        name = taste.mix_vibe("", when=when).lower()
+        self.assertIn("radiohead", name)
+        self.assertIn("saturday", name)
+        self.assertIn("night", name)
+
+    def test_mix_vibe_uses_the_request_when_the_profile_is_empty(self):
+        # no learned genres yet: fall back to the request's own mood word
+        when = time.mktime(time.strptime("2026-03-10 08:00", "%Y-%m-%d %H:%M"))
+        name = taste.mix_vibe("play sad lofi for me", when=when)
+        self.assertIn("sad", name.lower())
+        self.assertIn("morning", name.lower())
+
+    def test_mix_vibe_never_raises_on_bad_when(self):
+        # a clock that came back as garbage must not take the queue down
+        self.assertTrue(taste.mix_vibe("chill", when="not-a-time").strip())
+        self.assertTrue(taste.mix_vibe(None, when=-100).strip())
+
+    def test_strength_scales_the_like(self):
+        # a stronger like must move the artist weight more than a plain one
+        taste.record_like({"title": "a", "artist": "Boards of Canada"}, strength=1.6)
+        strong = config.load_state()["artists"]["boards of canada"]
+        # record_like bumps the artist by 2.0 * strength (a plain like = 2.0)
+        self.assertAlmostEqual(strong, 2.0 * 1.6, places=3)
 
 
 # ------------------------------------------------------- queue + interleave
@@ -371,6 +434,28 @@ class QueueTests(unittest.TestCase):
         q.extend([{"id": str(i)} for i in range(5)])
         q.pop()
         self.assertEqual([t["id"] for t in q.upcoming(2)], ["1", "2"])
+
+    def test_remove_id_drops_only_the_one_queued_row(self):
+        q = Queue()
+        q.extend([{"id": "a"}, {"id": "b"}, {"id": "c"}])
+        q.pop()                                   # "a" is now "history"
+        self.assertEqual(q.remove_id("b")["id"], "b")
+        self.assertEqual([t["id"] for t in q.items], ["a", "c"])
+        self.assertEqual(len(q), 1, "only the still-queued rows count")
+
+    def test_remove_id_will_not_touch_rows_already_popped(self):
+        q = Queue()
+        q.extend([{"id": "a"}, {"id": "b"}])
+        q.pop()                                   # the cursor now sits past "a"
+        self.assertIsNone(q.remove_id("a"), "a row behind the cursor is not queued")
+        self.assertEqual(len(q), 1)
+
+    def test_remove_id_returns_none_for_an_unknown_or_empty_id(self):
+        q = Queue()
+        q.extend([{"id": "a"}])
+        q.pop()
+        self.assertIsNone(q.remove_id("nope"))
+        self.assertIsNone(q.remove_id(""))
 
     def test_interleave_rotates_buckets_and_caps_artists(self):
         a1 = {"id": "a1", "artist": "Same", "title": "one", "score": 9}
@@ -610,6 +695,29 @@ class RelevanceTests(_TmpHome):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_track_meta_extracts_album_and_release_year(self):
+        raw = json.dumps({"id": "v", "title": "Roads", "album": "Dummy",
+                          "artist": "Portishead", "release_date": "19940822"})
+        with mock.patch.object(prov, "_run", return_value=raw):
+            m = prov.yt_track_meta("v")
+        self.assertEqual(m.get("album"), "Dummy")
+        self.assertEqual(m.get("release_year"), 1994, "pulled out of the date string")
+        self.assertIn("album_url", m)
+        self.assertIn("music.youtube.com", m["album_url"])
+
+    def test_track_meta_is_blank_on_no_output_or_bad_video(self):
+        with mock.patch.object(prov, "_run", return_value=""):
+            self.assertEqual(prov.yt_track_meta("v"), {})
+        with mock.patch.object(prov, "_run", return_value="not json\n"):
+            self.assertEqual(prov.yt_track_meta("v"), {})
+
+    def test_track_meta_ignores_lines_that_are_not_json(self):
+        raw = "noise line\n" + json.dumps({"id": "v", "album": "A", "release_year": 1999})
+        with mock.patch.object(prov, "_run", return_value=raw):
+            m = prov.yt_track_meta("v")
+        self.assertEqual(m.get("album"), "A")
+        self.assertEqual(m.get("release_year"), 1999)
+
     def test_playlist_id_parsing(self):
         sp = prov.Spotify()
         for ref in ("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M?si=abc",
@@ -733,6 +841,260 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual([t["id"] for t in out], ["good"])
 
 
+class OriginTests(unittest.TestCase):
+    """
+    "filter only the original songs appear" - a cover or a remix of a song is not
+    the recording a mood mix is for. decide() refuses a non-original title outright
+    (an official remix single by the artist still shows), and yt_search drops a fan
+    re-upload once the artist's own row is present, so the queue and the search tab
+    both read like Apple Music rather than a reaction channel.
+    """
+
+    @staticmethod
+    def _official(vid, title="Smells Like Teen Spirit"):
+        return {"id": vid, "title": title, "artist": "Nirvana", "channel": "Nirvana",
+                "official": True, "duration": 302, "url": "u"}
+
+    @staticmethod
+    def _fan(vid, title="Smells Like Teen Spirit", channel="ScottishTeeVee"):
+        return {"id": vid, "title": title, "artist": "", "channel": channel,
+                "official": False, "duration": 286, "url": "u"}
+
+    def test_prefer_originals_keeps_only_the_artist_when_any_exists(self):
+        rows = [self._official("o1"), self._fan("f1"),
+                {"id": "o2", "title": "Come as You Are", "artist": "Nirvana",
+                 "channel": "Nirvana - Topic", "duration": 219, "url": "u"}]
+        got = prov._prefer_originals(rows)
+        self.assertEqual([t["id"] for t in got], ["o1", "o2"],
+                         "a fan re-upload survived when the original was present")
+        # with no original at all, the fan rows are kept rather than going silent
+        solo = [self._fan("f1"), self._fan("f2", title="Come as You Are")]
+        self.assertEqual([t["id"] for t in prov._prefer_originals(solo)], ["f1", "f2"])
+
+    def test_prefer_originals_plays_the_unalbumed_version_not_the_radio_edit(self):
+        # "why it plays the radio edit, not the unedited, like YouTube Music does" -
+        # an edit is still the artist's own single, but when the full / album-length
+        # recording is in the results too, that is the one a mood queue should pick
+        edition = self._official("edit1", "Smells Like Teen Spirit (Radio Edit)")
+        full = self._official("full1", "Smells Like Teen Spirit")
+        both = prov._prefer_originals([edition, full])
+        self.assertEqual([t["id"] for t in both], ["full1"],
+                         "the radio edit outranked the un-edited recording")
+        # with only the edit on the page, keep it rather than go silent
+        only_edit = self._official("edit2", "Come as You Are (Single Edit)")
+        self.assertEqual([t["id"] for t in prov._prefer_originals([only_edit])], ["edit2"])
+
+    def test_cover_and_remix_by_a_fan_are_refused_but_an_official_one_is_not(self):
+        for title in ("Smells Like Teen Spirit (cover by Delicious Rock)",
+                      "Smells Like Teen Spirit - Remix",
+                      "Wonderwall (Acoustic Cover)",
+                      "Song (Reimagined)"):
+            with self.subTest(title=title):
+                v = filters.decide({"title": title, "duration": 250,
+                                    "channel": "Some Fan"})
+                self.assertEqual(v["kind"], filters.NOTAUDIO, title)
+        # an official remix single by the artist is a release, not a bootleg
+        official = filters.decide({"title": "Smells Like Teen Spirit (Remix)",
+                                   "duration": 250, "channel": "Nirvana",
+                                   "official": True})
+        self.assertEqual(official["kind"], filters.TRACK)
+
+    def test_yt_search_drops_a_fan_upload_when_the_original_answer_is_there(self):
+        fan, official = self._fan("fan1"), self._official("off1")
+        with mock.patch.object(prov, "ytm_enabled", return_value=True), \
+             mock.patch.object(prov, "ytm_search", return_value=[fan, official]):
+            rows = prov.yt_search("nirvana songs", limit=8)
+        self.assertEqual([t["id"] for t in rows], ["off1"],
+                         "the fan re-upload outranked the artist's own recording")
+
+    def test_yt_search_keeps_fan_uploads_when_no_original_exists(self):
+        fan1, fan2 = self._fan("fan1"), self._fan("fan2", title="Come as You Are")
+        with mock.patch.object(prov, "ytm_enabled", return_value=True), \
+             mock.patch.object(prov, "ytm_search", return_value=[fan1, fan2]):
+            rows = prov.yt_search("a very obscure local band", limit=8)
+        self.assertEqual(set(t["id"] for t in rows), {"fan1", "fan2"},
+                         "no original was found; the uploads are still music")
+
+
+class BrowseTests(unittest.TestCase):
+    """
+    The deep Artist / Album page data comes off YouTube Music's *browse* endpoint,
+    not the search the queue uses. These feed synthetic InnerTube responses through
+    the parser (the same walkers search uses) so the rows a page will draw are
+    pinned here without the network. A response the parser does not recognise must
+    yield [] - the caller falls back to an ordinary search, never to a broken page.
+    """
+
+    SEARCH_ALBUM = {"contents": {"sectionListRenderer": {"contents": [
+        {"musicShelfRenderer": {"contents": [{
+            "musicTwoRowItemRenderer": {
+                "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails":
+                    [{"url": "https://i.ytimg.com/vi/dummy/hqdefault.jpg",
+                      "width": 544, "height": 544}]}}},
+                "title": {"runs": [{"text": "Dummy"}]},
+                "subtitle": {"runs": [{"text": "Album • Portishead • 1994"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "BDEADBEEF"}},
+            }}]}}]}}}
+
+    BROWSE_ALBUM = {"contents": {"sectionListRenderer": {"contents": [
+        {"musicShelfRenderer": {"contents": [
+            {"musicResponsiveListItemRenderer": {
+                "playlistItemData": {"videoId": "roads1"},
+                "flexColumns": [
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text":
+                        {"runs": [{"text": "Roads"}]}}},
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text":
+                        {"runs": [{"text": "Portishead • Dummy"}]}}},
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text":
+                        {"runs": [{"text": "5:03"}]}}}],
+                "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails":
+                    [{"url": "https://i.ytimg.com/vi/roads1/mqdefault.jpg",
+                      "width": 60, "height": 60}]}}}}},
+            {"musicResponsiveListItemRenderer": {
+                "playlistItemData": {"videoId": "roads2"},
+                "flexColumns": [
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text":
+                        {"runs": [{"text": "Sour Times"}]}}},
+                    {"musicResponsiveListItemFlexColumnRenderer": {"text":
+                        {"runs": [{"text": "Portishead • Dummy • 3:58"}]}}}]}}
+        ]}}]}}}
+
+    SEARCH_ARTIST = {"contents": {"sectionListRenderer": {"contents": [
+        {"musicShelfRenderer": {"contents": [{
+            "musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Portishead"}]},
+                "subtitle": {"runs": [{"text": "Artist"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "UCabc123"}},
+            }}]}}]}}}
+
+    BROWSE_ARTIST = {"contents": {"sectionListRenderer": {"contents": [
+        {"musicShelfRenderer": {"contents": [
+            {"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Dummy"}]},
+                "subtitle": {"runs": [{"text": "Album • Portishead • 1994 • 10 songs"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "BDEADBEEF"}}}},
+            {"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Portishead"}]},
+                "subtitle": {"runs": [{"text": "Album • Portishead • 1997 • 12 songs"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "B2"}}}},
+            {"musicTwoRowItemRenderer": {
+                "title": {"runs": [{"text": "Roseland NYC Live"}]},
+                "subtitle": {"runs": [{"text": "Album • Portishead • 1998 • 14 songs"}]},
+                "navigationEndpoint": {"browseEndpoint": {"browseId": "B3"}}}},
+        ]}}]}}}
+
+    def _browse_json(self, *, search=None, browse=None, search_url=prov.YTM_ENDPOINT):
+        """A _http_json double that answers the search then the browse call."""
+        def fake(url, body, timeout=20):
+            if url == search_url:
+                return search if search is not None else None
+            if url == prov.YTM_BROWSE:
+                return browse if browse is not None else None
+            return None
+        return fake
+
+    def test_album_tracklist_uses_the_browse_endpoint(self):
+        fake = self._browse_json(search=self.SEARCH_ALBUM, browse=self.BROWSE_ALBUM)
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            rows = prov.ytm_album_tracklist("Dummy", artist="Portishead")
+        self.assertEqual([t["id"] for t in rows], ["roads1", "roads2"])
+        self.assertEqual(rows[0]["title"], "Roads")
+        self.assertEqual(rows[0]["album"], "Dummy", "the record name must travel")
+        self.assertEqual(rows[0]["release_year"], 1994, "year read off the card")
+        self.assertIn("Dummy", rows[0].get("note", ""))
+        self.assertEqual(rows[0]["url"],
+                         "https://music.youtube.com/watch?v=roads1")
+
+    def test_album_tracklist_returns_empty_when_no_album_card(self):
+        # a search with no Album card (e.g. a plain song result) must not crash
+        fake = self._browse_json(search={"contents": {"sectionListRenderer": {"contents":
+            [{"musicShelfRenderer": {"contents": []}}]}}})
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            rows = prov.ytm_album_tracklist("No Such Record")
+        self.assertEqual(rows, [])
+
+    def test_artist_discography_reads_albums_and_years(self):
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse=self.BROWSE_ARTIST)
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            albums = prov.ytm_artist_discography("Portishead")
+        titles = [a["title"] for a in albums]
+        self.assertEqual(titles, ["Dummy", "Portishead", "Roseland NYC Live"])
+        self.assertEqual(albums[0]["release_year"], 1994)
+        self.assertEqual(albums[0]["kind"], "album")
+        self.assertEqual(albums[0]["browse_id"], "BDEADBEEF")
+        self.assertIn("1994", albums[0]["note"])
+        # a discography entry is not a playable song: it has no video id
+        self.assertEqual(albums[0]["id"], "")
+
+    def test_artist_discography_returns_empty_on_unrecognisable_page(self):
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse={"contents": {}})
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            albums = prov.ytm_artist_discography("Portishead")
+        self.assertEqual(albums, [])
+
+    def test_discography_prefers_albums_over_the_singles_shelf(self):
+        # an artist page lists Albums then Singles & EPs; "why its show all single"
+        # was the singles dominating - so albums are the discography, singles only
+        # when an artist never cut an album
+        page = {"contents": {"sectionListRenderer": {"contents": [
+            {"musicShelfRenderer": {"contents": [
+                {"musicTwoRowItemRenderer": {
+                    "title": {"runs": [{"text": "The Singles EP"}]},
+                    "subtitle": {"runs": [{"text": "Single • Portishead • 1998"}]},
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "B_single"}}}},
+                {"musicTwoRowItemRenderer": {
+                    "thumbnail": {"musicThumbnailRenderer": {"thumbnail": {"thumbnails":
+                        [{"url": "https://i.ytimg.com/vi/dummy/hqdefault.jpg",
+                          "width": 544, "height": 544}]}}},
+                    "title": {"runs": [{"text": "Dummy"}]},
+                    "subtitle": {"runs": [{"text": "Album • Portishead • 1994"}]},
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "B_album"}}}},
+            ]}}]}}}
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse=page)
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            rows = prov.ytm_artist_discography("Portishead")
+        self.assertEqual([r["title"] for r in rows], ["Dummy"],
+                         "the singles shelf outranked the album")
+        self.assertEqual(rows[0]["browse_id"], "B_album")
+        self.assertEqual(rows[0]["release_year"], 1994)
+        self.assertTrue(rows[0]["thumbnail"].startswith("http"),
+                        "the discography entry carries the album cover")
+
+    def test_discography_falls_back_to_singles_for_an_artist_with_no_album(self):
+        page = {"contents": {"sectionListRenderer": {"contents": [
+            {"musicShelfRenderer": {"contents": [
+                {"musicTwoRowItemRenderer": {
+                    "title": {"runs": [{"text": "Only Single"}]},
+                    "subtitle": {"runs": [{"text": "Single • Artist • 2020"}]},
+                    "navigationEndpoint": {"browseEndpoint": {"browseId": "B1"}}}},
+            ]}}]}}}
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse=page)
+        with mock.patch.object(prov, "_http_json", side_effect=fake):
+            rows = prov.ytm_artist_discography("Portishead")
+        self.assertEqual([r["title"] for r in rows], ["Only Single"])
+
+    def test_clean_artist_strips_the_query_trailing_words(self):
+        self.assertEqual(prov._clean_artist("Portishead songs"), "Portishead")
+        self.assertEqual(prov._clean_artist("radiohead top songs"), "radiohead")
+        self.assertEqual(prov._clean_artist("Miles Davis"), "Miles Davis")
+
+    def test_page_rows_prefers_browse_and_falls_back_to_search(self):
+        # browse has a discography -> it wins, the song search is never asked
+        fake = self._browse_json(search=self.SEARCH_ARTIST, browse=self.BROWSE_ARTIST)
+        with mock.patch.object(prov, "_http_json", side_effect=fake), \
+             mock.patch.object(prov, "yt_search", return_value=[{"id": "song"}]) as ys:
+            rows = prov.page_rows("artist", "Portishead songs", "Portishead", "")
+        self.assertTrue(all(r["kind"] == "album" for r in rows), rows)
+        ys.assert_not_called()
+        # browse gives nothing -> the fallback search fills the page
+        fake = self._browse_json(search=None)
+        with mock.patch.object(prov, "_http_json", side_effect=fake), \
+             mock.patch.object(prov, "yt_search", return_value=[{"id": "song"}]) as ys:
+            rows = prov.page_rows("artist", "Portishead songs", "Portishead", "")
+        self.assertEqual(rows[0]["id"], "song")
+        ys.assert_called_once()
+
+
 # ---------------------------------------------------------------------- cli
 class CliTests(unittest.TestCase):
     def test_doctor_runs_and_reports(self):
@@ -853,6 +1215,24 @@ class AdvanceAndLearningTests(unittest.TestCase):
         with mock.patch.object(taste, "record_like"):
             d._learn_from_heard()
         self.assertTrue(any("heard 100%" in n for n in notes), notes)
+
+    def test_full_play_counts_as_a_strong_like(self):
+        # a whole song through is the strongest signal there is; it must teach
+        # the profile harder than a track that merely crossed the "enough" line
+        import taste
+        d = self._dj(2)
+        d.current = {"id": "full", "title": "full", "artist": "Whole Artist", "duration": 100}
+        d.last_pos = 96.0                          # >= HEARD_FULL (0.92)
+        notes = []
+        d._note = lambda m: notes.append(m)
+        with mock.patch.object(taste, "record_like") as like, \
+             mock.patch.object(taste, "record_skip") as skip:
+            d._learn_from_heard()
+            d._learn_from_heard()                  # once per track, not per poll
+        like.assert_called_once()
+        self.assertEqual(like.call_args.kwargs.get("strength"), 1.6, like.call_args)
+        skip.assert_not_called()
+        self.assertTrue(any("loved" in n for n in notes), notes)
 
     def test_exhausted_queue_clears_now_playing(self):
         d = self._dj(1)
@@ -1073,6 +1453,28 @@ class YtmSearchTests(unittest.TestCase):
         row = {"playlistItemData": {"videoId": "abc123"}}
         row.update(inner(60, 544))
         self.assertEqual(prov._ytm_thumb(row, "abc123"), "https://x/544.jpg")
+
+    def test_thumb_reads_google_art_under_any_renderer(self):
+        # album and artist art comes off Google's CDN (`lh3.googleusercontent.com`,
+        # `ggpht.com`) and under `videoThumbnailRenderer` as well as the music one;
+        # reading only i.ytimg.com / `musicThumbnailRenderer` left these rows art-less
+        row = {"playlistItemData": {"videoId": "abc123"},
+               "thumbnail": {"videoThumbnailRenderer":
+                   {"thumbnail": {"thumbnails": [
+                       {"url": "https://lh3.googleusercontent.com/cover=w544",
+                        "width": 544, "height": 544}]}}}}
+        self.assertEqual(
+            prov._ytm_thumb(row, "abc123"),
+            "https://lh3.googleusercontent.com/cover=w544",
+            "a Google CDN cover under a video renderer must become the row's art")
+        # ...and so must an album card: the discography/album row carries the cover
+        card = {"thumbnail": {"musicTwoRowItemRenderer": {
+            "thumbnail": {"videoThumbnailRenderer": {"thumbnails": [
+                {"url": "https://yt3.ggpht.com/album/s544?x=1",
+                 "width": 480, "height": 480}]}}}}}
+        self.assertEqual(prov._ytm_card_thumb(card),
+                         "https://yt3.ggpht.com/album/s544",
+                         "an album card built from ggpht art lost its cover")
 
     def test_the_artist_survives_a_row_that_only_says_song(self):
         # InnerTube sometimes puts "Song \u2022 5:02" in the visible column with
@@ -1768,6 +2170,268 @@ class SelfFillTests(_TmpHome):
         self.assertIn("taste cleared: 0 loved, 0 refused", dj.log[-1])
 
 
+class StationRefillTests(_TmpHome):
+    """
+    "if i station the queue for certain music, the next queue must be similar or
+    related to the vibes, not general vibes." A station refill used to ask the
+    *previous* typed request plus the whole-profile auto-mix, so a "Portishead -
+    Roads" station drifted back to "sad lofi" and the library's general sound.
+    The refill must stay on the seed while the station is live.
+    """
+
+    def _dj(self):
+        d = DJ(backend="none", headless=True)
+        d.request = ""
+        d.info = {}
+        return d
+
+    @staticmethod
+    def _row(i, artist="Someone"):
+        return {"id": f"v{i}", "title": f"Song {i}", "artist": artist, "duration": 210,
+                "url": f"u{i}"}
+
+    def test_a_station_refills_toward_the_seed_not_the_last_request(self):
+        d = self._dj()
+        d.station = "Portishead - Roads"
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        d.request = "sad lofi"          # stale: the mood that was typed before the station
+        d.auto = False
+        got = {}
+        def fake(request, **kw):
+            got["request"], got["kw"] = request, kw
+            return ([self._row(1, "Portishead")], {"queries": ["portishead top songs"]})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            d._topup(force=True)
+        self.assertIn("more like Portishead - Roads", got["request"], got)
+        self.assertEqual(got["kw"]["seeds"][0]["title"], "Roads",
+                         "the seed never reached the station's refill")
+        self.assertNotIn("sad lofi", got["request"],
+                         "the stale previous mood hijacked the station")
+        self.assertEqual([t["id"] for t in d.queue.items], ["v1"])
+
+    def test_auto_mix_prefers_station_queries_over_the_profile(self):
+        d = self._dj()
+        d.station = "Nirvana - Come as You Are"
+        d.station_seed = {"title": "Come as You Are", "artist": "Nirvana"}
+        rows = [{"id": "m1", "title": "Breed", "artist": "Nirvana", "duration": 200},
+                {"id": "m2", "title": "S/T", "artist": "Some", "duration": 200}]
+        with mock.patch.object(d, "_station_queries",
+                               return_value=["radio Nirvana"]) as sq, \
+                mock.patch.object(taste, "next_queries",
+                                  side_effect=AssertionError("the profile leaked in")) as nq, \
+                mock.patch.object(prov, "yt_search", return_value=rows), \
+                mock.patch.object(taste, "score_tracks", side_effect=lambda x, **k: x):
+            picked = d._auto_mix(keep=6)
+        sq.assert_called_once()
+        nq.assert_not_called()
+        self.assertTrue(picked, "a station should still auto-fill")
+        self.assertEqual(picked[0]["query"], "radio Nirvana")
+
+    def test_a_typed_search_ends_the_station(self):
+        # a new mood is its own vibe; the old station's seed must not steer it
+        d = self._dj()
+        d.station = "Portishead - Roads"
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        fake = lambda request, **kw: ([self._row(1)], {"queries": ["q"], "engine": "",
+                                     "why": "", "candidates": 1, "searched": 1,
+                                     "off_topic_filtered": 0, "llm_notes": [], "llm_error": ""})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            d.start("high energy")
+        self.assertEqual(d.station, "")
+        self.assertIsNone(d.station_seed)
+
+    def test_make_a_mix_ends_the_station(self):
+        d = self._dj()
+        d.station = "Portishead - Roads"
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        taste.record_like({"title": "Glory Box", "artist": "Portishead", "duration": 300})
+        fake = lambda request, **kw: ([self._row(1)], {"queries": ["q"], "engine": "",
+                                     "why": "", "candidates": 1, "searched": 1,
+                                     "off_topic_filtered": 0, "llm_notes": [], "llm_error": ""})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            d.taste_mix(count=9)
+        self.assertEqual(d.station, "")
+        self.assertIsNone(d.station_seed)
+
+    def test_station_queries_widen_and_never_repeat(self):
+        d = self._dj()
+        d.station_seed = {"title": "Roads", "artist": "Portishead"}
+        d._mix_used = {"portishead essential songs"}
+        qs = d._station_queries(limit=4)
+        self.assertTrue(qs)
+        self.assertNotIn("portishead essential songs", [q.lower() for q in qs])
+        self.assertIn("radio portishead", [q.lower() for q in qs])
+        self.assertTrue(any("more like roads" in q.lower() for q in qs))
+
+    def test_station_with_no_seed_falls_back_to_the_profile(self):
+        # an obscure one-off with no artist on the seed must still fill, not stall
+        d = self._dj()
+        d.station = "untitled ambient"
+        d.station_seed = {"title": "untitled", "artist": ""}
+        with mock.patch.object(d, "_station_queries", return_value=[]) as sq, \
+                mock.patch.object(taste, "next_queries",
+                                  return_value=["ambient music"]) as nq, \
+                mock.patch.object(prov, "yt_search",
+                                  return_value=[{"id": "m1", "title": "A", "artist": "X",
+                                                 "duration": 200}]), \
+                mock.patch.object(taste, "score_tracks", side_effect=lambda x, **k: x):
+            picked = d._auto_mix(keep=6)
+        sq.assert_called_once()
+        nq.assert_called_once()
+        self.assertEqual(picked[0]["artist"], "X")
+
+    def test_picking_a_song_replaces_the_upcoming_set(self):
+        # "what if i chose a song? the songs next to it build around it" - a plain
+        # pick clears what was queued ahead and puts the tight build there instead
+        d = self._dj()
+        d.queue.items = [dict(self._row(0)), dict(self._row(1)), dict(self._row(2)),
+                         dict(self._row(3))]
+        d.current = self._row(1)                 # the picked song is playing
+        d.queue.pos = 2                          # v2, v3 are the old upcoming
+        new_rows = [self._row(10, artist="Vibe"),
+                    self._row(11, artist="Vibe 2")]
+        def fake(request, **kw):
+            return (list(new_rows), {"engine": "", "why": "", "queries": [request],
+                                     "candidates": 2, "searched": 1,
+                                     "off_topic_filtered": 0, "llm_notes": [],
+                                     "llm_error": ""})
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            r = d.radio_from(self._row(1), count=10, replace=True)
+        self.assertTrue(r["ok"], r)
+        ids = [t["id"] for t in d.queue.items]
+        self.assertNotIn("v2", ids, "the old upcoming set survived a pick")
+        self.assertNotIn("v3", ids)
+        self.assertIn("v10", ids)
+        self.assertIn("v11", ids)
+        self.assertEqual(d.station_seed["title"], "Song 1",
+                         "the picked song is the anchor")
+
+    def test_radio_from_without_replace_still_appends(self):
+        # the explicit station button keeps its "don't lose the album" contract
+        d = self._dj()
+        d.queue.items = [dict(self._row(0)), dict(self._row(1))]
+        d.current = self._row(0)
+        d.queue.pos = 1
+        new_rows = [self._row(20, artist="Vibe")]
+        with mock.patch.object(dj_mod, "build_queue", lambda *a, **k: (list(new_rows), {
+                "queries": ["q"], "engine": "", "why": "", "candidates": 1,
+                "searched": 1, "off_topic_filtered": 0, "llm_notes": [],
+                "llm_error": ""})):
+            d.radio_from(self._row(1), count=6, replace=False)
+        ids = [t["id"] for t in d.queue.items]
+        self.assertIn("v1", ids, "the station button must not drop the queued rows")
+        self.assertIn("v20", ids)
+
+
+class VibeSubstitutionTests(_TmpHome):
+    """
+    "each search should be a genuinely distinct mix" - the reason a second search
+    used to sound like a blend of the last two is that `start()` *appended* to the
+    queue, so the rows of the earlier vibe were still sitting after the cursor. These
+    tests pin the contract: a new request replaces the previous one's queued rows
+    (never the audible song), the same request again refines it instead of clearing,
+    and a search that finds nothing never wipes a queue someone is still enjoying.
+    """
+
+    def _dj(self, **kw):
+        d = DJ(backend="none", headless=True, **kw)
+        d.queue = Queue()
+        return d
+
+    @staticmethod
+    def _row(i, **kw):
+        base = {"id": f"v{i}", "title": f"Song {i}", "artist": "Someone",
+                "duration": 210, "url": f"https://music.youtube.com/watch?v=v{i}"}
+        base.update(kw)
+        return base
+
+    def _fake_build(self, rows, engine="offline"):
+        seen = {"calls": []}
+
+        def fake(request, **kw):
+            seen["calls"].append(request)
+            return list(rows), {"engine": engine, "why": "", "queries": [request],
+                                "candidates": len(rows), "searched": 1,
+                                "off_topic_filtered": 0, "llm_notes": [],
+                                "llm_error": "", "avoid": []}
+        fake.seen = seen
+        return fake
+
+    def test_a_new_search_replaces_the_previous_vibes_queued_rows(self):
+        dj = self._dj()
+        # first search plays and leaves a queue; the audible row is the "now"
+        with mock.patch.object(dj_mod, "build_queue",
+                               self._fake_build([self._row(i) for i in range(3)])):
+            dj.start("sad lofi", count=6, on_progress=lambda *_: None)
+        dj.queue.pop()                      # simulate the first row playing
+        first_ids = [t["id"] for t in dj.queue.items[dj.queue.pos:]]
+        self.assertGreater(len(first_ids), 0, "the first search queued nothing")
+
+        with mock.patch.object(dj_mod, "build_queue",
+                               self._fake_build([self._row(200, artist="High Energy")])):
+            dj.start("high energy", count=6, on_progress=lambda *_: None)
+
+        remaining = [t["id"] for t in dj.queue.items[dj.queue.pos:]]
+        self.assertEqual(remaining, [self._row(200)["id"]],
+                         f"the old vibe survived: {remaining}")
+        self.assertNotIn(first_ids[0], remaining,
+                         "a row from the previous search was still queued")
+
+    def test_a_new_search_never_touches_the_audible_row_or_history(self):
+        dj = self._dj()
+        with mock.patch.object(dj_mod, "build_queue",
+                               self._fake_build([self._row(i) for i in range(3)])):
+            dj.start("sad lofi", count=6, on_progress=lambda *_: None)
+        playing = dj.queue.pop()            # what is audible
+        with mock.patch.object(dj_mod, "build_queue", self._fake_build([self._row(300)])):
+            dj.start("loud rock", count=6, on_progress=lambda *_: None)
+        # the audible row is before the cursor now (history), and the clear only
+        # ever touched rows *after* it - so it is still there
+        self.assertEqual(dj.queue.items[0]["id"], playing["id"],
+                         "the audible track was removed by the new search")
+        self.assertLessEqual(len(dj.queue.items), 2,
+                             "history rows or the audible row were cleared")
+
+    def test_searching_the_same_request_again_refines_instead_of_clearing(self):
+        dj = self._dj()
+        fake = self._fake_build([self._row(i) for i in range(3)])
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            dj.start("sad lofi", count=6, on_progress=lambda *_: None)
+        first_count = len(dj.queue.items)
+        with mock.patch.object(dj_mod, "build_queue", fake):
+            dj.start("sad lofi", count=6, on_progress=lambda *_: None)
+        self.assertEqual(len(dj.queue.items), first_count + 3,
+                         "re-searching the same phrase should widen that vibe")
+
+    def test_a_search_that_finds_nothing_never_wipes_the_queue(self):
+        dj = self._dj()
+        with mock.patch.object(dj_mod, "build_queue",
+                               self._fake_build([self._row(i) for i in range(3)])):
+            dj.start("sad lofi", count=6, on_progress=lambda *_: None)
+        before = len(dj.queue.items)
+        with mock.patch.object(dj_mod, "build_queue", self._fake_build([])):
+            r = dj.start("obscure rabbit hole", count=6, on_progress=lambda *_: None)
+        self.assertFalse(r["ok"])
+        self.assertEqual(len(dj.queue.items), before,
+                         "a dead search cleared the previous mix")
+
+    def test_a_make_a_mix_replaces_the_previous_searches_queued_rows(self):
+        taste.record_like({"title": "Glory Box", "artist": "Portishead", "duration": 300})
+        dj = self._dj()
+        with mock.patch.object(dj_mod, "build_queue",
+                               self._fake_build([self._row(i) for i in range(3)])):
+            dj.start("sad lofi", count=6, on_progress=lambda *_: None)
+        # the fact that the request was typed does not mean a mix keeps its rows
+        fresh = [self._row(i, artist="Portishead") for i in range(500, 504)]
+        with mock.patch.object(dj_mod, "build_queue", self._fake_build(fresh)):
+            r = dj.taste_mix(count=9)
+        self.assertTrue(r["ok"])
+        remaining = [t["id"] for t in dj.queue.items[dj.queue.pos:]]
+        self.assertGreater(len(remaining), 0)
+        self.assertTrue(all(tid.startswith("v5") for tid in remaining),
+                        f"a mix kept the old search's rows: {remaining}")
+
+
 class HardeningTests(_TmpHome):
     """
     The things you only notice by poking at a running app with one hand: a list
@@ -1912,6 +2576,75 @@ class _LoopPlayer:
 
     def volume(self, pct):
         pass
+
+
+class BackgroundRefillTests(unittest.TestCase):
+    """
+    "while the AI processing the queue everything is freeze like the audio doesnt
+    advance" - the engine/hang report. `next()` used to run `_topup()` ->
+    `build_queue` -> the LLM synchronously on the DJ loop, so a low queue made a
+    track change wait seconds-to-minutes for the planner and the player sat silent.
+    These pin that `next()` returns immediately and the refill happens behind it.
+    """
+
+    def _dj(self, n=2):
+        d = DJ(backend="none", headless=True)
+        d.auto = False
+        d.request = ""                       # stop the real refill adding things
+        d._resolve = lambda t: "http://stream"
+        d.add([{"id": f"a{i}", "title": f"T{i}", "artist": "X", "duration": 60,
+                "url": f"http://y/{i}", "query": "q"} for i in range(n)])
+        return d
+
+    def test_next_does_not_wait_for_a_slow_topup(self):
+        d = self._dj(2)
+        done = []
+        def slow_topup(keep=12, force=False):
+            done.append("start")
+            import time
+            time.sleep(0.6)                  # a stand-in for an LLM/network call
+            done.append("end")
+        d._topup = slow_topup
+        t0 = time.time()
+        got = d.next(force=True)
+        elapsed = time.time() - t0
+        self.assertIsNotNone(got, "a queued row must start even while refilling")
+        self.assertLess(elapsed, 0.4, "next() must not block on the planner")
+        self.assertEqual(done, ["start"], "the refill runs behind the play start")
+
+    def test_the_refill_thread_finishes_in_the_background(self):
+        d = self._dj(1)
+        done = []
+        def slow_topup(keep=12, force=False):
+            import time
+            time.sleep(0.5)
+            done.append("end")
+        d._topup = slow_topup
+        d.next(force=True)
+        self.assertEqual(done, [], "the background filler may still be running")
+        import time
+        time.sleep(0.9)
+        self.assertEqual(done, ["end"], "the background refill completes on its own")
+
+    def test_only_one_advance_is_made_when_two_calls_race(self):
+        d = self._dj(4)
+        gate = __import__("threading").Event()
+        orig = d._try_start
+        def slow_start(t):
+            gate.wait(1.0)                   # both threads press at once
+            return orig(t)
+        d._try_start = slow_start
+        got = []
+        def press():
+            got.append(d.next(force=True))
+        t1 = __import__("threading").Thread(target=press)
+        t2 = __import__("threading").Thread(target=press)
+        t1.start(); t2.start()
+        import time; time.sleep(0.25)
+        gate.set()
+        t1.join(); t2.join()
+        started = [t["id"] for t in got if t]
+        self.assertEqual(len(started), 1, "a race must not double-start a track")
 
 
 class AutoAdvanceTests(unittest.TestCase):
