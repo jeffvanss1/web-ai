@@ -664,6 +664,29 @@ BODY = """
      </div>
      <div class="sub" id="setnote"></div>
     </div>
+    <h2>Worker &amp; cloud</h2>
+    <div class="card set">
+     <div class="sub" id="worker-note"></div>
+     <label class="setrow"><span>Worker URL</span><input id="in-wurl" type="text"
+      placeholder="https://spotube-dj.&lt;you&gt;.workers.dev" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Worker token</span><input id="in-wtoken" type="password"
+      placeholder="the WORKER_TOKEN you deployed; blank keeps the saved one" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Profile</span><input id="in-wprofile" type="text"
+      placeholder="default" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Cloud sync</span>
+      <select id="in-wsync" class="infield">
+       <option value="on">on - mirror my taste to D1</option>
+       <option value="off">off - keep everything on this machine</option>
+      </select>
+     </label>
+     <div class="acts">
+      <button class="btn prim" id="wsavebtn">@@check@@<span>Save the Worker</span></button>
+      <button class="btn ghost" data-action="test_worker">@@sparkle@@<span>Test the worker</span></button>
+      <button class="btn ghost" data-action="worker_sync">@@queue@@<span>Save my taste now</span></button>
+      <button class="btn ghost" data-action="worker_pull">@@chev_l@@<span>Pull my taste</span></button>
+     </div>
+     <div class="sub" id="worker-sub"></div>
+    </div>
     <h2>Activity</h2>
     <div class="logbox" id="log"></div>
    </section>
@@ -1626,6 +1649,7 @@ function drawSettings(s){
   $("voice-lang").textContent = (st.dj_voice || "Despina") + " announces in " +
     (st.dj_lang || "Indonesian");
   $("unkeybtn").hidden = !st.key_set;
+  drawWorker(s);
   $("engine2").textContent = st.key_set
     ? "Planning goes through " + (st.model || "the default model") + " at " +
       (st.base || "generativelanguage.googleapis.com") + ", and the DJ's voice is " +
@@ -1634,6 +1658,63 @@ function drawSettings(s){
     : "No key saved, so a small offline parser plans the searches and the DJ voice stays " +
       "quiet/robotic. Paste a Gemini key (or a local model URL) and the DJ speaks in a real voice.";
   $("setnote").textContent = st.note || "";
+}
+/* The Worker card. It says which of the four things is true - no URL, a URL that
+   does not answer, one that answers but has no D1, or one that works - because
+   "engine: offline" is the same sentence for all four and they have four
+   different fixes. */
+function drawWorker(s){
+  const w = s.worker || {};
+  const fillIn = (node, v) => { if (node && document.activeElement !== node) node.value = v; };
+  const st = s.settings || {};
+  fillIn($("in-wurl"), st.worker_url || "");
+  fillIn($("in-wprofile"), st.worker_profile || "default");
+  const ws = $("in-wsync");
+  if (ws && document.activeElement !== ws) ws.value = (st.worker_sync === "off") ? "off" : "on";
+  const bits = [];
+  if (!w.configured) {
+    bits.push("No Worker URL, so the planner is the offline parser and the DJ does "
+      + "not speak. Deploy worker/ (see worker/README.md) and paste the URL here.");
+  } else if (!w.on) {
+    bits.push("Cloud sync is off: the Worker still plans and speaks, but nothing is "
+      + "saved to D1.");
+  } else if (w.ok === false && w.detail) {
+    bits.push("The Worker is not answering: " + w.detail);
+  } else {
+    bits.push("Profile '" + (w.profile || "default") + "' is mirrored to " + (w.url || "")
+      + (w.pushed_at ? " · last saved " + hhmm(w.pushed_at) : " · not saved yet"));
+    if (w.pending) bits.push(w.pending + " taste event(s) queued");
+  }
+  setText($("worker-note"), bits.join(" "));
+  const sub = [];
+  if (st.worker_note) sub.push(st.worker_note);
+  if (st.worker_token_set) sub.push("a Worker token is saved (never shown back)");
+  setText($("worker-sub"), sub.join(" · "));
+}
+function hhmm(ms){
+  try { const d = new Date(Number(ms));
+    return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+  } catch (e) { return ""; }
+}
+
+/* The spoken DJ: the server publishes a clip, the page plays it. An <audio>
+   element rather than Audio() so the element survives a redraw, and the play()
+   promise is caught because a browser that has never seen a gesture refuses it -
+   a rejected promise here used to throw into the tick and blank the pill. */
+let voiceEl = null, voiceId = "";
+function drawVoice(s){
+  const clip = s.voice_clip;
+  if (!clip || !clip.url) return;
+  if (clip.id === voiceId) return;                 // already playing this one
+  voiceId = clip.id;
+  if (!voiceEl) { voiceEl = new Audio(); voiceEl.volume = 0.9; }
+  voiceEl.src = clip.url;
+  const p = voiceEl.play();
+  if (p && p.catch) p.catch(() => {
+    // autoplay blocked: the next click on the page will let it through, so say
+    // so once instead of leaving the listener wondering why the DJ went quiet
+    toast("the browser blocked audio - click anywhere to hear the DJ");
+  });
 }
 function drawRecents(s){
   const box = $("recents");
@@ -1706,6 +1787,7 @@ function draw(s){
   region("drawPage", () => drawPage(s));
   region("drawTaste", () => drawTaste(s));
   region("drawSettings", () => drawSettings(s));
+  region("drawVoice", () => drawVoice(s));
   region("drawRecents", () => drawRecents(s));
   region("drawLog", () => drawLog(s));
   region("drawEmptyActs", () => drawEmptyActs(s));
@@ -1834,6 +1916,33 @@ $("savebtn").addEventListener("click", async () => {
     draw(j.state); $("in-key").value = "";
     toast(j.note || "saved");
   } catch (e) { toast(e.message); }
+});
+$("wsavebtn").addEventListener("click", async () => {
+  const f = {worker_url: $("in-wurl").value.trim(),
+             worker_profile: $("in-wprofile").value.trim(),
+             worker_sync: $("in-wsync").value};
+  const t = $("in-wtoken").value.trim();
+  if (t) f.worker_token = t;
+  try {
+    const j = await post("/api/settings", f);
+    draw(j.state); $("in-wtoken").value = "";
+    toast(j.note || "saved");
+  } catch (e) { toast(e.message); }
+});
+let pullArm = 0;
+document.querySelectorAll('[data-action="worker_pull"]').forEach((b) => {
+  b.addEventListener("click", (e) => {
+    // this one can overwrite tonight's listening with the cloud copy, so it
+    // asks on the page the way clear_taste asks on the wire
+    if (Date.now() - pullArm > 4000) {
+      e.stopPropagation();
+      pullArm = Date.now();
+      b.querySelector("span").textContent = "Tap again to replace this taste";
+      return;
+    }
+    pullArm = 0;
+    b.querySelector("span").textContent = "Pull my taste";
+  });
 });
 $("in-voice").addEventListener("change", () => {
   const v = $("in-voice");
