@@ -255,6 +255,56 @@ class SpeechTests(unittest.TestCase):
         # prove the clock really did advance well past 60s before the lead window
         self.assertGreater(clock["t"], 60.0)
 
+    def test_lead_in_wait_speaks_when_mpv_reports_no_duration(self):
+        # The DJ synthesis succeeded ("produced ... via live") but mpv was never
+        # called on the 2nd+ hand-off. The player bar shows no total time, i.e.
+        # mpv reports duration=0 for these streams. The old _wait_lead only fired
+        # `remaining <= lead`, which needs a length, so it bailed at a fixed ~120s
+        # deadline and the DJ went silent after the first (intro) line. With no
+        # length the DJ must wait on the player's own EOF signal (finished()), the
+        # same signal the engine advances on, and speak at the hand-off.
+        import djvoice
+        from unittest import mock
+        dj = _dj()
+        class P:
+            def __init__(self):
+                self.real_dur = 200.0
+            def progress(self):
+                pos = djvoice.time.monotonic()
+                return (min(pos, self.real_dur), 0.0)   # no reported duration
+            def finished(self):
+                return djvoice.time.monotonic() >= self.real_dur
+        dj.player = P()
+        clock = {"t": 0.0}
+        def tick():
+            clock["t"] += 1.0
+            return clock["t"]
+        with mock.patch.object(djvoice, "time") as tm:
+            tm.monotonic.side_effect = tick
+            tm.sleep.return_value = None
+            self.assertTrue(djvoice._wait_lead(dj, "v1"))
+        # it waited the whole (duration-less) song to its real end, not just ~2min
+        self.assertGreater(clock["t"], 120.0)
+
+    def test_lead_in_wait_stays_silent_on_a_manual_skip_of_a_durationless_track(self):
+        # A manual skip replaces the file before it can end, so finished() is False
+        # and a stale line must not be played even when mpv reports no duration.
+        import djvoice
+        from unittest import mock
+        dj = _dj()
+        class P:
+            def finished(self):
+                return False
+            def progress(self):
+                return (0.0, 0.0)
+        dj.player = P()
+        with mock.patch.object(djvoice, "time") as tm:
+            tm.monotonic.return_value = 5.0
+            tm.sleep.return_value = None
+            # the track has advanced on to v9 (user skipped): the line is stale
+            dj.current = {"id": "v9", "title": "Other", "artist": "Unknown"}
+            self.assertFalse(djvoice._wait_lead(dj, "v1"))
+
     def test_lead_line_beats_the_intro_when_handing_over(self):
         import djvoice
         dj = _dj()

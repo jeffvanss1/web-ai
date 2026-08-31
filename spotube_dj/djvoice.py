@@ -227,16 +227,35 @@ def _wait_lead(dj, current_id: str) -> bool:
     prog = getattr(player, "progress", None)
     if prog is None:
         return False
+    # mpv's own end-of-file signal (eof-reached / idle-after-play). It is used as a
+    # fallback when mpv reports no length for a stream, so a stream with no
+    # `duration` is still announced at the hand-off instead of going silent. It also
+    # tells a natural end apart from a manual skip, which is why it outranks the
+    # stale-track guard below.
+    fin = getattr(player, "finished", None)
     lead = lead_secs()
     # The clip is pre-synthesized at track START, so the wait must last the whole
     # song to reach the lead-in window near its END - a fixed short cap only ever
     # fired on sub-minute tracks and left every normal (3-5 min) song silent. Once
     # we can read a length we bound the wait by that track's own remaining time
-    # (+ the lead + a small margin) so a dead beat cannot hang the thread forever;
-    # a skip/advance (or the main loop's stall watchdog) changes `current.id` and
-    # aborts anyway. Until we know the length we fall back to ~2 minutes.
+    # (+ the lead + a small margin) so a dead beat cannot hang the thread forever.
+    # A manual skip/force-advance changes `current.id` and aborts (so a skipped
+    # track's line is never played); a *natural* end is the hand-off we want to
+    # speak at, so when the track has no reported length we wait for `finished()`.
     deadline = time.monotonic() + 120.0
     while True:
+        # The track naturally ended (EOF/idle-after-play): that IS the hand-off, so
+        # speak even if the engine has already advanced `current.id` in the same
+        # instant. A manual skip replaces the file before it can end, so `finished()`
+        # stays False there and the stale-guard below goes silent instead.
+        if fin is not None:
+            try:
+                if fin():
+                    return True
+            except Exception:
+                pass
+        # a skip/advance changes `current.id`; abort the stale line (never announce
+        # a song the user skipped) - but only after the natural-end check above.
         if (dj.current or {}).get("id") != current_id:
             return False                      # advanced/skipped; the line is stale
         if getattr(dj, "paused", False):
@@ -247,9 +266,13 @@ def _wait_lead(dj, current_id: str) -> bool:
         except Exception:
             return False
         if not dur or dur <= 0:
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(0.5)
+            # No reported length (e.g. a stream mpv cannot measure, which is why the
+            # player bar shows no total time). Don't give up at a fixed cap - the
+            # track still has an end, and the engine advances on `finished()`'s own
+            # EOF/idle signal. We wait on that same signal (checked at the top of the
+            # loop) so a normal-length song without a reported duration is still
+            # announced at the hand-off.
+            time.sleep(0.25)
             continue
         remaining = dur - pos
         if remaining <= min(lead, max(0.0, dur * 0.3)):   # short tracks lead sooner
