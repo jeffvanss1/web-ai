@@ -53,7 +53,8 @@ control Spotify. Teach the DJ to play audio like Spotube does. That's this repo.
 ## What this does
 
 ```
-your words ──> brain (Gemini / Ollama / offline parser)
+your words ──> brain ──> your Cloudflare Worker ──> Gemini      (optional; a Worker
+                    │      (or Ollama at home, or nothing)       you deploy yourself)
                     │  search queries
                     ▼
              YouTube Music search, music surface only   ← audio + metadata, free
@@ -62,13 +63,19 @@ your words ──> brain (Gemini / Ollama / offline parser)
              filters.py: is this a song?      ← live event / clip / set = refused
                     │  survivors
                     ▼
-             taste model: likes/skips/history ← learned locally, on your disk
+             taste model: likes/skips/history ← learned locally, mirrored to D1
                     │  ranked + deduped + interleaved
                     ▼
-       mpv (auto-DJ) ──or── m3u8 handed to Spotube
+       mpv (auto-DJ) ──or── m3u8 handed to Spotube ──or── the browser tab
+                    │
+                    └── the DJ says why: a line on screen, and (via the Worker)
+                        a voice over the last seconds of each track
 ```
 
-- **Zero credentials required.** No Spotify app, no OAuth, no key.
+- **Zero credentials required.** No Spotify app, no OAuth, no key. Everything
+  optional - the planner, the spoken DJ, the cloud copy of your taste - is
+  reached through one URL you deploy yourself, so there is no vendor and no
+  account between you and the music.
 - **Never calls a player endpoint.** There is a test that greps the source for
   `/me/player/play`, `start_playback`, `devices()` etc. and fails the build if
   any appear.
@@ -182,24 +189,47 @@ python3 -m spotube_dj --web --web-host 0.0.0.0               # phone on the same
 `--daemon` builds and serves its state over `127.0.0.1:8766`; the audio still
 comes out of mpv. It also opens the control API on `--port` (default 8765), so the
 terminal verbs keep working while you are watching the tab: `spotube-dj next` from
-another window moves the same queue you see on screen. `webapp.py` writes the page (one HTML document: the CSS, the JS
-and 15 inline SVG icons are all inlined, so there is no CDN, no webfont, and no
-outbound request that can hang the UI), and `web.py` is the socket in front of it:
+another window moves the same queue you see on screen.
+
+### The front end is four files
+
+`spotube_dj/static/` is the skin, as real files you can open in an editor:
 
 ```
-GET  /             the page
+static/index.html   the markup, with @@icon@@ tokens where an SVG goes
+static/app.css      the stylesheet, with @@COLOUR@@ tokens from viewmodel.py
+static/app.js       the tick, the regions, the key map, the verbs
+static/icons.json   34 inline SVG paths (no webfont, no CDN, no request)
+```
+
+`webapp.py` composes them at request time - substitutes the palette and the
+icons, and hands back either **three linked files** (what the server serves) or
+**one self-contained document** (`SPOTUBE_DJ_INLINE_PAGE=1`, or `--build-static`
+for a host that only takes one file). Both come from the same assets, so they
+cannot drift apart. The asset cache keys on `mtime`, so editing `app.css` and
+reloading the tab is a real edit cycle - no restart, no build step, no npm.
+
+`web.py` is the socket in front of it:
+
+```
+GET  /             the page (index.html + app.css + app.js, same origin)
+GET  /app.css      the stylesheet, no-store so an edit shows on reload
+GET  /app.js       the script, no-store
 GET  /api/state    one snapshot as JSON (2 KB; the page renders from that)
 GET  /api/stream   the same snapshot pushed every 0.7s (EventSource)
 POST /api/action   next prev pause resume playpause stop topup like unlike auto
                    seek volume request mix radio play_row queue_next love_row open
-                   test_brain clear_station clear_taste restore_taste  (24 verbs)
+                   test_brain test_worker worker_sync worker_pull clear_station
+                   clear_taste restore_taste                          (27 verbs)
 POST /api/search   q= - raw YouTube Music search, for picking a specific song
-POST /api/settings key= base= model= clear_key=1 - the Search & AI panel, saved to
-                   config.json at 0600; the reply carries a mask, never the key
+POST /api/settings key= base= model= clear_key= worker_url= worker_token=
+                   worker_profile= worker_sync= clear_worker_token=1, saved to
+                   config.json at 0600; the reply carries a mask, never a secret
 HEAD /*            the same routes, headers only (a 501 at `curl -I` reads as broken)
 PUT DELETE PATCH OPTIONS -> 405 JSON with an Allow header: this app takes GET and
                    POST, it does not do cross-origin writes, and it says so
 GET  /art/<name>   the cached artwork, at the size that slot actually draws
+GET  /voice/<clip> a spoken DJ line, for a tab with the page open (see below)
 ```
 
 What you get on screen: a sidebar (Home / Search / Your Library) with mood chips,
@@ -208,9 +238,11 @@ next / Love / Station from this*, the same search-and-refill verbs as the CLI, a
 collapsible activity drawer, and a bottom player bar with a click-to-seek track and
 volume. Your Library is where the model lives: the artists and moods it learned,
 each with a bar for its weight, the loved records, a *Make a mix from this* button
-(the same engine call as `spotube-dj mix`), a two-tap *Forget my taste*, and the
-Search & AI panel - paste a key, change the model, *Test the planner* runs the same
-probe `--doctor` runs and prints the answer in the log.
+(the same engine call as `spotube-dj mix`), a two-tap *Forget my taste*, and two
+settings cards: **Local model & voice** (a Gemini key for a Worker that asks for
+one, an Ollama/LM Studio base URL, the model, the DJ's voice and language) and
+**Worker & cloud** (see the next chapter) - *Test the planner* and *Test the
+worker* run the same probes `--doctor` runs and print the answer in the log.
 
 Two rules the tab follows so that "I pressed something and nothing happened"
 cannot come back:
@@ -383,10 +415,12 @@ And the state file: `state.json` is the one thing in this app a listener is like
 open and edit, so `artists` as a list, a `null` weight, `volume: "loud"`, or a
 half-written file now normalise to something usable instead of an `AttributeError`
 before the page opens. Measured on this machine with a live queue of 10: the page is
-75 134 bytes and answers in **1.3 ms**, `/api/state` is 8.9 KB in **1.8 ms** (median of
-20), and `tests/test_web.py` is 163 tests. `web-preview.html` in the repo root is that same
-page saved out of the server - open it to read the layout, but its `/art/...` hrefs
-only resolve while a server is running, so artwork needs `--web` to appear.
+20 887 bytes plus a 29 KB stylesheet and a 59 KB script, `/api/state` is 8.9 KB in
+**1.8 ms** (median of 20), and `tests/test_web.py` is 200 tests. `web-preview.html`
+in the repo root is the same page saved as one self-contained file - open it to read
+the layout, but its `/art/...` and `/api/...` addresses only resolve while a server
+is running, so artwork and playback need `--web`. `python3 -m spotube_dj
+--build-static out/` writes the three-file version for a static host.
 
 ## Install
 
@@ -503,6 +537,25 @@ Spotube/browser instead of playing it itself. Keyboard media keys work on mpv vi
 your desktop's MPRIS; with `playerctl` installed you can also bind buttons to
 `spotube-dj next`.
 
+### The DJ talks
+
+Two things say what is going on, and only one of them needs any network:
+
+* **the DJ line** - one sentence under the Now Playing tile, built locally from
+  what the mixer actually did ("you asked for 'dark synthwave'; it's one of your
+  picks; up next: Com Truise"). Always on, no key, nothing invented.
+* **the spoken DJ** - that sentence read aloud, and a lead-in over the last ten
+  seconds of a track. It needs a Worker (see below): `djvoice.py` asks
+  `POST /v1/speech` for the audio. The microphone button in the player bar
+  toggles it, `SPOTUBE_DJ_VOICE=off` switches it off for good, and the voice and
+  language are chosen in Settings (`Despina` announcing in Indonesian by
+  default).
+
+With no tab open the clip is played by mpv; with the page open the tab plays it,
+so the audio comes out of the same speakers as the page and the volume keys you
+are already using. Either way a voice failure is a note in the log, not a
+stopped song.
+
 ### Skipping fast, and why a song used to sit at the end
 
 Two things a listener hits on purpose - pressing next twice, and letting a track run
@@ -578,13 +631,14 @@ breaks — like/skip inside the DJ builds the profile instead.
 ## Optional: better query planning
 
 The brain has three modes and the pill in the header says which one you are in
-(`smart search: on` / `smart search: on` for a local model / `built-in search`, or
-`smart search: failed` in red when a key is saved and the calls are not working).
+(`smart search: worker` / `smart search: local` / `built-in search`, or
+`smart search: failed` in red when an endpoint is configured and the calls are
+not working).
 
 ```bash
-export GEMINI_API_KEY=...                         # free Google AI Studio key
-export SPOTUBE_DJ_MODEL=gemini-3.5-flash          # the default; see the note below
-export SPOTUBE_DJ_BASE_URL=http://localhost:11434 # Ollama / LM Studio - no key needed
+export SPOTUBE_DJ_WORKER_URL=https://spotube-dj-worker.<you>.workers.dev  # Gemini, via your Worker
+export SPOTUBE_DJ_WORKER_TOKEN=...                                 # if you deployed one
+export SPOTUBE_DJ_BASE_URL=http://localhost:11434                  # Ollama / LM Studio instead
 export SPOTUBE_DJ_MODEL=llama3.2:latest
 export SPOTUBE_DJ_LLM_TIMEOUT=90                  # slow machine / big model
 ```
@@ -592,11 +646,26 @@ export SPOTUBE_DJ_LLM_TIMEOUT=90                  # slow machine / big model
 or save them once so they survive a restart:
 
 ```bash
-python3 -m spotube_dj --set-key AIza... --set-model gemini-3.5-flash
+python3 -m spotube_dj --set-worker https://spotube-dj-worker.<you>.workers.dev
+python3 -m spotube_dj --set-worker-token ... --set-worker-profile laptop
+python3 -m spotube_dj --test-worker       # health, then one real plan call
 python3 -m spotube_dj --set-base http://localhost:11434 --set-model llama3.2
-python3 -m spotube_dj --test-brain       # one real round trip, prints why it failed
-python3 -m spotube_dj --clear-key        # forget all of it
+python3 -m spotube_dj --test-brain        # one real round trip, prints why it failed
 ```
+
+**A Gemini API key alone is no longer an engine.** This app does not call
+`generativelanguage.googleapis.com` from your machine at all - not for plans, not
+for the DJ's voice. Gemini is reached through **your** Cloudflare Worker, which
+holds the key as a `wrangler secret`. The practical effects: the key is not in a
+dotfile on a laptop, not in a shell history, and not in a process list; the model
+ladder and the payload-shape negotiation happen once, server-side, instead of
+being re-attempted on every machine you install; and the spoken lines and your
+taste profile can be shared between machines. A key you save locally is only
+ever sent when a Worker explicitly asks for one ("Test the worker" says so), and
+then only as an `X-Gemini-Key` header.
+
+If you have no Worker: set `--set-base http://localhost:11434` for Ollama, or
+leave both alone and use the offline parser (see below).
 
 Settings go to `~/.spotube-dj/config.json` (`chmod 600`). Environment
 variables win over that file. A *blank* field in the Settings dialog means
@@ -613,27 +682,32 @@ never gates playback.
 
 `gemini-2.0-flash` was shut down on 2026-06-01 and `gemini-2.5-flash` follows on
 **2026-10-16**. A hard-coded default turning into a 404 is exactly how "0%
-success" happened here, so the default is `gemini-3.5-flash` and `brain.py`
+success" happened here, so the default is `gemini-3.5-flash` and the **Worker**
 walks a short ladder (`3.5-flash`, `3.1-flash-lite`, `3.6-flash`, `3.7-flash`).
 If the API says *"this model is no longer available, use models/X"*, it retries
-with **X** immediately, saves that as your model, and logs the switch:
+with **X** immediately and tells the client which model answered:
 
 ```
-[brain] gemini: gemini-2.0-flash is retired - the API says to use gemini-3.6-flash, trying that
-[brain] gemini: model set to gemini-3.6-flash (saved to config.json)
+[brain] worker: gemini-3.5-flash is retired - the API says to use gemini-3.6-flash, trying that
+[brain] switched the model to gemini-3.6-flash (saved to config.json)
 ```
 
-Pick any current id from <https://ai.google.dev/gemini-api/docs/models>; the
+The client does **not** walk the ladder again — the Worker already did, and a
+second walk would multiply the calls for no reason. Set `GEMINI_MODEL_LADDER` in
+`worker/wrangler.toml` to change the list for every machine at once.
+
+Pick any current id from <https://ai.google.dev/gemini-api/docs/models>. The
 request uses the documented `generationConfig.responseFormat` shape (older
 `responseMimeType` spelling and a no-config fallback are tried if an endpoint
-rejects it), and the key travels in the `x-goog-api-key` header rather than the
+rejects it), and the key travels in an `x-goog-api-key` header rather than the
 URL, so it cannot leak into a log line or shell history.
 
 ### When the AI seems dead
 
-Ask it directly instead of guessing — in the page: **gear → Test the planner**; CLI:
-`--test-brain` or the `AI brain` line of `--doctor`. Both make one real request
-and print the actual reason. Every one of these used to look identical
+Ask it directly instead of guessing — in the page: **gear → Test the planner**
+(or *Test the worker*); CLI: `--test-brain` / `--test-worker`, or the `AI brain`
+and `cloudflare worker` lines of `--doctor`. Each makes one real request and
+prints the actual reason. Every one of these used to look identical
 ("engine: offline", 0% success):
 
 | What you see | What it means |
@@ -641,9 +715,9 @@ and print the actual reason. Every one of these used to look identical
 | `HTTP 400 ... API key not valid` | key pasted with a space/missing char, or from the wrong console (Gemini reports a dead key as 400, not 401) |
 | `HTTP 403 key has no access` | project/region restriction on that key |
 | `HTTP 429 quota exceeded` | free tier is used up (per minute *and* per day) — wait, or go local |
-| `the API has no such model` / `no longer available` | the *model* id expired - see below; it usually self-heals |
+| `the API has no such model` / `no longer available` | the *model* id expired - see above; it usually self-heals |
 | `nothing listening at http://localhost:11434` | Ollama not running: `ollama serve` |
-| `connection refused by https://generativelanguage...` | firewall/VPN/DNS, not your key |
+| `the Worker did not answer` | see the Worker table below: not deployed, wrong token, or a typo in the URL |
 | `timed out after 45s` | raise `LLM timeout`, or use a smaller model |
 | `response truncated mid-JSON` | the model thought too long; raise timeout / smaller model |
 | `could not parse model output` | it answered in prose; check `--test-brain` output text |
@@ -657,11 +731,126 @@ broken key is visible instead of silent.
 (the removed Tk skin, kept because it shows the shape of the answer: the failed call
 printed where the mix is, not swallowed)
 
+## The Cloudflare Worker
+
+Gemini, the taste profile and the DJ's voice all go through one small Worker you
+deploy yourself. It is in this repo, under `worker/`:
+
+```
+spotube_dj/webapp.py   ──▶  static/index.html · app.css · app.js   (the skin)
+spotube_dj/brain.py    ──▶  POST /v1/plan        (a request -> search queries)
+spotube_dj/djvoice.py  ──▶  POST /v1/speech      (a sentence -> audio/wav)
+spotube_dj/web.py      ──▶  GET/PUT /v1/state    (your taste profile, in D1)
+                            POST/GET /v1/events  (what you liked/skipped, in D1)
+```
+
+The app is a pure client of it. Nothing in `spotube_dj/` opens a socket to
+`generativelanguage.googleapis.com` any more, and there is no fallback that does
+- if the Worker is unreachable the DJ keeps playing with the offline parser and
+says so. That is the trade: **one URL to configure instead of a key per machine.**
+
+### Deploy it, once
+
+```bash
+cd worker
+npm install                                        # just wrangler
+npx wrangler login
+npx wrangler d1 create spotube-dj                  # paste the id into wrangler.toml
+npx wrangler d1 execute spotube-dj --file=schema.sql --remote
+npx wrangler secret put GEMINI_API_KEY              # free, from Google AI Studio
+npx wrangler secret put WORKER_TOKEN                # openssl rand -hex 32
+npx wrangler deploy
+```
+
+Then point the app at it - in the page (**gear → Worker & cloud → Save the
+Worker**) or from the terminal:
+
+```bash
+python3 -m spotube_dj --set-worker https://spotube-dj-worker.<you>.workers.dev
+python3 -m spotube_dj --set-worker-token "$(openssl rand -hex 32)"
+python3 -m spotube_dj --test-worker
+```
+
+`--test-worker` calls `/v1/health`, then makes a real plan call, and prints what
+it found: which model answered, whether D1 is bound, and whether the Worker is
+holding a key or waiting for yours. (`clips: false` in that report is the
+default and is fine - it just means spoken lines are not being reused.) `--doctor` gets its
+own `cloudflare worker` line for the same reason: "brain: offline" hides four
+different faults (no URL, not deployed, wrong token, no D1) that have four
+different fixes.
+
+**Deploy `WORKER_TOKEN`.** Without it every route is open to anyone who learns
+the URL - including `PUT /v1/state`, which can overwrite your taste profile.
+With `GEMINI_API_KEY` absent instead, the Worker relays a key the client sends
+(`x-gemini-key`), which is how one paid Worker can serve a friend's install
+without handing over the key.
+
+### What your taste does in D1
+
+Every like, dislike and skip is appended to an **event log** and the profile
+itself is mirrored as one row per profile name (`WORKER_PROFILE`, default
+`default`):
+
+* the local disk stays authoritative - sync is a mirror, never a source of truth
+  you have to trust;
+* pushes are debounced 20 s and skipped entirely when nothing changed, so a mix
+  that touches the profile a dozen times is one write;
+* events flush every 15 s, and on startup a machine replays what it missed and
+  then **adopts** the cloud profile - but only if its own is empty. A laptop
+  that has learned something is never silently overwritten; *Pull my taste* is
+  two taps for exactly that reason, and it leaves a backup either way.
+
+Turn it off per machine with `WORKER_SYNC=off` (Settings → Worker & cloud) and
+everything stays on that disk.
+
+### The spoken DJ, in the tab
+
+`djvoice.py` asks the Worker for `POST /v1/speech` and gets WAV bytes back; the
+Worker wraps raw PCM in a header. **No bucket is required** - the R2 clip cache
+is commented out in `wrangler.toml` by default, so there is one less thing to
+create. Turn it on (`wrangler r2 bucket create spotube-dj-clips` + uncomment
+the `[[r2_buckets]]` block) if you want a line the DJ says twice to be
+synthesized once; off, every line costs one call.
+
+Where it plays depends on whether a tab is listening:
+
+* **the page is open** - the clip is written under `~/.spotube-dj/voice/` and
+  the next tick tells the tab to fetch `/voice/<clip>.wav` and play it through
+  the page's own `<audio>`. The last 6 clips are kept.
+* **no tab (headless `--daemon`)** - mpv plays the file directly, as before.
+
+A sink that queues audio for a browser that is not there would play late or not
+at all, and "the DJ went quiet" is the report either way, so the sink declines
+and mpv takes over.
+
+The Live API is not used: a Worker cannot open a client WebSocket, so
+`*-live-*` model names are mapped onto the REST TTS model server-side and the
+switch is reported in an `X-Voice-Notes` header.
+
+### When the Worker seems dead
+
+| What you see | What it means |
+|---|---|
+| `no Worker URL set` | nothing configured - `--set-worker`, or Settings → Worker |
+| `Worker: not deployed / not reachable` | the URL is right and nothing answers: `wrangler deploy`, or a typo in the subdomain |
+| `Worker: HTTP 401 (auth)` | `WORKER_TOKEN` mismatch - the token in Settings must be the one you put in the Worker |
+| `Worker: this Worker has no D1 database` | `d1 create` + the id in `wrangler.toml` + `--file=schema.sql --remote`. Plans still work; sync does not |
+| `Worker: could not find that model` | Google retired the name; the Worker walks the ladder and saves what worked. Raise `GEMINI_MODEL_LADDER` in `wrangler.toml` if it keeps happening |
+| `Worker: quota` | the free tier is used up - it is per minute *and* per day. Wait, or go local |
+| `Worker: this Worker needs your Gemini key` | no `GEMINI_API_KEY` secret - paste one in Settings (it is sent as a header, and only to this Worker) |
+| `Worker: timed out after 45s` | `SPOTUBE_DJ_LLM_TIMEOUT`, or a smaller model |
+
+The full contract - every route, error kind and env var - is in
+[`worker/README.md`](worker/README.md). `cd worker && npm test` runs its 26 tests
+and `npm run check` does a real `wrangler deploy --dry-run`; neither needs a
+network or a Cloudflare account. Run `check` before `deploy`: it is the only
+thing that builds the bundle the way Cloudflare will.
+
 ## Files
 
 | Path | Role |
 |---|---|
-| `spotube_dj/brain.py` | request → queries. Gemini / OpenAI-compatible / offline |
+| `spotube_dj/brain.py` | request → queries: the Worker, a local OpenAI-compatible endpoint, or the offline parser |
 | `spotube_dj/providers.py` | YT-Music search (InnerTube; yt-dlp fallback), stream URLs, Spotify metadata, m3u8 |
 | `spotube_dj/filters.py` | what counts as a song: live events, broadcasts, clips, sets, AI fakes - one verdict per candidate |
 | `spotube_dj/audiocache.py` | downloads the next tracks ahead of playback - priority lane, LRU by size, and the stream URL it learns on the way is shared with the player |
@@ -670,10 +859,16 @@ printed where the mix is, not swallowed)
 | `spotube_dj/dj.py` | queue, auto-DJ loop, HTTP control server |
 | `spotube_dj/player.py` | mpv over IPC, `playerctl`, browser handoff |
 | `spotube_dj/__main__.py` | CLI |
-| `spotube_dj/webapp.py` | the browser page: palette, CSS, JS, inline icons and the rebuild guard, generated as one self-contained document |
-| `spotube_dj/web.py` | localhost HTTP/SSE front end over the same `DJ`: routes, actions, artwork warm-up, path and Host guards |
+| `spotube_dj/web.py` | localhost HTTP/SSE front end over the same `DJ`: routes, actions, artwork warm-up, the voice bus, path and Host guards |
+| `spotube_dj/webapp.py` | composes `static/` into the page: palette and icon substitution, one-document or three-file |
+| `spotube_dj/static/` | the front end as files: `index.html`, `app.css`, `app.js`, `icons.json` |
+| `spotube_dj/workerclient.py` | the only module that talks to the Worker: health, plan, text, speech, state, events |
+| `spotube_dj/cloudstate.py` | the D1 mirror: debounced profile push, the event outbox, replay and adopt |
+| `spotube_dj/djvoice.py` | the spoken DJ: `POST /v1/speech` from the Worker, played by the tab or by mpv |
 | `spotube_dj/viewmodel.py` | every colour, string, key-map and truncation rule the page and the CLI share - no UI code in it, so it is testable |
 | `spotube_dj/desktop.py` | the app-menu launcher: write, validate, remove |
+| `worker/src/index.js` | the Cloudflare Worker: `/v1/plan`, `/v1/text`, `/v1/speech`, `/v1/state`, `/v1/events` over D1 (R2 clip cache optional) |
+| `worker/schema.sql` | the two D1 tables: `profiles` and `events` |
 | `tests/test_dj_core.py` | 168 tests: queue, taste, search shape, YTM parsing, cache-first start, auto-mix, station seeds, repeat and shuffle, the self-filling queue, the end-of-song rules, the clear verb, the cache race |
 | `tests/test_filters_cache.py` | 41 tests: the filter against harvested searches, bins discovery, cache |
 | `tests/test_viewmodel_core.py` | 45 tests: the shared tables and rules - greeting boundaries, timings, row shapes, colours, the play lock |
@@ -681,15 +876,21 @@ printed where the mix is, not swallowed)
 | `tests/test_brain_config.py` | 57 tests: LLM errors, timeouts, saved config, query hygiene |
 | `tests/test_covers.py` | 40 tests: album lookup, rate limiting, the art cache, the per-slot size ladder and its fallback rung, no-ffmpeg behaviour, the status and same-name gates, the queue's lookup tuple |
 | `tests/test_desktop.py` | 15 tests: the .desktop file and the icon, in a temp $XDG_DATA_HOME |
-| `tests/test_web.py` | 163 tests: the clear-queue verb and its job lane, the published snapshot, every routed action, the transport verbs, library rows, artwork lanes, path traversal, the Host guard, the settings route, one real socket over the routes |
+| `tests/test_web.py` | 200 tests: the clear-queue verb and its job lane, the published snapshot, every routed action, the transport verbs, library rows, artwork lanes, path traversal, the Host guard, the settings route, one real socket over the routes |
+| `tests/test_worker.py` | 53 tests: the Worker client - key custody, error kinds, D1 sync and adopt, the asset split, the voice bus |
+| `worker/test/smoke.mjs` | 26 tests: the Worker's routes, token gate, model ladder and WAV wrapping (with and without R2), under `node --test` |
 
 ```bash
-python3 -m unittest discover -s tests -t .     # from the repo root: 577 tests
+python3 -m unittest discover -s tests -t .     # from the repo root: 767 tests
+cd worker && npm test                          # 26 more, no network
+cd worker && npm run check                     # + a real wrangler build (no account)
 ```
 
 No test touches the network: `tests/__init__.py` points the state dir at a scratch
-directory and turns off both the InnerTube search and the audio cache, so a test
-run cannot fire real HTTP or start a real download.
+directory and turns off both the InnerTube search and the audio cache; the Worker
+tests build the request object Cloudflare would hand the Worker and read the
+response. A test run cannot fire real HTTP, start a real download, or spend a
+token.
 
 ## Honest limits
 
@@ -713,6 +914,17 @@ run cannot fire real HTTP or start a real download.
 - **No official "AI DJ" voice/transition** — Spotify's DJ feature is a
   closed client-side feature, not an API. What you get is the sequencing,
   not Spotify's TTS intro.
+- **The spoken DJ is not offline speech.** There is no espeak fallback: the
+  voice is Gemini's, reached through your Worker. No Worker (or no tab and no
+  mpv) means the DJ writes its line on screen and stays quiet out loud.
+- **A Worker URL is now a requirement for Gemini.** There is deliberately no
+  direct-to-Google path any more, so an install that used to work with only a
+  saved key needs a Worker URL before it plans or speaks again. The offline
+  parser keeps working without one.
+- **Your taste profile is only as private as your Worker.** Sync is off until
+  you set a URL, and the profile itself contains nothing but artists, moods and
+  song titles - but it does land in a D1 table you own, under a profile name you
+  choose. `WORKER_SYNC=off` keeps it on the disk; deleting the row deletes it.
 - **The browser skin is localhost-only by default, and unauthenticated.** That is
   deliberate (`--web` refuses a foreign `Host:`; see the section above), but it also
   means there is no user, no token and no HTTPS: one DJ, one machine, one room. If
@@ -722,7 +934,7 @@ run cannot fire real HTTP or start a real download.
   gives you two artists on repeat, and that is the honest answer, not a bug: the
   engine refuses to invent a station from nothing (`no likes yet` rather than a
   random Top 40). Like a dozen things, or type one mood, and the same button
-  becomes a set. `clear` wipes the profile for good - there is no undo and no
-  second copy of it anywhere.
+  becomes a set. `clear` wipes the profile for good - there is no undo, and the
+  only second copy is the one you chose to mirror to D1.
 - YouTube can rate-limit a datacentre/VPS IP harder than a home connection.
   `--doctor` tells you immediately if that's you.

@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang=en>
+<head>
+<meta charset=utf-8>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Spotube DJ</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app" id="app">
+ <aside class="side panel">
+  <div class="side-head">
+   <span class="lt">@@library@@<span>Your Library</span></span>
+   <button class="iconbtn" id="lib-add" data-action="mix"
+    title="Make a mix from the songs you loved">@@plus@@</button>
+  </div>
+  <div class="filters" id="filters"></div>
+  <div class="libsort">
+   <button id="lib-sort" title="Change the order">@@sort@@<span id="lib-sort-l">Recents</span></button>
+   <span id="lib-count"></span>
+  </div>
+  <div class="librows" id="librows"></div>
+ </aside>
+
+ <main class="main panel" id="main">
+  <div class="bg" id="bg-main"></div><div class="bg bg2" id="bg-main2"></div>
+  <div class="scrim"></div>
+  <div class="scroller" id="scroller">
+  <div class="top">
+   <div class="navb">
+    <button class="iconbtn" id="nav-back" title="Back">@@chev_l@@</button>
+    <button class="iconbtn" id="nav-fwd" title="Forward">@@chev_r@@</button>
+   </div>
+   <label class="search">@@search@@
+    <input id="q" placeholder="What do you want to play?"
+     autocomplete="off" spellcheck="false"></label>
+   <div class="topright">
+    <span class="pill" id="jobpill" hidden>building</span>
+    <button class="pill" id="engine" data-view="library" title="How this mix is planned">brain</button>
+    <button class="avatar" id="open-settings" title="DJ settings">DJ</button>
+   </div>
+  </div>
+  <div class="content">
+   <section id="view-home">
+    <div class="greet">
+     <span id="greet">Good evening</span>
+     <button class="btn prim" id="playmix" data-action="playpause"
+      title="Play / pause (space)">@@play@@<span id="playmixt">Play</span></button>
+     <button class="btn ghost" id="topup" data-action="topup"
+      title="Refill the queue from your request and your likes">@@shuffle@@<span>Refill</span></button>
+    </div>
+    <div class="quick" id="quick"></div>
+    <h2 id="mixh">Made for you<span class="sub" id="mixs"></span></h2>
+    <div class="cards" id="cards"></div>
+   </section>
+   <section id="view-search" hidden>
+    <h2 id="search-h">Search<span class="sub" id="search-s"></span></h2>
+    <div class="acts"><button class="btn prim" id="mixfromq">@@sparkle@@<span>Mix from this</span></button></div>
+    <div class="rows" id="results"></div>
+   </section>
+   <section id="view-library" hidden>
+    <h2>Your Library<span class="sub">what the DJ knows, and how it thinks</span></h2>
+    <div class="card set">
+     <div class="sech">taste profile</div>
+     <div class="taste" id="taste"></div>
+     <div class="sub" id="tastenote"></div>
+     <div class="acts">
+      <button class="btn prim" id="mixbtn">@@shuffle@@<span>Make a mix from this</span></button>
+      <button class="btn ghost" id="wipebtn">@@stop@@<span>Forget my taste</span></button>
+      <button class="btn ghost" id="undobtn" hidden>@@queue@@<span>Bring my taste back</span></button>
+     </div>
+    </div>
+    <h2 id="lovedh">Loved songs</h2>
+    <div class="rows" id="loved"></div>
+    <h2>Local model &amp; voice</h2>
+    <div class="card set">
+     <div class="sub" id="engine2"></div>
+     <label class="setrow"><span>Gemini key</span><input id="in-key" type="password"
+      placeholder="only if your Worker asks for one - Test the worker says so"
+      autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Local model URL</span><input id="in-base" type="text"
+      placeholder="blank = none; http://localhost:11434 for Ollama / LM Studio"
+      autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Model</span><input id="in-model" type="text"
+      placeholder="llama3.2 locally, or the Worker's model (gemini-3.5-flash)"
+      autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>DJ voice</span>
+      <select id="in-voice" class="infield"></select>
+      <small class="setnote" id="voice-lang"></small>
+     </label>
+     <label class="setrow"><span>Language</span>
+      <select id="in-lang" class="infield"></select>
+      <small class="setnote">the language the DJ announces in</small>
+     </label>
+     <div class="acts">
+      <button class="btn prim" id="savebtn">@@check@@<span>Save</span></button>
+      <button class="btn ghost" data-action="test_brain">@@sparkle@@<span>Test the planner</span></button>
+      <button class="btn ghost" id="unkeybtn" hidden>@@close@@<span>Remove the key</span></button>
+     </div>
+     <div class="sub" id="setnote"></div>
+    </div>
+    <h2>Worker &amp; cloud</h2>
+    <div class="card set">
+     <div class="sub" id="worker-note"></div>
+     <label class="setrow"><span>Worker URL</span><input id="in-wurl" type="text"
+      placeholder="https://spotube-dj.&lt;you&gt;.workers.dev" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Worker token</span><input id="in-wtoken" type="password"
+      placeholder="the WORKER_TOKEN you deployed; blank keeps the saved one" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Profile</span><input id="in-wprofile" type="text"
+      placeholder="default" autocomplete="off" spellcheck="false"></label>
+     <label class="setrow"><span>Cloud sync</span>
+      <select id="in-wsync" class="infield">
+       <option value="on">on - mirror my taste to D1</option>
+       <option value="off">off - keep everything on this machine</option>
+      </select>
+     </label>
+     <div class="acts">
+      <button class="btn prim" id="wsavebtn">@@check@@<span>Save the Worker</span></button>
+      <button class="btn ghost" data-action="test_worker">@@sparkle@@<span>Test the worker</span></button>
+      <button class="btn ghost" data-action="worker_sync">@@queue@@<span>Save my taste now</span></button>
+      <button class="btn ghost" data-action="worker_pull">@@chev_l@@<span>Pull my taste</span></button>
+     </div>
+     <div class="sub" id="worker-sub"></div>
+    </div>
+    <h2>Activity</h2>
+    <div class="logbox" id="log"></div>
+   </section>
+   <section id="view-history" hidden>
+    <h2>Recently played<span class="sub">what this machine actually heard</span></h2>
+    <div class="rows" id="recents"></div>
+    <h2>The queue as the DJ built it</h2>
+    <div class="logbox" id="log2"></div>
+   </section>
+   <section id="view-page" hidden>
+    <div class="greet">
+     <span id="page-title">Loading</span>
+     <button class="btn ghost" id="page-back" title="Back to Now Playing">@@chev_l@@<span>Back</span></button>
+    </div>
+    <div class="sub" id="page-sub"></div>
+    <div class="rows" id="page-rows"></div>
+   </section>
+  </div>
+   </div>
+ </main>
+
+ <aside class="detail panel" id="detail">
+  <div class="bg" id="bg-side"></div><div class="bg bg2" id="bg-side2"></div>
+  <div class="dhead">
+   <b>Now playing · Discover</b>
+   <button class="iconbtn" id="detail-close" title="Hide">@@close@@</button>
+  </div>
+  <div class="dbody">
+    <div class="dhero">
+    <div class="cover" id="np-art"></div>
+    <div class="dtitle" id="np-title">Nothing playing</div>
+    <div class="dartist" id="np-by" hidden></div>
+   </div>
+   <div class="djline" id="djline">
+    <div class="lh">
+     <span class="djtag">the DJ</span>
+     <span class="djvnote" id="djvnote">gemini · Despina</span>
+     <button class="djvoice on" id="djvoice" data-action="voice"
+      title="The DJ reads each song out loud">@@vol@@<span id="djvoicet">on</span></button>
+    </div>
+    <div class="djtxt" id="djtext">Nothing playing yet - tell me a song or a mood.</div>
+   </div>
+   <div class="acts">
+    <button class="btn ghost" data-action="radio" id="np-station">@@mix@@<span>Station</span></button>
+    <button class="btn ghost" data-action="open" id="np-open">@@open@@<span>Spotube</span></button>
+    <button class="btn ghost" id="np-album" title="Open this album in YouTube Music">@@devices@@<span>See album</span></button>
+    <button class="btn ghost" data-action="stop" id="np-stop">@@stop@@<span>Stop</span></button>
+   </div>
+   <div class="sect"><h3>Why this song</h3><div class="why" id="np-why">
+    type a mood above, or pick something on the left</div></div>
+   <div class="sect"><h3>Credits</h3><dl class="kv" id="credits"></dl></div>
+   <div class="sect"><h3 id="simh">In your likes</h3><div class="mini" id="simil"></div></div>
+   <div class="sect" id="queue-sect">
+    <div class="qh"><h3 id="uph">Queue<span class="sub" id="upc"></span></h3>
+     <button class="iconbtn" id="clearq" data-action="clear_queue"
+      title="Clear the queue (the song keeps playing)">@@close@@</button></div>
+    <div class="rows" id="upnext"></div>
+    <div class="acts" id="empty-acts"></div>
+   </div>
+  </div>
+ </aside>
+</div>
+
+<footer class="player">
+ <div class="track">
+  <div class="tile" id="bar-art"></div>
+  <div style="min-width:0">
+   <div class="ti" id="bar-title">Not playing</div>
+   <div class="ar" id="bar-artist"></div>
+  </div>
+  <button class="iconbtn" id="b-love" data-action="like" title="Love this song (l)">@@heart_o@@</button>
+  <button class="iconbtn" id="b-more" title="More">@@dots@@</button>
+ </div>
+ <div class="center">
+  <div class="ctrls">
+   <button class="iconbtn" id="b-shuffle" data-action="shuffle" title="Shuffle (s)">@@shuffle@@</button>
+   <button class="iconbtn" data-action="prev" title="Previous (p)">@@prev@@</button>
+   <button class="play" id="b-play" data-action="playpause" title="Play / pause (space)">@@play@@</button>
+   <button class="iconbtn" data-action="next" title="Next (n)">@@next@@</button>
+   <button class="iconbtn" id="b-repeat" data-action="repeat" title="Repeat (r)">@@repeat@@</button>
+  </div>
+  <div class="seek">
+   <small id="t0">0:00</small>
+   <div class="seekbar" id="bar" role="slider" aria-label="Seek" tabindex="0">
+    <div class="t"><div class="f" id="fill"></div></div><div class="k" id="knob"></div>
+   </div>
+   <small id="t1">0:00</small>
+  </div>
+ </div>
+ <div class="right">
+  <span class="pill" id="cache"></span>
+  <button class="iconbtn" id="b-auto" data-action="auto" title="Keep mixing when the queue runs dry">@@sparkle@@</button>
+  <button class="iconbtn" id="b-queue" title="Queue">@@queue@@</button>
+  <button class="iconbtn" id="b-open" data-action="open" title="Open in Spotube">@@devices@@</button>
+  <span class="vol">
+   <button class="iconbtn" id="b-mute" title="Mute (m)">@@vol@@</button>
+   <input type="range" id="vol" min="0" max="100" value="70" title="Volume">
+  </span>
+  <button class="iconbtn" id="b-full" title="Fullscreen (f)">@@expand@@</button>
+ </div>
+</footer>
+<div class="toast" id="toast"></div>
+<script>@@APP_DATA@@</script>
+<script src="app.js"></script>
+</body>
+</html>

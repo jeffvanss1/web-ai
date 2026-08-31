@@ -1,0 +1,67 @@
+# spotube-dj worker - deploy with `wrangler deploy` from this directory.
+#
+# First time:
+#   npm install                       # just wrangler
+#   npm run check                     # dry-run build - needs no account, do it first
+#   npx wrangler login
+#   npx wrangler d1 create spotube-dj # paste the database_id below
+#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put WORKER_TOKEN      # strongly recommended (see below)
+#   npx wrangler d1 execute spotube-dj --file=schema.sql --remote
+#   npx wrangler deploy
+
+# The script name, and the first part of your URL:
+#   https://spotube-dj-worker.<your-subdomain>.workers.dev
+#
+# Rename this if the deploy ever says the name is taken - or if it complains
+# about a Durable Object class you have never heard of (e.g. `UserQueue`).
+# That is not this Worker: it means a *different* script already owns the name
+# in your account, and Cloudflare will not let a new script orphan its Durable
+# Objects. Pick a fresh name rather than deleting theirs - the rename costs you
+# nothing but a different URL, and `wrangler delete` on a script you did not
+# write destroys state you cannot restore.
+name = "spotube-dj-worker"
+main = "src/index.js"
+compatibility_date = "2026-06-01"
+
+# One Worker is enough for a home setup; the plan call is the slow one and it
+# runs while the queue is short, so a cold start in a far region is felt. Keep
+# the default (smart placement off) unless you deploy far from your listeners.
+observability = { enabled = true }
+
+[vars]
+# Where Gemini is reached. Only change this if you front it with a gateway.
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+# Preferred model. A retired name is not an outage: the Worker walks the ladder.
+GEMINI_MODEL = "gemini-3.5-flash"
+GEMINI_MODEL_LADDER = "gemini-3.5-flash,gemini-3.1-flash-lite,gemini-3.6-flash,gemini-3.7-flash"
+# Spoken DJ. A `*-live-*` name is mapped to its `-tts-` sibling: a Worker cannot
+# open the Live API's WebSocket as a client.
+GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+DJ_VOICE = "Despina"
+
+# Secrets (never inline these here):
+#   GEMINI_API_KEY  the Google AI Studio key. When it is set, every client uses
+#                   it and no client ever sends a key.
+#   WORKER_TOKEN    a shared secret for this Worker. Set it: the D1 routes are
+#                   otherwise open to anyone who learns the URL, and they can
+#                   read and overwrite your taste profile.
+#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put WORKER_TOKEN
+
+[[d1_databases]]
+binding = "DB"
+database_name = "spotube-dj"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# R2 is OFF by default: one less resource to create, pay for and think about,
+# and the spoken DJ works either way - without a bucket it just asks Gemini for
+# every line instead of reusing one.
+#
+# To turn the clip cache back on:
+#   npx wrangler r2 bucket create spotube-dj-clips
+# then uncomment the block below and `npx wrangler deploy`.
+#
+# [[r2_buckets]]
+# binding = "CLIPS"
+# bucket_name = "spotube-dj-clips"

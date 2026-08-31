@@ -28,6 +28,7 @@ import math
 import os
 import queue
 import re
+import shutil
 import threading
 import time
 import urllib.parse
@@ -37,9 +38,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import agent as agent_mod
+import cloudstate
 import config
 import covers
+import djvoice
 import player as player_mod
+import workerclient
 import providers as prov
 import taste
 import thumbs
@@ -48,6 +52,8 @@ import webapp
 
 DEFAULT_PORT = 8766
 ART_NAME = re.compile(r"^[A-Za-z0-9_-]{1,80}\.(?:png|jpe?g|gif)$")
+# the spoken DJ's clips: /voice/<name>.wav, same "a name is a name" rule as /art/
+VOICE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,96}\.wav$")
 # a state push per this many seconds; the progress bar is the thing that cares
 TICK = 0.7
 
@@ -193,6 +199,7 @@ def settings_view() -> dict:
     """
     import brain
     data = config.load_llm_config()
+    cfg = workerclient.settings()
     key = str(config.LLM_API_KEY or data.get("LLM_API_KEY") or "")
     return {"key_set": bool(key), "key_mask": mask(key),
             "base": str(config.LLM_BASE_URL or data.get("LLM_BASE_URL") or ""),
@@ -207,7 +214,14 @@ def settings_view() -> dict:
                           for name, gender, trait, lang in config.GEMINI_TTS_VOICES],
             "dj_lead": float(config.DJ_LEAD_SECS or 10.0),
             "engine": brain.configured_engine(),
-            "note": brain.why_offline()}
+            "note": brain.why_offline(),
+            # the Worker panel. The token is never sent to the page - only
+            # whether one is set - because this dict is drawn into the document.
+            "worker_url": str(cfg.get("url") or ""),
+            "worker_profile": str(cfg.get("profile") or "default"),
+            "worker_sync": str(cfg.get("sync") or "on"),
+            "worker_token_set": bool(cfg.get("token")),
+            "worker_note": cloudstate.status_line()}
 
 
 def engine_note(info: dict) -> str:
@@ -383,9 +397,10 @@ def build_state(ctx) -> dict:
         "auto": bool(st.get("auto")),
         "autoplay": bool((dj.state or {}).get("autoplay")),
         "voice": bool((dj.state or {}).get("voice", True)),
-        "voice_note": (("gemini · " + config.load_dj_voice() + " · " +
-                        config.load_dj_lang()) if config.LLM_API_KEY
-                       else "off (no key)"),
+        "voice_note": (("worker · " + config.load_dj_voice() + " · " +
+                        config.load_dj_lang()) if workerclient.configured()
+                       else "off (no Worker URL)"),
+        "voice_clip": ctx.voice_clip(),
         "volume": ctx.volume,
         "backend": str(st.get("backend") or ""),
         "idle": idle,
@@ -426,6 +441,7 @@ def build_state(ctx) -> dict:
                   "engine": engine_note(dj.info),
                   "last_request": str(prof.get("last_request") or "")},
         "settings": settings_view(),
+        "worker": cloudstate.status(),
     }
 
 
@@ -518,6 +534,58 @@ class Context:
         self._stop = threading.Event()
         self.note = ""                        # last one-shot message for the page
         self._workers: list[threading.Thread] = []
+        # the spoken DJ's browser sink. djvoice writes a temp WAV; the page plays
+        # it from /voice/<name>, so the voice comes out of the same machine as
+        # the music without a second process. `_voice_clip` rides in /api/state.
+        self._voice_dir = Path(config.APP_DIR) / "voice"
+        self._voice_clip: dict | None = None
+        self._voice_keep = 6
+
+    # -- the spoken DJ, played by the page -------------------------------------
+    def voice_clip(self) -> dict | None:
+        """The clip the page should be playing now, or None (see publish_voice)."""
+        return self._voice_clip
+
+    def publish_voice(self, path: str, text: str = "") -> bool:
+        """
+        `djvoice`'s sink: put a finished clip where the page can fetch it.
+
+        Returns False when no tab is listening, which is how a headless
+        `--daemon` keeps using mpv instead: a clip queued for a browser that
+        is not there would either be played late or not at all, and "the DJ
+        went quiet" is the report either way.
+        """
+        if not self._subs:
+            return False
+        try:
+            src = Path(str(path or ""))
+            if not src.is_file():
+                return False
+            self._voice_dir.mkdir(parents=True, exist_ok=True)
+            name = f"{int(time.time() * 1000)}-{src.stem[:12]}.wav"
+            shutil.copyfile(src, self._voice_dir / name)
+            self._voice_clip = {"id": name, "url": f"/voice/{name}",
+                                "text": str(text or ""), "ts": time.time()}
+            self._trim_voice()
+            # no broadcast: the 0.7 s tick picks `voice_clip` up on its own, and
+            # an SSE frame carrying only `voice` would be drawn as a whole state
+            # and blank every other region on the page.
+            return True
+        except Exception:                                    # noqa: BLE001
+            return False
+
+    def _trim_voice(self) -> None:
+        """Keep the last few clips: they are temp files with a microphone bill."""
+        try:
+            files = sorted(self._voice_dir.glob("*.wav"),
+                           key=lambda f: f.stat().st_mtime, reverse=True)
+        except OSError:
+            return
+        for old in files[self._voice_keep:]:
+            try:
+                old.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def start_job(self, target) -> bool:
         """
@@ -824,8 +892,10 @@ def action_request(ctx, fields: dict) -> str:
         try:
             if text:
                 ctx.dj.start(text, count=count)
+                cloudstate.record("request", {"q": text})
             else:
                 ctx.dj.taste_mix(count=count)
+                cloudstate.record("mix", {"from": "likes"})
         except Exception as e:            # a failed mix must not be silence
             ctx.dj._note(f"[warn] the mix could not be built: "
                          f"{e.__class__.__name__}: {e}")
@@ -841,6 +911,7 @@ def action_mix(ctx, fields: dict) -> str:
     def job():
         try:
             ctx.dj.taste_mix(count=24)
+            cloudstate.record("mix", {"from": "likes"})
         except Exception as e:
             ctx.dj._note(f"[warn] the mix could not be built: "
                          f"{e.__class__.__name__}: {e}")
@@ -954,10 +1025,20 @@ def action_row_dislike(ctx, fields: dict) -> str:
     if not t:
         return "that row is gone"
     taste.record_dislike(t)
+    cloudstate.record("dislike", _track_payload(t))
     ctx.dj.state = config.load_state()      # same reload DJ.like() does
     ctx.dj.queue.remove_id(str(t.get("id") or ""))
     ctx.dj._note(f"disliked: {t.get('title') or '?'}")
     return f"won't suggest '{t.get('title') or '?'}' again"
+
+
+def _track_payload(t: dict) -> dict:
+    """The fields another machine needs to apply a judgement to the same song."""
+    t = t or {}
+    return {"id": str(t.get("id") or ""), "title": str(t.get("title") or ""),
+            "artist": str(t.get("artist") or ""),
+            "display_title": str(t.get("title") or ""),
+            "display_artist": str(t.get("artist") or "")}
 
 
 def action_like(ctx, fields: dict) -> str:
@@ -965,8 +1046,10 @@ def action_like(ctx, fields: dict) -> str:
         return "nothing playing to love yet"
     if ctx.dj.is_liked(ctx.dj.current):
         ctx.dj.unlike()
+        cloudstate.record("unlike", _track_payload(ctx.dj.current))
         return "unloved"
     ctx.dj.like()
+    cloudstate.record("like", _track_payload(ctx.dj.current))
     return "loved"
 
 
@@ -1195,6 +1278,7 @@ def action_unfollow(ctx, fields: dict) -> str:
     if not name:
         return "which artist? send name=<artist>"
     n = taste_mod.forget_artist(name)
+    cloudstate.record("forget_artist", {"artist": name})
     ctx.dj._note(f"forgot {name} as a leaning" if n else f"nothing was leaning on {name}")
     return (f"{name} will not pull the mix any more"
             if n else f"the profile has no weight for {name}")
@@ -1273,6 +1357,78 @@ def action_test_brain(ctx, fields: dict) -> str:
     return "testing the AI planner - watch the activity log"
 
 
+def action_test_worker(ctx, fields: dict) -> str:
+    """
+    Ask the Worker what it can do, on a thread.
+
+    `Test the brain` proves the planner answers; this proves the *route* does -
+    the URL, the token, the D1 binding and the clip cache are four separate
+    reasons a configured Worker can still be useless, and only one of them is
+    visible from "engine: offline".
+    """
+    def job():
+        try:
+            config.apply_llm_overrides()
+            r = workerclient.probe()
+            ctx.dj._note(f"worker test: ok={r['ok']} {r['ms']}ms - {r['detail'][:180]}")
+            for n in (r.get("notes") or [])[:4]:
+                ctx.dj._note(f"worker: {n}")
+        except Exception as e:
+            ctx.dj._note(f"[warn] worker test failed: {e.__class__.__name__}: {e}")
+
+    if not workerclient.configured():
+        return "no Worker URL set - put one in Settings -> Worker first"
+    if not ctx.start_job(job):
+        return "one thing at a time - still working"
+    return "testing the Worker - watch the activity log"
+
+
+def action_worker_sync(ctx, fields: dict) -> str:
+    """Save the taste profile to D1 now, instead of waiting for the mirror thread."""
+    if not workerclient.configured():
+        return "no Worker URL set - the profile stays on this machine"
+    if not workerclient.sync_on():
+        return "cloud sync is off (Settings -> Worker)"
+
+    def job():
+        cloudstate.flush(note=ctx.dj._note)
+        when = cloudstate.push_now(note=ctx.dj._note)
+        if when:
+            ctx.dj._note(f"taste saved to the cloud (profile "
+                         f"'{cloudstate.status().get('profile')}')")
+        else:
+            ctx.dj._note("[warn] the taste profile could not be saved to the cloud "
+                         "- see the line above")
+
+    if not ctx.start_job(job):
+        return "one thing at a time - still working"
+    return "saving your taste to the cloud - watch the activity log"
+
+
+def action_worker_pull(ctx, fields: dict) -> str:
+    """
+    Take the cloud profile as this machine's.
+
+    Deliberately two taps: the page arms on the first (the action refuses
+    without `sure=1`) because this one can overwrite tonight's listening.
+    """
+    if not workerclient.configured():
+        return "no Worker URL set - there is nothing to pull from"
+    if str((fields.get("sure") or [""])[0]).strip() not in ("1", "yes", "true"):
+        return ("this replaces this machine's taste profile with the cloud one - "
+                "send sure=1 (or press Pull my taste again) to go ahead")
+
+    def job():
+        merged = cloudstate.replay(note=ctx.dj._note)
+        ctx.dj._note(cloudstate.adopt(force=True, note=ctx.dj._note))
+        if merged:
+            ctx.dj._note(f"merged {merged} taste event(s) from another machine")
+
+    if not ctx.start_job(job):
+        return "one thing at a time - still working"
+    return "pulling your taste from the cloud - watch the activity log"
+
+
 ACTIONS = {
     # next/prev are typed by a person, and DJ only lets a *forced* move past the
     # 45s retry hold - same rule the CLI verbs follow
@@ -1303,6 +1459,9 @@ ACTIONS = {
     "open_album": action_open_album,
     "open_artist": action_open_artist,
     "test_brain": action_test_brain,
+    "test_worker": action_test_worker,
+    "worker_sync": action_worker_sync,
+    "worker_pull": action_worker_pull,
     "clear_station": lambda c, f: _clear_station(c),
     "shuffle": action_shuffle,
     "repeat": action_repeat,
@@ -1352,9 +1511,24 @@ def save_settings(fields: dict) -> tuple[int, dict]:
         vals["LLM_API_KEY"] = ""
     elif one("key"):
         vals["LLM_API_KEY"] = one("key")
-    key_touched = ("key" in fields) or ("clear_key" in fields)
+    # the Worker panel. Blank URL means "off"; blank token means "no token", but
+    # only when the field was actually submitted - the input is emptied by the
+    # browser on every reload, so blanking it must not silently un-authenticate.
+    if "worker_url" in fields:
+        vals["WORKER_URL"] = one("worker_url")
+    if "worker_profile" in fields:
+        vals["WORKER_PROFILE"] = one("worker_profile") or "default"
+    if "worker_sync" in fields:
+        vals["WORKER_SYNC"] = one("worker_sync") or "off"
+    if one("clear_worker_token") == "1":
+        vals["WORKER_TOKEN"] = ""
+    elif one("worker_token"):
+        vals["WORKER_TOKEN"] = one("worker_token")
+    key_touched = (("key" in fields) or ("clear_key" in fields)
+                   or ("worker_token" in fields) or ("clear_worker_token" in fields))
     if not vals and not key_touched:
-        return 400, {"error": "nothing to save - send key, base, model or clear_key"}
+        return 400, {"error": ("nothing to save - send key, base, model, "
+                               "worker_url, worker_token or clear_key")}
     try:
         config.save_llm_config(**vals)
     except OSError as e:
@@ -1545,7 +1719,8 @@ HTML_HEADERS = {
                                "script-src 'unsafe-inline'; "
                                "img-src 'self' data: https://i.ytimg.com "
                                "https://lh3.googleusercontent.com https://yt3.ggpht.com; "
-                               "connect-src 'self'; font-src 'self'"),
+                               "connect-src 'self'; font-src 'self'; "
+                               "media-src 'self'"),
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "no-referrer",
@@ -1553,8 +1728,8 @@ HTML_HEADERS = {
 }
 
 
-ROUTES = ("/", "/api/state", "/api/stream", "/api/action", "/api/search",
-          "/api/settings", "/art/<file>")
+ROUTES = ("/", "/app.css", "/app.js", "/api/state", "/api/stream", "/api/action",
+          "/api/search", "/api/settings", "/art/<file>", "/voice/<clip>.wav")
 
 
 def not_found_payload() -> dict:
@@ -1643,7 +1818,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         if path in ("/", "/index.html"):
-            self._send(HTTPStatus.OK, webapp.page().encode(), "text/html; charset=utf-8")
+            self._page()
+        elif path in ("/app.css", "/app.js"):
+            self._static(path)
         elif path == "/api/state":
             self._json(HTTPStatus.OK, with_art(build_state(self.ctx), self.ctx))
         elif path == "/api/stream":
@@ -1653,6 +1830,8 @@ class Handler(BaseHTTPRequestHandler):
                    f'<rect width="24" height="24" rx="6" fill="{vm.ACCENT}"/>'
                    '<path d="M7 6.5v11L19 12z" fill="#000"/></svg>')
             self._send(HTTPStatus.OK, svg.encode(), "image/svg+xml")
+        elif path.startswith("/voice/"):
+            self._voice(path[len("/voice/"):])
         elif path.startswith("/art/"):
             self._art(path[len("/art/"):])
         elif path == "/api/search":
@@ -1742,6 +1921,51 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(HTTPStatus.OK, body, ctype,
                    {"Cache-Control": "public, max-age=86400"})
+
+    def _page(self) -> None:
+        """
+        The document. Two shapes, one source:
+
+        * the static site by default - index.html linking app.css and app.js,
+          which is what you edit and what `--build-static` deploys;
+        * one self-contained file with `SPOTUBE_DJ_INLINE_PAGE=1`, for a
+          save-as, a `curl > page.html`, or a host that only takes one file.
+
+        Both are built from the same static/ assets, so they cannot disagree.
+        """
+        html = (webapp.page() if os.environ.get("SPOTUBE_DJ_INLINE_PAGE") == "1"
+                else webapp.shell())
+        self._send(HTTPStatus.OK, html.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _static(self, path: str) -> None:
+        """app.css / app.js: same-origin, no-store so an edit shows on reload."""
+        got = webapp.asset(path)
+        if not got:
+            self._json(HTTPStatus.NOT_FOUND, not_found_payload())
+            return
+        body, ctype = got
+        self._send(HTTPStatus.OK, body, ctype,
+                   {"Cache-Control": "no-store", "Vary": "Accept-Encoding"})
+
+    def _voice(self, name: str) -> None:
+        """Serve one spoken-line clip. Same guards as /art/: a name is a name."""
+        name = urllib.parse.unquote(str(name or ""))
+        if not VOICE_NAME.match(name):
+            self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
+            return
+        # the same directory `publish_voice` writes to, not a second spelling of
+        # it: a clip that was published is reachable, one that was not is not
+        target = Path(self.ctx._voice_dir) / name
+        if not target.is_file():
+            self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
+            return
+        try:
+            body = target.read_bytes()
+        except OSError:
+            self._send(HTTPStatus.NOT_FOUND, b"", "text/plain")
+            return
+        self._send(HTTPStatus.OK, body, "audio/wav",
+                   {"Cache-Control": "private, max-age=3600"})
 
     def _stream(self) -> None:
         """Server-sent events: one push per tick, so there is no request storm."""
@@ -1844,6 +2068,22 @@ def serve(dj, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
     """
     ctx = Context(dj, volume=int((dj.state or {}).get("volume", 70) or 70))
     ctx.start()
+    # the spoken DJ plays through the page when a tab is attached, and through
+    # mpv when this is a headless daemon. `set_sink` is the whole switch: it is
+    # installed BEFORE the first mix so the opening track is announced the same
+    # way every later one is.
+    try:
+        djvoice.set_sink(ctx.publish_voice)
+        djvoice.set_logger(getattr(dj, "_note", None))
+    except Exception:
+        pass
+    # the profile's cloud mirror: catch up, then push on change. Started after
+    # the socket exists and never on the request path - D1 being down must cost
+    # a log line, not a stalled page.
+    try:
+        cloudstate.startup(dj, note=getattr(dj, "_note", None))
+    except Exception:
+        pass
     if control_port:
         try:
             dj.serve(control_port)
@@ -1887,6 +2127,7 @@ def serve(dj, *, host: str = "127.0.0.1", port: int = DEFAULT_PORT,
         print("\nstopping")
     finally:
         ctx.stop()
+        cloudstate.stop()
         ctx.dj.stop()
         httpd.server_close()
     return 0
@@ -1941,8 +2182,8 @@ def doctor_line() -> tuple[str, bool, str]:
         ok = bool(webapp.page())
     except Exception as e:
         return ("web player", False, f"page could not be built: {e.__class__.__name__}")
-    return ("web player", ok, f"http://127.0.0.1:{DEFAULT_PORT} - one HTML file, "
-            f"stdlib only, no CDN")
+    return ("web player", ok, f"http://127.0.0.1:{DEFAULT_PORT} - "
+            f"{len(webapp.static_files())} files from static/, stdlib only, no CDN")
 
 
 if __name__ == "__main__":            # python3 -m web  (dev: a demo DJ on a port)

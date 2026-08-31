@@ -18,6 +18,7 @@ import tests  # noqa: F401
 import brain
 import config
 import dj
+import workerclient
 
 
 class QueryHygieneTests(unittest.TestCase):
@@ -67,44 +68,72 @@ class _Iso(unittest.TestCase):
         for x in self._ps:
             x.start()
         self._saved = (config.LLM_API_KEY, config.LLM_BASE_URL,
-                       config.LLM_MODEL, config.LLM_TIMEOUT, brain._SHAPE_OK,
-                       brain.SUGGESTED_MODEL)
+                       config.LLM_MODEL, config.LLM_TIMEOUT,
+                       config.WORKER_URL, config.WORKER_TOKEN)
         brain.LAST_ERRORS.clear()
         brain.NOTES.clear()
-        brain._SHAPE_OK = 0          # the "which payload shape worked" cache leaks
-        brain.SUGGESTED_MODEL = None # between tests unless reset here
         config.LLM_BASE_URL = ""
+        # every test starts unconfigured unless it says otherwise: the Worker is
+        # the Gemini path now, so a URL left over from another test is exactly
+        # the kind of leak that makes a suite pass on one machine only
+        config.WORKER_URL = ""
+        config.WORKER_TOKEN = ""
+        workerclient._health["data"] = None
+        workerclient._health["at"] = 0.0
+        workerclient.LAST_OK = None
+        workerclient.LAST_ERROR = None
 
     def tearDown(self):
         for x in self._ps:
             x.stop()
         (config.LLM_API_KEY, config.LLM_BASE_URL, config.LLM_MODEL,
-         config.LLM_TIMEOUT, brain._SHAPE_OK, brain.SUGGESTED_MODEL) = self._saved
+         config.LLM_TIMEOUT, config.WORKER_URL, config.WORKER_TOKEN) = self._saved
         self._tmp.cleanup()
 
 
 class EngineSelectionTests(_Iso):
-    def test_key_alone_selects_gemini_even_with_blank_base(self):
-        """The original silent failure: key set, base cleared -> 'offline'."""
+    """The engine selector: the Worker first, then a local model, then offline."""
+
+    def test_a_worker_url_wins_over_a_local_base_and_a_key(self):
+        """The Worker is an explicit 'get Gemini from there', so it takes precedence."""
+        config.WORKER_URL = "https://spotube-dj.example.workers.dev"
+        config.LLM_BASE_URL = "http://localhost:11434"
         config.LLM_API_KEY = "k"
-        config.LLM_BASE_URL = ""
-        self.assertEqual(brain.configured_engine(), "gemini")
+        self.assertEqual(brain.configured_engine(), "worker")
 
     def test_any_non_gemini_base_is_local_llm(self):
         for base in ("http://localhost:11434", "http://192.168.1.50:11434",
                      "http://host.docker.internal:11434", "http://ollama.local:11434"):
+            config.WORKER_URL = ""
             config.LLM_BASE_URL = base
             config.LLM_API_KEY = ""
             self.assertEqual(brain.configured_engine(), "local-llm", base)
 
-    def test_gemini_base_with_key_stays_gemini(self):
+    def test_a_gemini_key_on_its_own_is_no_engine(self):
+        """The old silent failure, inverted.
+
+        A key used to mean 'gemini' even with nowhere to send it, which is how
+        a machine with a key and no network spent 45s per track discovering it
+        was offline. The key is only worth something to a Worker that asked for
+        it, so an install with a key and no Worker URL is offline, and says so.
+        """
+        config.WORKER_URL = ""
+        config.LLM_API_KEY = "AIzaXYZ"
+        config.LLM_BASE_URL = ""
+        self.assertEqual(brain.configured_engine(), "offline")
+
+    def test_a_google_base_url_is_not_a_local_model(self):
+        """A Google base URL is how you used to point at Gemini directly. It is
+        not a local endpoint, so it must not be classed local-llm either."""
+        config.WORKER_URL = ""
         config.LLM_BASE_URL = config.GEMINI_DEFAULT_URL
         config.LLM_API_KEY = "k"
-        self.assertEqual(brain.configured_engine(), "gemini")
+        self.assertEqual(brain.configured_engine(), "offline")
 
     def test_truly_nothing_configured_is_offline(self):
         config.LLM_API_KEY = ""
         config.LLM_BASE_URL = ""
+        config.WORKER_URL = ""
         self.assertEqual(brain.configured_engine(), "offline")
 
 
@@ -229,42 +258,34 @@ class TimeoutTests(_Iso):
             brain._post("http://x", {}, {}, timeout=33)
         self.assertEqual(seen["timeout"], 33)
 
-    def test_every_gemini_attempt_uses_the_configured_budget(self):
+    def test_the_worker_call_carries_the_configured_budget(self):
         """The bug was a literal `timeout=25` at the urlopen call site."""
+        config.WORKER_URL = "https://dj.test"
         config.LLM_TIMEOUT = 41
-        config.LLM_API_KEY = "k"
-        seen = []
-        def fake(req, timeout=None):
-            seen.append(timeout)
-            raise urllib.error.URLError("boom")
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+        with _Capture([urllib.error.URLError("boom")]) as cap:
             brain._gemini("x")
-        self.assertTrue(seen, "expected the request to be attempted")
-        for t_ in seen:
-            self.assertEqual(t_, 41)
+        self.assertTrue(cap.hits("/v1/plan"), "expected the request to be attempted")
+        for hit in cap.hits("/v1/plan"):
+            self.assertEqual(hit["timeout"], 41)
 
-    def test_one_retry_then_give_up(self):
-        config.LLM_TIMEOUT = 7
-        config.LLM_API_KEY = "k"
-        calls = []
-        def fake(req, timeout=None):
-            calls.append(1)
-            raise urllib.error.URLError("timed out")
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+    def test_no_worker_url_costs_no_request_and_says_why(self):
+        config.WORKER_URL = ""
+        with _Capture([]) as cap:
             out = brain._gemini("x")
         self.assertIsNone(out)
-        self.assertEqual(len(calls), brain.RETRIES + 1)
+        self.assertEqual(cap.seen, [], "an unconfigured app must not dial out at all")
+        self.assertIn("no Worker URL", brain.LAST_ERRORS["worker"])
 
-    def test_bad_key_does_not_waste_a_retry(self):
-        import io
-        config.LLM_API_KEY = "bad"
-        body = json.dumps({"error": {"message": "API key not valid. Please pass a valid API key.",
-                                     "status": "API_KEY_INVALID"}}).encode()
-        def fake(req, timeout=None):
-            raise urllib.error.HTTPError("u", 400, "Bad Request", {}, io.BytesIO(body))
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+    def test_a_rejected_key_does_not_waste_a_retry(self):
+        """Auth is the problem; hammering it is how you trip a rate limit."""
+        config.WORKER_URL = "https://dj.test"
+        err = _worker_err("key", "API key not valid. Please pass a valid API key.",
+                          status="API_KEY_INVALID", code=401)
+        with _Capture([err, _FakeResp(_worker_plan())]) as cap:
             brain._gemini("x")
-        self.assertIn("key not valid", brain.LAST_ERRORS.get("gemini", "").lower())
+        self.assertEqual(len(cap.hits("/v1/plan")), 1,
+                          f"a dead key must not be retried: {cap.seen}")
+        self.assertIn("key not valid", brain.LAST_ERRORS["worker"].lower())
 
 
 class ErrorClassificationTests(_Iso):
@@ -295,50 +316,6 @@ class ErrorClassificationTests(_Iso):
         again = brain._http_error_text(e)
         self.assertEqual(first, again)
         self.assertIn("Permission denied", first)
-
-    def test_a_key_error_costs_one_http_call(self):
-        config.LLM_API_KEY = "k"
-        config.LLM_MODEL = "gemini-3.5-flash"
-        err = self._err(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key.")
-        calls = []
-
-        def fake(req, timeout=None):
-            calls.append(req.full_url)
-            raise err
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
-            self.assertIsNone(brain._gemini("p"))
-        self.assertEqual(len(calls), 1, f"a dead key must not iterate the ladder: {calls}")
-        self.assertIn("key not valid", brain.LAST_ERRORS["gemini"])
-
-    def test_a_retired_model_still_costs_only_the_ladder(self):
-        config.LLM_API_KEY = "k"
-        config.LLM_MODEL = "gemini-2.0-flash"
-        err = self._err(404, "NOT_FOUND",
-                        "This model models/gemini-2.0-flash is no longer available. "
-                        "Please update your code to use models/gemini-3.6-flash for "
-                        "the latest features and improvements.")
-        calls = []
-
-        class R:
-            def __init__(self, d): self.d = d
-            def read(self): return json.dumps(self.d).encode()
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-
-        def fake(req, timeout=None):
-            calls.append(req.full_url.split("/models/")[1])
-            if "2.0-flash" in calls[-1]:
-                raise err
-            return R({"candidates": [{"content": {"parts": [{"text": '{"queries":["a b c"]}'}]},
-                                      "finishReason": "STOP"}]})
-        with mock.patch("urllib.request.urlopen", side_effect=fake), \
-             mock.patch.object(config, "save_llm_config") as saved:
-            out = brain._gemini("p")
-        self.assertEqual(out["queries"], ["a b c"])
-        self.assertEqual(calls[0], "gemini-2.0-flash:generateContent")
-        self.assertIn("gemini-3.6-flash:generateContent", calls)
-        saved.assert_called_once_with(LLM_MODEL="gemini-3.6-flash")
-
 
 class ErrorSurfacingTests(_Iso):
     def _err(self, code, status, msg):
@@ -385,23 +362,18 @@ class ErrorSurfacingTests(_Iso):
         self.assertIn("connection refused", msg)
 
     def test_plan_carries_the_reason_through(self):
-        """Whole real path, only the socket is faked: refused connection must
+        """Whole real path, only the socket is faked: a refused connection must
         reach the caller as a readable reason, not a silent 'offline'."""
-        config.LLM_API_KEY = "k"
-        config.LLM_BASE_URL = ""
-        def boom(req, timeout=None):
-            raise urllib.error.URLError("[Errno 111] Connection refused")
-        with mock.patch("urllib.request.urlopen", side_effect=boom):
+        config.WORKER_URL = "https://dj.test"
+        with _Capture([urllib.error.URLError("[Errno 111] Connection refused")]):
             p = brain.plan("lofi")
-        self.assertIn("gemini (fallback)", p["engine"])
+        self.assertIn("worker (fallback)", p["engine"])
         self.assertTrue(p.get("llm_error"), "plan() must expose why it fell back")
-        self.assertIn("connection refused", p["llm_error"])
-        # and it must NOT blame ollama for a Google endpoint
-        self.assertNotIn("ollama serve", p["llm_error"])
+        self.assertIn("nothing listening", p["llm_error"])
 
     def test_plan_never_raises_on_a_weird_api_error(self):
         """An AttributeError from a malformed body must not kill the whole app."""
-        config.LLM_API_KEY = "k"
+        config.WORKER_URL = "https://dj.test"
         with mock.patch.object(brain, "_gemini", side_effect=AttributeError("'list' has no get")), \
              mock.patch.object(brain, "_openai_compat", side_effect=AttributeError("nope")):
             p = brain.plan("lofi")
@@ -409,8 +381,8 @@ class ErrorSurfacingTests(_Iso):
         self.assertTrue(p["queries"], "music must still be queued")
 
     def test_second_engine_saves_the_plan(self):
-        """Gemini fails but a local model answers -> not reported as a failure."""
-        config.LLM_API_KEY = "k"
+        """The Worker fails but a local model answers -> not reported as a failure."""
+        config.WORKER_URL = "https://dj.test"
         with mock.patch.object(brain, "_gemini", return_value=None), \
              mock.patch.object(brain, "_openai_compat",
                                return_value={"queries": ["lofi study beats"],
@@ -431,7 +403,8 @@ class ErrorSurfacingTests(_Iso):
             _, info = dj.build_queue("lofi")
         self.assertEqual(info["llm_error"], "HTTP 400 key bad")
 
-    def test_no_key_means_no_error_noise(self):
+    def test_nothing_configured_means_no_error_noise(self):
+        config.WORKER_URL = ""
         config.LLM_API_KEY = ""
         config.LLM_BASE_URL = ""
         p = brain.plan("dark techno")
@@ -439,83 +412,92 @@ class ErrorSurfacingTests(_Iso):
         self.assertFalse(p.get("llm_error"))
 
 
-class ResponseShapeTests(_Iso):
-    """Gemini puts JSON in odd places; old code only read parts[0]['text']."""
+class WorkerContractTests(_Iso):
+    """
+    What the client actually puts on the wire.
 
-    def test_joins_multiple_parts(self):
-        data = {"candidates": [{"content": {"parts": [
-            {"text": '{"queries":'}, {"text": '["lofi beats", "sleep low"]}'}]}}]}
-        text, finish = brain._gemini_text(data)
-        self.assertIn("lofi beats", json.loads(text)["queries"])
+    The parsing of a Gemini reply (multi-part text, fences, a truncated array)
+    lives in `worker/src/index.js` now and is tested there; this file's job is
+    the other half of the contract - that this app asks for the right thing,
+    sends no key it was not asked for, and adopts the model that answered.
+    """
 
-    def test_reports_truncation_instead_of_a_silent_none(self):
-        data = {"candidates": [{"finishReason": "MAX_TOKENS",
-                                "content": {"parts": [{"text": '{"queries": ["a"'}]}}]}
-        text, finish = brain._gemini_text(data)
-        self.assertEqual(finish, "MAX_TOKENS")
+    def test_the_plan_call_posts_the_prompt_and_the_system_prompt(self):
+        config.WORKER_URL = "https://dj.test"
+        with _Capture([]) as cap:
+            out = brain._gemini("chill lofi for coding")
+        self.assertEqual(out["queries"], ["lofi one", "lofi two"])
+        hit = cap.hits("/v1/plan")[0]
+        self.assertEqual(hit["url"], "https://dj.test/v1/plan")
+        self.assertIn("chill lofi for coding", hit["body"]["prompt"])
+        self.assertTrue(hit["body"]["system"], "the planner's system prompt must travel")
+        self.assertGreater(hit["body"]["timeoutMs"], 0)
 
-    def test_blocked_response_is_named(self):
-        data = {"candidates": [], "promptFeedback": {"blockReason": "SAFETY"}}
-        text, finish = brain._gemini_text(data)
-        self.assertEqual(finish, "blocked:SAFETY")
-
-    def test_url_has_no_key_and_auth_uses_the_header(self):
-        """Docs use x-goog-api-key; a key in the URL leaks into logs/history."""
-        config.LLM_BASE_URL = ""
-        config.LLM_API_KEY = "kk"
-        config.LLM_MODEL = "models/gemini-3.6-flash"
-        url = brain._gemini_url()
-        self.assertIn("/v1beta/models/gemini-3.6-flash:generateContent", url)
-        self.assertNotIn("models/models", url)
-        self.assertNotIn("kk", url)
-        self.assertEqual(brain._gemini_headers(), {"x-goog-api-key": "kk"})
-
-    def test_default_model_is_not_the_retired_2_0(self):
-        self.assertNotIn("2.0", config.GEMINI_DEFAULT_MODEL)
-        self.assertIn(config.GEMINI_DEFAULT_MODEL, brain._model_candidates())
-
-    def test_payload_requests_json_the_documented_way(self):
-        config.LLM_API_KEY = "k"
-        captured = []
-        class Resp:
-            def read(self):
-                return json.dumps({"candidates": []}).encode()
-            def __enter__(self): return self
-            def __exit__(self, *a): return False
-        def fake(req, timeout=None):
-            captured.append(json.loads(req.data.decode()))
-            return Resp()
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+    def test_no_key_ever_leaves_on_the_wire(self):
+        """A key in a URL lands in a shell history; one in a header lands in a log."""
+        config.WORKER_URL = "https://dj.test"
+        config.LLM_API_KEY = "AIzaSECRET"
+        with _Capture([]) as cap:
             brain._gemini("x")
-        gc = captured[0]["generationConfig"]
-        fmt = gc["responseFormat"]["text"]
-        self.assertEqual(fmt["mimeType"], "application/json")
-        self.assertEqual(fmt["schema"]["type"], "object")          # not "OBJECT"
-        self.assertIn("queries", fmt["schema"]["properties"])
-        self.assertGreaterEqual(gc["maxOutputTokens"], 2048)
+        hit = cap.hits("/v1/plan")[0]
+        headers = {k.title(): v for k, v in hit["headers"].items()}
+        self.assertNotIn("AIzaSECRET", hit["url"])
+        self.assertNotIn("key=", hit["url"])
+        self.assertNotIn("AIzaSECRET", json.dumps(hit["body"]))
+        self.assertNotIn("AIzaSECRET", json.dumps(headers))
 
-    def test_shapes_include_the_legacy_spelling_as_fallback(self):
-        names = [n for n, _ in brain._shapes("x")]
-        self.assertEqual(names[0], "responseFormat")
-        self.assertIn("responseMimeType", names)
-        self.assertEqual(names[-1], "plain")                       # always accepted
+    def test_the_machine_key_is_only_sent_to_a_worker_that_asked_for_it(self):
+        config.WORKER_URL = "https://dj.test"
+        config.LLM_API_KEY = "AIzaSECRET"
+        with mock.patch.object(workerclient, "wants_client_key", return_value=True):
+            with _Capture([]) as cap:
+                brain._gemini("x")
+        headers = {k.title(): v for k, v in cap.hits("/v1/plan")[0]["headers"].items()}
+        self.assertEqual(headers.get("X-Gemini-Key"), "AIzaSECRET")
 
-    def test_json_split_mid_string_across_parts_is_glued(self):
-        """Gemini can split one JSON answer across several parts."""
-        config.LLM_API_KEY = "k"
-        data = {"candidates": [{"content": {"parts": [
-            {"text": '{"queries": ["neo soul velvet", "70s philly'},
-            {"text": ' strings"], "avoid": ["remix"], "why": "gemini"}'}]},
-            "finishReason": "STOP"}]}
-        text, _finish = brain._gemini_text(data)
-        self.assertIsNone(brain._extract_json(text, lenient=False))   # newline-joined is broken
-        with mock.patch("urllib.request.urlopen", return_value=_FakeResp(json.dumps(data))):
-            out = brain._gemini("x")
-        self.assertEqual(out["queries"], ["neo soul velvet", "70s philly strings"])
-        self.assertEqual(out["why"], "gemini")
+    def test_the_token_goes_in_a_bearer_header(self):
+        config.WORKER_URL = "https://dj.test"
+        config.WORKER_TOKEN = "shh"
+        with _Capture([]) as cap:
+            brain._gemini("x")
+        headers = {k.title(): v for k, v in cap.hits("/v1/plan")[0]["headers"].items()}
+        self.assertEqual(headers.get("Authorization"), "Bearer shh")
+
+    def test_the_model_that_answered_is_remembered(self):
+        """A Worker-side switch costs one request, not every request forever."""
+        config.WORKER_URL = "https://dj.test"
+        config.LLM_MODEL = "gemini-2.0-flash"
+        with _Capture([_FakeResp(_worker_plan(model="gemini-3.6-flash"))]), \
+             mock.patch.object(config, "save_llm_config") as saved:
+            brain._gemini("x")
+        self.assertEqual(config.LLM_MODEL, "gemini-3.6-flash")
+        saved.assert_called_once_with(LLM_MODEL="gemini-3.6-flash")
+        self.assertTrue(any("switched the model" in n for n in brain.pop_notes()))
+
+    def test_the_workers_notes_reach_the_log_drawer(self):
+        config.WORKER_URL = "https://dj.test"
+        notes = ["gemini-2.0-flash is retired - the API says to use gemini-3.6-flash"]
+        with _Capture([_FakeResp(_worker_plan(model="gemini-3.6-flash", notes=notes))]):
+            brain._gemini("x")
+        self.assertTrue(any("retired" in n for n in brain.pop_notes()))
+
+    def test_a_failure_kind_is_worded_for_a_listener(self):
+        config.WORKER_URL = "https://dj.test"
+        err = _worker_err("quota", "Quota exceeded for requests per minute",
+                          status="RESOURCE_EXHAUSTED", code=429)
+        with _Capture([err]):
+            self.assertIsNone(brain._gemini("x"))
+        self.assertIn("quota", brain.LAST_ERRORS["worker"].lower())
+
+    def test_an_unreachable_worker_names_the_deployment(self):
+        """'is it deployed?' is the question a listener can actually act on."""
+        config.WORKER_URL = "https://dj.test"
+        with _Capture([urllib.error.URLError("[Errno 111] Connection refused")]):
+            self.assertIsNone(brain._gemini("x"))
+        self.assertIn("wrangler dev", brain.LAST_ERRORS["worker"])
 
     def test_queries_collapse_to_one_line(self):
-        config.LLM_API_KEY = "k"
+        config.WORKER_URL = "https://dj.test"
         with mock.patch.object(brain, "_gemini",
                                return_value={"queries": ["neo   soul\nvelvet", " x "]},
                                ):
@@ -595,135 +577,168 @@ def _http_err(code: int, message: str, status: str | None = None):
 
 
 class ModelLadderTests(_Iso):
-    """A retired model id used to mean 'offline forever'. Now it self-heals."""
+    """
+    The model ladder itself is tested in `worker/test/smoke.mjs`, next to the
+    code that walks it. What has to be true here is the other half: this app
+    sends the model it was configured with, adopts whatever the Worker says
+    answered, and never re-implements the walk on the client.
+    """
 
-    RETIRED = ("This model models/gemini-2.0-flash is no longer available. Please "
-               "update your code to use models/gemini-3.6-flash for the latest features.")
-
-    def test_404_switches_to_the_model_the_api_named(self):
-        config.LLM_API_KEY = "k"
-        config.LLM_BASE_URL = ""
+    def test_the_configured_model_is_sent_but_the_answer_is_what_counts(self):
+        config.WORKER_URL = "https://dj.test"
         config.LLM_MODEL = "gemini-2.0-flash"
-        urls, replies = [], [
-            _http_err(404, self.RETIRED),
-            {"candidates": [{"content": {"parts": [
-                {"text": '{"queries":["lofi one","lofi two"]}'}]}, "finishReason": "STOP"}]},
-        ]
-
-        def fake(req, timeout=None):
-            urls.append(req.full_url)
-            r = replies.pop(0)
-            if isinstance(r, Exception):
-                raise r
-            return _FakeResp(json.dumps(r))
-        with mock.patch("urllib.request.urlopen", side_effect=fake), \
-             mock.patch.object(config, "save_llm_config", lambda **kw: saved.update(kw)):
-            saved = {}
-            out = brain._gemini("give me queries")
-        self.assertEqual(out["queries"], ["lofi one", "lofi two"])
-        self.assertIn("gemini-3.6-flash", urls[1])
-        self.assertEqual(config.LLM_MODEL, "gemini-3.6-flash")
-        self.assertEqual(saved.get("LLM_MODEL"), "gemini-3.6-flash")   # remembered
-        self.assertTrue(any("switched the model" in n for n in brain.pop_notes()))
-        self.assertEqual(brain.SUGGESTED_MODEL, "gemini-3.6-flash")
-
-    def test_payload_rejection_walks_shapes_on_the_same_model(self):
-        config.LLM_API_KEY = "k"
-        config.LLM_MODEL = "gemini-3.5-flash"
-        payloads, replies = [], [
-            _http_err(400, 'Invalid JSON payload. Unknown name "responseFormat" at '
-                           '"generationConfig.responseFormat"'),
-            {"candidates": [{"content": {"parts": [
-                {"text": '{"queries":["a b c"]}'}]}, "finishReason": "STOP"}]},
-        ]
-
-        def fake(req, timeout=None):
-            payloads.append(json.loads(req.data.decode()))
-            r = replies.pop(0)
-            if isinstance(r, Exception):
-                raise r
-            return _FakeResp(json.dumps(r))
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+        with _Capture([_FakeResp(_worker_plan(model="gemini-3.6-flash"))]) as cap:
             out = brain._gemini("x")
-        self.assertEqual(out["queries"], ["a b c"])
-        self.assertIn("responseFormat", payloads[0]["generationConfig"])
-        self.assertIn("responseMimeType", payloads[1]["generationConfig"])  # legacy spelling
+        self.assertEqual(cap.hits("/v1/plan")[0]["body"]["model"], "gemini-2.0-flash")
+        self.assertEqual(out["queries"], ["lofi one", "lofi two"])
+
+    def test_a_retired_model_is_not_walked_twice(self):
+        """The ladder is the Worker's job; the client must not also walk one.
+
+        A `model` error from the Worker means it already tried the ladder and
+        the model Google named, so a second call from here would be four more
+        requests for the same answer.
+        """
+        config.WORKER_URL = "https://dj.test"
+        err = _worker_err("model",
+                          "models/gemini-2.0-flash is no longer available. "
+                          "Please update your code to use models/gemini-3.6-flash.",
+                          status="NOT_FOUND", code=404,
+                          notes=["gemini-2.0-flash is retired - trying gemini-3.6-flash"])
+        with _Capture([err, _FakeResp(_worker_plan(model="gemini-3.6-flash"))]) as cap:
+            self.assertIsNone(brain._gemini("x"))
+        self.assertEqual(len(cap.hits("/v1/plan")), 1)
+        self.assertTrue(any("retired" in n for n in brain.pop_notes()))
 
     def test_a_bad_key_costs_exactly_one_request(self):
         """No model walking, no shape walking, no retry: auth is the problem."""
-        config.LLM_API_KEY = "k"
-        calls = []
-
-        def fake(req, timeout=None):
-            calls.append(1)
-            raise _http_err(400, "API key not valid. Please pass a valid API key.")
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+        config.WORKER_URL = "https://dj.test"
+        with _Capture([_worker_err("key", "API key not valid. Please pass a valid API key.",
+                                   status="API_KEY_INVALID", code=401)]) as cap:
             self.assertIsNone(brain._gemini("x"))
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(cap.hits("/v1/plan")), 1)
 
-    def test_timeouts_are_bounded_and_explained(self):
-        config.LLM_API_KEY = "k"
+    def test_timeouts_are_explained_not_swallowed(self):
+        config.WORKER_URL = "https://dj.test"
         config.LLM_TIMEOUT = 30
-        calls = []
-
-        def fake(req, timeout=None):
-            calls.append(timeout)
-            raise urllib.error.URLError("The read operation timed out")
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
+        with _Capture([urllib.error.URLError("The read operation timed out")]) as cap:
             self.assertIsNone(brain._gemini("x"))
-        self.assertLessEqual(len(calls), brain.MAX_CALLS)
-        self.assertTrue(all(c == 30 for c in calls), calls)
-        self.assertIn("timed out", brain.LAST_ERRORS["gemini"])
+        self.assertEqual(len(cap.hits("/v1/plan")), 1)
+        self.assertIn("timed out", brain.LAST_ERRORS["worker"])
 
-    def test_every_request_carries_the_timeout(self):
-        """The old bug was a literal 25 with no way to change it."""
-        config.LLM_API_KEY = "k"
-        config.LLM_TIMEOUT = 12
-        seen = []
-
-        def fake(req, timeout=None):
-            seen.append(timeout)
-            raise _http_err(404, "no such model")
-        with mock.patch("urllib.request.urlopen", side_effect=fake):
-            brain._gemini("x")
-        self.assertTrue(seen and all(v == 12 for v in seen), seen)
+    def test_plan_falls_back_to_the_offline_parser_with_the_reason(self):
+        config.WORKER_URL = "https://dj.test"
+        with _Capture([_worker_err("quota", "Quota exceeded",
+                                   status="RESOURCE_EXHAUSTED", code=429)]):
+            p = brain.plan("mellow evening jazz")
+        self.assertIn("fallback", p["engine"])
+        self.assertTrue(p["queries"], "the offline parser must still queue music")
+        self.assertIn("quota", p["llm_error"])
 
 
 class ProbeTests(_Iso):
     def test_probe_reports_offline_as_ok(self):
-        config.LLM_API_KEY = ""
+        config.WORKER_URL = ""
         config.LLM_BASE_URL = ""
         r = brain.probe()
         self.assertTrue(r["ok"])
         self.assertEqual(r["engine"], "offline")
 
     def test_probe_never_raises(self):
-        import io
-        config.LLM_API_KEY = "k"
-        body = json.dumps({"error": {"message": "API key not valid. Please pass a valid API key.",
-                                     "status": "API_KEY_INVALID"}}).encode()
-        with mock.patch("urllib.request.urlopen",
-                        side_effect=urllib.error.HTTPError("u", 400, "x", {}, io.BytesIO(body))):
+        config.WORKER_URL = "https://dj.test"
+        err = _worker_err("key", "API key not valid. Please pass a valid API key.",
+                          status="API_KEY_INVALID", code=401)
+        with _Capture([err]):
             r = brain.probe()
         self.assertFalse(r["ok"])
         self.assertIn("key", r["detail"].lower())
 
     def test_probe_measures_latency(self):
-        config.LLM_API_KEY = "k"
-        good = {"candidates": [{"content": {"parts": [{"text": '{"queries":["lofi x"]}'}]}}]}
-        with mock.patch("urllib.request.urlopen",
-                        return_value=_FakeResp(json.dumps(good))):
+        config.WORKER_URL = "https://dj.test"
+        with _Capture([_FakeResp(_worker_plan(plan={"queries": ["lofi x"]}))]):
             r = brain.probe()
         self.assertTrue(r["ok"], r["detail"])
         self.assertGreaterEqual(r["ms"], 0)
         self.assertIn("1 queries", r["detail"])
 
+    def test_probe_says_when_there_is_no_worker_at_all(self):
+        """Offline is a valid configuration, so it is reported as ok - but it
+        has to *name itself*, or the reader assumes a working planner."""
+        config.WORKER_URL = ""
+        config.LLM_BASE_URL = ""
+        r = brain.probe()
+        self.assertEqual(r["engine"], "offline")
+        self.assertIn("no Worker URL", r["detail"])
+
 
 class _FakeResp:
-    def __init__(self, payload): self._p = payload
-    def read(self): return self._p.encode()
+    def __init__(self, payload, headers=None):
+        self._p = payload
+        self.headers = headers or {}
+
+    def read(self):
+        return self._p.encode() if isinstance(self._p, str) else self._p
+
     def __enter__(self): return self
     def __exit__(self, *a): return False
+
+
+def _worker_err(kind, detail, status="", code=502, notes=None):
+    """A believable Worker error envelope, as an HTTPError."""
+    body = json.dumps({"ok": False, "error": {"kind": kind, "detail": detail,
+                                              "status": status,
+                                              "notes": notes or []}}).encode()
+    return urllib.error.HTTPError("https://dj.test/v1/plan", code, "err", {},
+                                  io.BytesIO(body))
+
+
+def _worker_plan(plan=None, model="gemini-3.5-flash", notes=None):
+    """The JSON a successful /v1/plan answers with."""
+    return json.dumps({"ok": True, "plan": plan if plan is not None
+                       else {"queries": ["lofi one", "lofi two"]},
+                       "model": model, "notes": notes or [], "source": "secret"})
+
+
+class _Capture:
+    """Patch `workerclient._urlopen` and remember what was asked for.
+
+    /v1/health is answered from a canned reply rather than from the queue:
+    the client asks it to decide whether to send a key, so a test that wants
+    to script the *plan* call must not have its reply eaten by the probe.
+    """
+
+    HEALTH = {"ok": True, "service": "spotube-dj-worker", "key_source": "secret",
+              "model": "gemini-3.5-flash", "d1": True, "clips": True,
+              "token_required": False}
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.seen = []
+
+    def __call__(self, req, timeout=None):
+        url = req.full_url
+        self.seen.append({"url": url, "timeout": timeout,
+                          "headers": dict(req.headers),
+                          "body": json.loads((req.data or b"{}").decode())})
+        if url.rstrip("/").endswith("/v1/health"):
+            return _FakeResp(json.dumps(self.HEALTH))
+        r = self.replies.pop(0) if self.replies else _FakeResp(_worker_plan())
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def hits(self, path: str) -> list[dict]:
+        """Only the calls to one route - a test should not care that health ran."""
+        return [h for h in self.seen if h["url"].rstrip("/").endswith(path)]
+
+    def __enter__(self):
+        self._ps = mock.patch.object(workerclient, "_urlopen", self)
+        self._ps.start()
+        return self
+
+    def __exit__(self, *a):
+        self._ps.stop()
+        return False
 
 
 if __name__ == "__main__":

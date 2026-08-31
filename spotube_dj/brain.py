@@ -2,11 +2,18 @@
 brain.py - turns a natural-language request into YouTube-Music search queries.
 
 Three engines, in priority order:
-  1. Gemini (same key SpotifyDJ uses)
+  1. The Cloudflare Worker (`worker/`) -> Gemini, with the key held there
   2. Any OpenAI-compatible endpoint -> Ollama / LM Studio / Open WebUI
   3. Offline heuristic parser (always works, no key, no network)
 
 Only #3 is required, so the app is usable out of the box.
+
+#1 is a Worker call, not an HTTP call to Google, and that is the shape of the
+whole design (see workerclient.py): the key, the model ladder and the retry
+policy live in one place, so a retired model or a rate limit is fixed once for
+every machine instead of per install. Nothing here dials Google directly any
+more, and there is no fallback that does - an unconfigured machine is offline,
+which is stated on the page rather than hidden behind a second implementation.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ import urllib.error
 import urllib.request
 
 import config
+import workerclient
 
 try:                                  # pick up Settings -> Save values
     config.apply_llm_overrides()
@@ -236,8 +244,41 @@ _KIND_HINTS = {
     "model": "the API has no such model - check or update the Model field in Settings",
     "quota": "quota exceeded on the free tier - wait, or use a local model",
     "payload": "the endpoint rejected this request config",
+    # kinds only the Worker can produce; the wording has to be as actionable as
+    # the Google ones, because this is the line a listener reads at 1am
+    "offline": "no Worker URL configured - set one in Settings -> Worker",
+    "network": "could not reach the Worker (is it deployed? wrangler dev running?)",
+    "timeout": "the Worker did not answer in time",
+    "auth": "the Worker refused this machine's token (Settings -> Worker)",
+    "no_d1": "the Worker has no D1 database bound, so state sync is off",
+    "empty": "the model answered with nothing usable",
+    "parse": "the Worker's answer could not be read",
+    "crash": "the Worker threw while answering",
     "other": "the request failed",
 }
+
+
+def worker_error_text(err: Exception) -> str:
+    """
+    One actionable sentence for a Worker failure.
+
+    The Worker answers with the same `kind`s Google does, so the wording the
+    page shows did not have to change - only the hand it comes from. Kinds that
+    already say the useful thing (network, timeout, quota) are quoted as-is;
+    the rest get the hint and then Google's own words, but only when those add
+    something the hint lacks.
+    """
+    kind = str(getattr(err, "kind", "") or "other")
+    detail = " ".join(str(getattr(err, "detail", "") or "").split())
+    if kind in ("network", "timeout", "offline", "auth", "no_d1", "crash"):
+        # these are already sentences about the Worker, not Google statuses
+        return (detail or _KIND_HINTS.get(kind, ""))[:400]
+    hint = _KIND_HINTS.get(kind, _KIND_HINTS["other"])
+    if kind == "model" and detail:
+        hint = f"{hint} - the API said: {detail[:150]}"
+    lead = " ".join(detail.lower().split()[:3])
+    tail = "" if not lead or lead in hint.lower() else f" {detail}"
+    return " ".join(f"{hint}{tail}".split())[:400]
 
 
 def http_error_parts(err: urllib.error.HTTPError) -> tuple[str, str]:
@@ -397,11 +438,12 @@ def _extract_json(text: str, lenient: bool = True) -> dict | None:
     return None
 
 
-GEMINI_MODEL_LADDER = ("gemini-3.5-flash", "gemini-3.1-flash-lite",
-                       "gemini-3.6-flash", "gemini-3.7-flash")
-SUGGESTED_MODEL: str | None = None      # the name Google's own error told us to use
-MAX_CALLS = 4                           # hard cap on HTTP calls per plan()
-_SHAPE_OK = 0                           # which payload shape worked last time
+# The engine labels `plan()` reports. "worker" is the Gemini path: the Worker
+# holds the key, walks the model ladder and answers with a parsed plan.
+WORKER_ENGINE = "worker"
+LOCAL_ENGINE = "local-llm"
+OFFLINE_ENGINE = "offline"
+
 NOTES: list[str] = []                   # one-off "what I did and why" lines for the UI
 
 
@@ -419,196 +461,63 @@ def _clean_model(name: str) -> str:
     return (name or "").strip().split("/")[-1].strip()
 
 
-def _model_candidates() -> list[str]:
-    """
-    Configured model first, then the model the API suggested, then the ladder.
-    A retired default must not be a permanent failure, so we walk a few.
-    """
-    pref = [_clean_model(config.LLM_MODEL), _clean_model(config.GEMINI_DEFAULT_MODEL),
-            SUGGESTED_MODEL or ""]
-    out: list[str] = []
-    for m in [p for p in pref if p] + list(GEMINI_MODEL_LADDER):
-        if m and m not in out:
-            out.append(m)
-    return out
-
-
-def _gemini_url(model: str | None = None) -> str:
-    """
-    Gemini lives on its own host, so a localhost base URL never hijacks it.
-    The key goes in the x-goog-api-key header (the documented way) so it cannot
-    leak into a URL, a proxy log or a shell history line.
-    """
-    base = (config.LLM_BASE_URL or "").rstrip("/")
-    if not base or "generativelanguage" not in base:
-        base = config.GEMINI_DEFAULT_URL
-    model = _clean_model(model or config.LLM_MODEL or config.GEMINI_DEFAULT_MODEL)
-    return f"{base}/models/{model}:generateContent"
-
-
-def _gemini_headers() -> dict:
-    return {"x-goog-api-key": config.LLM_API_KEY} if config.LLM_API_KEY else {}
-
-
-def _suggested_model(text: str) -> str:
-    """
-    Google's retirement notice names the replacement:
-    '...gemini-2.0-flash is no longer available. Please update your code to use
-    models/gemini-3.6-flash...' -> 'gemini-3.6-flash'. Prefer the name after
-    'use'; otherwise the last model id mentioned (the first one is the dead
-    model we already tried).
-    """
-    t = text or ""
-    m = re.search(r'use\s+models/(gemini-[A-Za-z0-9._-]+)', t)
-    if m:
-        return _clean_model(m.group(1))
-    seen = re.findall(r'(gemini-[A-Za-z0-9._-]+)', t)
-    return _clean_model(seen[-1]) if len(seen) > 1 else ""
-
-
-def _gemini_text(data: dict) -> tuple[str, str]:
-    """
-    Returns (text, finish_reason). Thinking models emit several parts and the
-    JSON is often NOT in part[0]; old code read [0] only and threw the answer
-    away, which looks identical to 'the AI is broken'.
-    """
-    try:
-        cand = (data.get("candidates") or [{}])[0]
-    except (IndexError, TypeError):
-        return "", ""
-    finish = str(cand.get("finishReason") or "")
-    parts = ((cand.get("content") or {}).get("parts")) or []
-    chunks = [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
-    text = "\n".join(c for c in chunks if c).strip()
-    if not text and isinstance(cand.get("content"), dict):
-        text = str(cand["content"].get("text") or "").strip()
-    if not text:
-        blob = (data.get("promptFeedback") or {}).get("blockReason", "")
-        return "", f"blocked:{blob}" if blob else "empty"
-    return text, finish
-
-
-def _gemini_parts(data: dict) -> list[str]:
-    try:
-        cand = (data.get("candidates") or [{}])[0]
-    except (IndexError, TypeError):
-        return []
-    parts = ((cand.get("content") or {}).get("parts")) or []
-    return [p.get("text", "") for p in parts if isinstance(p, dict) and p.get("text")]
+def _configured_model() -> str:
+    """The model this install asked for, stripped of any `models/` prefix."""
+    return _clean_model(config.LLM_MODEL) or _clean_model(config.GEMINI_DEFAULT_MODEL)
 
 
 def free_text(prompt: str, max_chars: int = 600) -> str:
-    """One-shot Gemini text reply for an arbitrary prompt; '' on no key/failure.
+    """One-shot model text for an arbitrary prompt; '' on no Worker/failure.
 
     Separate from `plan`, which is tuned for the query-plan job. The spoken DJ
     uses this to have a model write a *creative* line from the current facts.
+    Like every other model call here, it reaches Gemini only through the
+    Worker; a machine with no Worker URL gets the keyless template line.
     """
-    if not config.LLM_API_KEY:
+    if not workerclient.configured():
         return ""
-    for model in _model_candidates():
-        url = _gemini_url(model)
-        payload = {"contents": [{"parts": [{"text": prompt}]}],
-                   "generationConfig": {"temperature": 0.9,
-                                        "maxOutputTokens": 200}}
-        try:
-            data = _post(url, payload, _gemini_headers())
-        except Exception:
-            continue
-        text = " ".join(_gemini_parts(data)).strip()
-        if text:
-            return text[:max_chars]
-    return ""
+    try:
+        return workerclient.text(prompt, model=_configured_model(),
+                                 max_chars=max_chars)
+    except Exception:
+        return ""
 
 
 def _gemini(prompt: str) -> dict | None:
     """
-    Ask Gemini for the query plan.
+    Ask the Worker - and through it, Gemini - for the query plan.
 
-    Three things this has to survive, all of which used to show up as a silent
-    "engine: offline": a retired model name (404 - the message itself names the
-    replacement), a generationConfig spelling this endpoint does not accept
-    (400), and a cold first call (timeout). So: walk the model ladder, walk the
-    payload shapes, retry once on transport trouble - under a hard wall-clock
-    budget so a dead endpoint cannot hang the queue forever.
+    The ladder walking, the payload-shape negotiation and the retry policy used
+    to live in this function. They now live in `worker/src/index.js`, because a
+    retired model should cost one extra request *once, centrally* rather than
+    every install noticing a 404 and editing a field. What stays here is the
+    part that is genuinely the app's job: remembering which model answered,
+    surfacing the Worker's notes in the log drawer, and wording the failure.
+
+    Never raises: `plan()` is documented to fall back to the offline parser, so
+    every failure path returns None with a reason in LAST_ERRORS.
     """
-    global SUGGESTED_MODEL, _SHAPE_OK
-    if not config.LLM_API_KEY:
-        _fail("gemini", "no API key configured")
+    if not workerclient.configured():
+        _fail(WORKER_ENGINE, "no Worker URL configured - set one in "
+                             "Settings -> Worker (or SPOTUBE_DJ_WORKER_URL)")
         return None
-    models = _model_candidates()
-    shapes = _shapes(prompt)
-    si = min(_SHAPE_OK, len(shapes) - 1)
-    retries, calls = RETRIES, 0
-    deadline = time.monotonic() + _timeout() * (1 + RETRIES)
-    last: object = "no attempt made"
-    mi = 0
-    while mi < len(models) and calls < MAX_CALLS:
-        model = models[mi]
-        shape_name, payload = shapes[si]
-        url = _gemini_url(model)
-        if time.monotonic() > deadline:
-            last = (f"gave up after {calls} attempt(s) - the endpoint is slower "
-                    f"than the {int(_timeout())}s LLM timeout; raise it in Settings "
-                    f"or pick a smaller model")
-            break
-        calls += 1
-        try:
-            data = _post(url, payload, _gemini_headers())
-            text, finish = _gemini_text(data)
-            if not text:
-                last = f"{model} returned no text ({finish or 'unknown'})"
-                break                       # reachable and authenticated: nothing to switch
-            glued = "".join(_gemini_parts(data))
-            parsed = (_extract_json(text, lenient=False)
-                      or _extract_json(glued, lenient=False)
-                      or _extract_json(text))
-            if parsed is None:
-                cut = " - answer was truncated mid-JSON" if finish.upper() == "MAX_TOKENS" else ""
-                last = f"could not parse {model}'s output{cut}: {text[:120]!r}"
-                break
-            _adopt_model(model, models[0])
-            if si != _SHAPE_OK:
-                _SHAPE_OK = si
-                _note(f"gemini: this endpoint wants the {shape_name!r} response config")
-            LAST_ERRORS.pop("gemini", None)
-            return parsed
-        except urllib.error.HTTPError as e:
-            kind, detail = classify_http(e)
-            last = _http_error_text(e)      # reuses the cached body read
-            if kind == "model":
-                hint = _suggested_model(detail)          # the API's words only
-                if hint and hint != model:
-                    # try what Google named *next*, not after walking the ladder:
-                    # the error is authoritative for this account and key.
-                    models = models[:mi + 1] + [m for m in models[mi + 1:] if m != hint]
-                    if hint not in models:
-                        models.insert(mi + 1, hint)
-                    SUGGESTED_MODEL = hint
-                    _note(f"gemini: {model} is retired - the API says to use {hint}, "
-                          f"trying that")
-                else:
-                    _note(f"gemini: the API has no model {model}, trying the next "
-                          f"one on the list")
-                mi += 1                       # never stop here: another model may work
-                continue
-            if kind == "payload" and si + 1 < len(shapes) and detail:
-                si += 1
-                _note(f"gemini: {model} rejected the {shape_name!r} config, trying the "
-                      f"{shapes[si][0]!r} one")
-                continue
-            break                            # bad key / no access / quota: a retry is pointless
-        except (urllib.error.URLError, TimeoutError, OSError) as e:
-            last = _net_error_text(e, url)
-            if retries:
-                retries -= 1
-                _note("gemini: first call failed, retrying once")
-                continue
-            break
-    if "not found" in str(last).lower() and len(models) > 1:
-        _note("gemini: none of " + ", ".join(models[:4]) + " answered - set the Model "
-              "field in Settings to a current one (https://ai.google.dev/gemini-api/docs/models)")
-    _fail("gemini", last)
-    return None
+    try:
+        got = workerclient.plan(prompt, system=SYSTEM, model=_configured_model())
+    except workerclient.WorkerError as e:
+        for n in e.notes:
+            _note(f"worker: {n}")
+        _fail(WORKER_ENGINE, worker_error_text(e))
+        return None
+    except Exception as e:                       # noqa: BLE001 - never raise
+        _fail(WORKER_ENGINE, f"unexpected {e.__class__.__name__}: {str(e)[:160]}")
+        return None
+    for n in got.get("notes") or []:
+        _note(f"worker: {n}")
+    model = _clean_model(got.get("model"))
+    if model:
+        _adopt_model(model, _configured_model())
+    LAST_ERRORS.pop(WORKER_ENGINE, None)
+    return got.get("plan")
 
 
 def _adopt_model(used: str, preferred: str) -> None:
@@ -633,49 +542,18 @@ def _adopt_model(used: str, preferred: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Restored after a bad edit anchor deleted this region - keep the ordering:
-# schema -> payload shapes -> local endpoint -> engine choice -> plan().
+# The response schema and the payload-shape negotiation used to be built here.
+# They live in `worker/src/index.js` now (PLAN_SCHEMA / planShapes), next to the
+# model ladder, because all three are one job: "get a plan out of Gemini" is the
+# Worker's job, and this file's job is to use the answer.
 # ---------------------------------------------------------------------------
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "queries": {"type": "array", "description": "5-8 YouTube Music search strings",
-                    "items": {"type": "string"}},
-        "avoid": {"type": "array", "description": "Words that mean 'not this'",
-                  "items": {"type": "string"}},
-        "why": {"type": "string", "description": "One short sentence on the reasoning"},
-    },
-    "required": ["queries"],
-}
-
-
-def _shapes(prompt: str) -> list[tuple[str, dict]]:
-    """
-    Payload variants, newest documented shape first. A 3.x endpoint wants
-    generationConfig.responseFormat.text; the 2.x spelling was
-    responseMimeType/responseSchema. Trying them in order means a stale shape
-    degrades instead of failing, and the last entry always works.
-    """
-    contents = [{"role": "user", "parts": [{"text": f"{SYSTEM}\n\n{prompt}"}]}]
-    return [
-        ("responseFormat", {"contents": contents,
-                            "generationConfig": {"maxOutputTokens": 8192,
-                                                 "responseFormat": {"text": {
-                                                     "mimeType": "application/json",
-                                                     "schema": _SCHEMA}}}}),
-        ("responseMimeType", {"contents": contents,
-                              "generationConfig": {"maxOutputTokens": 8192,
-                                                   "responseMimeType": "application/json",
-                                                   "responseSchema": _SCHEMA}}),
-        ("plain", {"contents": contents}),
-    ]
 
 
 def _openai_compat(prompt: str) -> dict | None:
     """Ollama / LM Studio / Open WebUI - anything speaking /v1/chat/completions."""
     base = (config.LLM_BASE_URL or "").rstrip("/")
     if not base or "generativelanguage" in base:
-        _fail("local-llm", "no local base URL set (Settings -> Base URL, "
+        _fail(LOCAL_ENGINE, "no local base URL set (Settings -> Base URL, "
                            "e.g. http://localhost:11434)")
         return None
     url = base if url_is_chat(base) else f"{base}/v1/chat/completions"
@@ -704,7 +582,7 @@ def _openai_compat(prompt: str) -> dict | None:
             if parsed is None:
                 last = f"no JSON in model reply: {str(text)[:120]!r}"
                 continue
-            LAST_ERRORS.pop("local-llm", None)
+            LAST_ERRORS.pop(LOCAL_ENGINE, None)
             return parsed
         except urllib.error.HTTPError as e:
             kind, detail = classify_http(e)
@@ -718,7 +596,7 @@ def _openai_compat(prompt: str) -> dict | None:
                 _note("local model: first call failed, retrying once")
                 continue
             break
-    _fail("local-llm", last)
+    _fail(LOCAL_ENGINE, last)
     return None
 
 
@@ -728,19 +606,23 @@ def url_is_chat(base: str) -> bool:
 
 def configured_engine() -> str:
     """
-    Which brain will be used. A key is enough for Gemini even when Base URL is
-    blank (that was the old silent failure: a key + the default localhost URL,
-    or a cleared URL, meant 'offline' forever).
+    Which brain will be used: the Worker, a local model, or the offline parser.
+
+    The order is deliberate. A Worker URL is an explicit "get Gemini from
+    there", so it wins. A non-Gemini Base URL is an explicit "use my Ollama
+    box" and stays local - routing a LAN model through a public Worker would
+    be absurd - and ANY non-Gemini base URL counts, not just localhost, because
+    Ollama on another machine was once silently classed "offline".
+
+    A Gemini API key on its own is no longer an engine. It is only worth
+    anything to a Worker that asked for one (see workerclient.wants_client_key).
     """
+    if workerclient.configured():
+        return WORKER_ENGINE
     base = (config.LLM_BASE_URL or "").lower().rstrip("/")
-    # ANY non-Gemini base URL counts as an OpenAI-compatible endpoint. The old
-    # check only matched localhost/127.0.0.1, so Ollama on a LAN box or a
-    # http://host.docker.internal URL was classed "offline" and never tried.
     if base and "generativelanguage" not in base:
-        return "local-llm"
-    if config.LLM_API_KEY:
-        return "gemini"
-    return "offline"
+        return LOCAL_ENGINE
+    return OFFLINE_ENGINE
 
 
 def plan(request: str, seeds: list[dict] | None = None) -> dict:
@@ -768,18 +650,18 @@ def plan(request: str, seeds: list[dict] | None = None) -> dict:
         """plan() is documented never to raise: the offline parser must still
         get you music even if the API layer misbehaves on an unexpected shape."""
         try:
-            return _gemini(prompt) if which == "gemini" else _openai_compat(prompt)
+            return _gemini(prompt) if which == WORKER_ENGINE else _openai_compat(prompt)
         except Exception as e:                     # noqa: BLE001 - last line of defence
             _fail(which, f"unexpected {e.__class__.__name__}: {str(e)[:160]}")
             return None
 
-    if engine == "gemini":
-        plan_json = _ask("gemini")
-    elif engine == "local-llm":
-        plan_json = _ask("local-llm")
-    if plan_json is None and engine != "offline":
+    if engine == WORKER_ENGINE:
+        plan_json = _ask(WORKER_ENGINE)
+    elif engine == LOCAL_ENGINE:
+        plan_json = _ask(LOCAL_ENGINE)
+    if plan_json is None and engine != OFFLINE_ENGINE:
         # second engine only if the first one had nothing configured at all
-        plan_json = _ask("local-llm" if engine == "gemini" else "gemini")
+        plan_json = _ask(LOCAL_ENGINE if engine == WORKER_ENGINE else WORKER_ENGINE)
 
     if plan_json and isinstance(plan_json.get("queries"), list):
         # collapse internal whitespace: a query split across response parts can
@@ -797,8 +679,8 @@ def plan(request: str, seeds: list[dict] | None = None) -> dict:
                     "llm_notes": pop_notes()}
 
     reason = why_offline()
-    if engine == "offline":
-        fallback["engine"] = "offline"
+    if engine == OFFLINE_ENGINE:
+        fallback["engine"] = OFFLINE_ENGINE
     else:
         fallback["engine"] = f"{engine} (fallback)"
         fallback["llm_error"] = reason
@@ -819,8 +701,8 @@ def probe() -> dict:
     """
     engine = configured_engine()
     out = {"engine": engine, "ok": False, "detail": "", "ms": 0}
-    if engine == "offline":
-        out["detail"] = ("no API key and no local base URL - using the offline "
+    if engine == OFFLINE_ENGINE:
+        out["detail"] = ("no Worker URL and no local base URL - using the offline "
                          "parser (works, just dumber)")
         out["ok"] = True
         return out
@@ -829,7 +711,7 @@ def probe() -> dict:
     plan = None
     try:
         plan = (_gemini("Reply with 3 queries for: mellow evening jazz")
-                if engine == "gemini" else
+                if engine == WORKER_ENGINE else
                 _openai_compat("Reply with 3 queries for: mellow evening jazz"))
     except Exception as e:                      # never let a probe raise
         out["detail"] = f"{e.__class__.__name__}: {e}"[:260]
@@ -839,7 +721,7 @@ def probe() -> dict:
     out["notes"] = pop_notes()
     if plan and isinstance(plan.get("queries"), list) and plan["queries"]:
         out["ok"] = True
-        model = config.LLM_MODEL if engine == "gemini" else (config.LLM_MODEL or "local model")
+        model = config.LLM_MODEL if engine == WORKER_ENGINE else (config.LLM_MODEL or "local model")
         out["detail"] = (f"{len(plan['queries'])} queries in {out['ms']}ms via "
                          f"{model or config.GEMINI_DEFAULT_MODEL}, "
                          f"e.g. {str(plan['queries'][0])[:40]}")

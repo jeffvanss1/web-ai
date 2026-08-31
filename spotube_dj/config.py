@@ -40,16 +40,16 @@ GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta"
 # survivable rather than fatal.
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash"
 # the spoken DJ: a Google audio model + a voice. Despina is warm and smooth.
-# The default is the Gemini **Live** native-audio model (gemini-3.1-flash-live-preview),
-# which speaks over the Live API WebSocket. The Live API has no free-tier request
-# cap for this account (it works where the generateContent REST TTS endpoint rate-
-# limits), and a `systemInstruction` in the Live setup makes it READ the prewritten
-# DJ line as an on-air announcement rather than answering it like a chatbot. The
-# older generateContent TTS endpoint (gemini-*-tts-preview) reads verbatim but can
-# trip a REST quota, so it is only used when explicitly selected.
+# The speech is synthesized by the Worker (POST /v1/speech), so this is the
+# **REST TTS** model (gemini-*-tts-preview), not the Live one: a Worker cannot
+# open the Live API's WebSocket as a client. The quota that made the Live path
+# attractive is answered in the Worker instead, by caching each clip under
+# sha256(text|voice|model) in R2 - the same "up next" line costs nothing the
+# second time. A `*-live-*` name is still accepted and mapped to its TTS
+# sibling, so an old config does not go silent.
 # Override per shell (SPOTUBE_DJ_TTS_MODEL) or in Settings.
 GEMINI_DEFAULT_TTS_MODEL = os.environ.get("SPOTUBE_DJ_TTS_MODEL",
-                                          "gemini-3.1-flash-live-preview")
+                                          "gemini-3.1-flash-tts-preview")
 DJ_VOICE = os.environ.get("SPOTUBE_DJ_TTS_VOICE", "Despina")
 # The spoken language for the DJ's lines. A Gemini TTS/Live voice can speak any of
 # the supported languages regardless of which timbre is chosen, so this is its own
@@ -63,6 +63,23 @@ DJ_LANG_CHOICES = ("English", "Arabic", "Indonesian")
 LLM_BASE_URL = os.environ.get("SPOTUBE_DJ_BASE_URL", "")
 LLM_API_KEY = os.environ.get("GEMINI_API_KEY", os.environ.get("SPOTUBE_DJ_API_KEY", ""))
 LLM_MODEL = os.environ.get("SPOTUBE_DJ_MODEL", "")
+
+# ------------------------------------------------------------------- Worker
+# Every Gemini call goes through the Cloudflare Worker in worker/. Not a proxy
+# for tidiness' sake: the key lives there as a secret, the model ladder is
+# walked there (a retired model is one extra request instead of a broken
+# install on every machine), and D1 gives the taste profile somewhere to live
+# that is not this laptop. With no WORKER_URL the app is offline by design: it
+# does not fall back to calling Google directly, because a fallback nobody
+# tests is a second implementation that only runs when things are already
+# going wrong.
+WORKER_URL = os.environ.get("SPOTUBE_DJ_WORKER_URL", "").strip().rstrip("/")
+# Shared secret for the Worker, when its operator set WORKER_TOKEN.
+WORKER_TOKEN = os.environ.get("SPOTUBE_DJ_WORKER_TOKEN", "").strip()
+# Which listener this machine is. Two machines sharing a profile share taste.
+WORKER_PROFILE = (os.environ.get("SPOTUBE_DJ_WORKER_PROFILE", "").strip() or "default")
+# "on" -> the taste profile is mirrored to D1 and events are appended live.
+WORKER_SYNC = (os.environ.get("SPOTUBE_DJ_WORKER_SYNC", "on").strip().lower() or "on")
 def _env_timeout() -> float:
     # a typo in the env var must not make the whole package unimportable
     raw = os.environ.get("SPOTUBE_DJ_LLM_TIMEOUT", "").strip()
@@ -77,7 +94,8 @@ MAX_RECENT_HISTORY = 800
 
 
 LLM_KEYS = ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_TIMEOUT", "DJ_VOICE",
-            "DJ_LANG")
+            "DJ_LANG", "WORKER_URL", "WORKER_TOKEN", "WORKER_PROFILE",
+            "WORKER_SYNC")
 
 # The Gemini speech-generation voices (name, gender, character, written language).
 # The "language" is the written language the DJ composes in; choosing an Arabic
@@ -251,7 +269,28 @@ def load_llm_config() -> dict:
         out["DJ_VOICE"] = os.environ["SPOTUBE_DJ_TTS_VOICE"]
     if os.environ.get("SPOTUBE_DJ_TTS_LANG"):
         out["DJ_LANG"] = os.environ["SPOTUBE_DJ_TTS_LANG"]
+    # the Worker is configured the same way the key is: env wins over the file,
+    # so `SPOTUBE_DJ_WORKER_URL=... spotube-dj` works without touching Settings
+    if os.environ.get("SPOTUBE_DJ_WORKER_URL"):
+        out["WORKER_URL"] = os.environ["SPOTUBE_DJ_WORKER_URL"].strip().rstrip("/")
+    if os.environ.get("SPOTUBE_DJ_WORKER_TOKEN"):
+        out["WORKER_TOKEN"] = os.environ["SPOTUBE_DJ_WORKER_TOKEN"].strip()
+    if os.environ.get("SPOTUBE_DJ_WORKER_PROFILE"):
+        out["WORKER_PROFILE"] = os.environ["SPOTUBE_DJ_WORKER_PROFILE"].strip() or "default"
+    if os.environ.get("SPOTUBE_DJ_WORKER_SYNC"):
+        out["WORKER_SYNC"] = os.environ["SPOTUBE_DJ_WORKER_SYNC"].strip().lower() or "on"
     return out
+
+
+def load_worker_config() -> dict:
+    """The Worker settings, normalised: url (no trailing slash), token, profile, sync."""
+    data = load_llm_config()
+    url = str(data.get("WORKER_URL") or WORKER_URL or "").strip().rstrip("/")
+    sync = str(data.get("WORKER_SYNC") or WORKER_SYNC or "on").strip().lower()
+    return {"url": url,
+            "token": str(data.get("WORKER_TOKEN") or WORKER_TOKEN or "").strip(),
+            "profile": str(data.get("WORKER_PROFILE") or WORKER_PROFILE or "default").strip() or "default",
+            "sync": "off" if sync in ("0", "off", "no", "false") else "on"}
 
 
 def load_dj_voice() -> str:
