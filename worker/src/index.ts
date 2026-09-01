@@ -43,6 +43,11 @@ type Track = {
   query?: string;
   official?: boolean;
   score?: number;
+  // Requester fields are descriptive metadata only. Playback always uses the
+  // verified YouTube Music id and never a display name or client-supplied URL.
+  requesterId?: string;
+  requesterName?: string;
+  requestedAt?: number;
 };
 
 type SkippedTrack = { id: string; artist: string; title: string; at: number };
@@ -93,6 +98,7 @@ type RoomState = {
   queue: Track[];
   history: Track[];
   playing: boolean;
+  autoplay: boolean;
   position: number;
   duration: number;
   repeat: RepeatMode;
@@ -166,8 +172,12 @@ function segmentOf(value: unknown, request = "", vibe = ""): SetSegment {
 }
 
 function segmentLabel(segment: SetSegment, language = "English"): string {
-  if (language.toLocaleLowerCase() === "indonesian") {
+  const lower = language.toLocaleLowerCase();
+  if (lower === "indonesian") {
     return ({ "warm-up": "pemanasan", "late-night": "larut malam", focused: "fokus", energetic: "berenergi", "wind-down": "menurunkan tempo" } as Record<SetSegment, string>)[segment];
+  }
+  if (lower === "arabic") {
+    return ({ "warm-up": "الإحماء", "late-night": "آخر الليل", focused: "التركيز", energetic: "الطاقة", "wind-down": "التهدئة" } as Record<SetSegment, string>)[segment];
   }
   return segment;
 }
@@ -441,6 +451,9 @@ function normalizeTrack(value: unknown): Track | null {
   const title = clean(row.title, 180);
   if (!id || !title || !/^[A-Za-z0-9_-]+$/.test(id)) return null;
   const duration = Number(row.duration || 0);
+  const requesterId = clean(row.requesterId, 80);
+  const requesterName = clean(row.requesterName, 60);
+  const requestedAt = Number(row.requestedAt);
   return {
     id,
     title,
@@ -453,6 +466,21 @@ function normalizeTrack(value: unknown): Track | null {
     query: clean(row.query, 180) || undefined,
     official: row.official === true,
     score: Number.isFinite(Number(row.score)) ? Number(row.score) : undefined,
+    requesterId: requesterId || undefined,
+    requesterName: requesterName || undefined,
+    requestedAt: Number.isFinite(requestedAt) && requestedAt > 0 ? requestedAt : undefined,
+  };
+}
+
+type Requester = User | RoomMember;
+
+function requesterTrack(track: Track, requester: Requester): Track {
+  const name = "displayName" in requester ? requester.displayName : requester.name;
+  return {
+    ...clone(track),
+    requesterId: clean(requester.id, 80) || undefined,
+    requesterName: clean(name, 60) || "Listener",
+    requestedAt: Date.now(),
   };
 }
 
@@ -517,16 +545,10 @@ async function loadProfile(env: Env, userId: string): Promise<ProfileState> {
     return profile;
   }
   try {
-    const profile = normalizeProfile(JSON.parse(row.state_json));
-    // Migrate the old Worker default (browser speech + the Gemini voice name
-    // Despina) to an AI voice when a provider is now configured. Users who chose
-    // another voice/provider are left alone.
-    if (profile.ttsProvider === "browser" && profile.ttsVoice === "Despina" && (env.GEMINI_API_KEY || env.TTS_BASE_URL)) {
-      profile.ttsProvider = env.GEMINI_API_KEY ? "gemini" : "openai";
-      profile.ttsVoice = env.GEMINI_API_KEY ? (env.GEMINI_TTS_VOICE || "Kore") : (env.TTS_VOICE || "coral");
-      await saveProfile(env, userId, profile);
-    }
-    return profile;
+    // A saved provider, voice, language, and enabled flag are user data. Do not
+    // reinterpret an old browser choice merely because a Worker secret was later
+    // added; only a new profile gets defaultProfile() values.
+    return normalizeProfile(JSON.parse(row.state_json));
   } catch {
     return defaultProfile();
   }
@@ -841,11 +863,19 @@ function planningSnapshot(profile: ProfileState): string {
     .slice(0, 6)
     .map(([genre]) => genre);
   const recent = profile.history.slice(-8).map((track) => `${track.title} by ${track.artist || track.channel}`).filter(Boolean);
+  const current = profile.now ? `${profile.now.title} by ${profile.now.artist || profile.now.channel}` : "none";
+  const queued = profile.queue.slice(0, 10).map((track) => `${track.title} by ${track.artist || track.channel}`).join(" | ");
+  const skipped = profile.skipped.slice(-8).map((track) => `${track.title} by ${track.artist}`).join(" | ");
   return [
+    `Current request: ${profile.request || "none"}`,
+    `Current track: ${current}`,
+    `Queue context, next first: ${queued || "none"}`,
+    `Set context: segment ${profile.segment}; vibe ${profile.vibe || "unspecified"}`,
     `Taste-weighted artists: ${artists.join(", ") || "none"}`,
     `Taste-weighted genres: ${genres.join(", ") || "none"}`,
     `Recent listening history, newest last: ${recent.join(" | ") || "none"}`,
     `Loved songs: ${profile.liked.slice(-8).map((track) => `${track.title} by ${track.artist || track.channel}`).join(" | ") || "none"}`,
+    `Recently skipped: ${skipped || "none"}`,
   ].join("\n");
 }
 
@@ -989,6 +1019,13 @@ async function compatiblePlan(request: string, profile: ProfileState, env: Env, 
 
 async function makePlan(request: string, profile: ProfileState, env: Env): Promise<Plan> {
   const fallback = fallbackPlan(request, profile);
+  if (!env.GEMINI_API_KEY && !env.LLM_BASE_URL) {
+    return {
+      ...fallback,
+      engine: "offline parser",
+      error: "No AI planner is configured; the request, taste, and set context were parsed locally.",
+    };
+  }
   try {
     if (env.GEMINI_API_KEY) return await geminiPlan(request, profile, env, fallback);
     if (env.LLM_BASE_URL) return await compatiblePlan(request, profile, env, fallback);
@@ -998,7 +1035,7 @@ async function makePlan(request: string, profile: ProfileState, env: Env): Promi
     console.error("planner failed", detail);
     return { ...fallback, engine: `${provider} unavailable → offline parser`, error: detail };
   }
-  return fallback;
+  return { ...fallback, error: "No AI planner is configured; the request was parsed locally." };
 }
 
 function scoreTrack(track: Track, query: string, profile: ProfileState): number {
@@ -1051,7 +1088,35 @@ function blendProfiles(profiles: ProfileState[]): ProfileState {
   blended.liked = [...liked.values()].slice(-MAX_LIKES);
   blended.skipped = [...skipped.values()].slice(-MAX_SKIPS);
   blended.shuffle = profiles.some((profile) => profile.shuffle);
+  // The requester's language is used for the HTTP response/stream, not mixed
+  // into the room's taste profile. Keep a deterministic value for the planner's
+  // offline path when a room has members with different language preferences.
+  blended.djLang = profiles[0]?.djLang || blended.djLang;
   return blended;
+}
+
+function roomPlanningProfile(blended: ProfileState, room: RoomState, request: string): ProfileState {
+  const context = clone(blended);
+  const roomHistory = new Map<string, Track>();
+  for (const track of [...blended.history, ...room.history]) roomHistory.set(`${track.id}:${track.title}`, track);
+  context.request = clean(request || room.request, 240);
+  context.now = room.now ? clone(room.now) : null;
+  context.queue = room.queue.map((track) => clone(track)).slice(0, MAX_QUEUE);
+  context.history = [...roomHistory.values()].slice(-40);
+  context.vibe = clean(room.vibe, 120) || context.vibe;
+  context.segment = segmentOf(room.segment, context.request, context.vibe);
+  context.message = clean(room.message, 300);
+  return context;
+}
+
+function similarRequest(state: ProfileState | RoomState): string {
+  const now = state.now;
+  const artist = now ? clean(now.artist || now.channel, 100) : "";
+  const current = now ? `similar original studio songs to ${clean(now.title, 150)}${artist ? ` by ${artist}` : ""}` : "similar original studio songs";
+  const request = clean(state.request, 160);
+  const vibe = clean(state.vibe, 80);
+  const segment = segmentOf(state.segment, request, vibe);
+  return clean([request ? `more like ${request}` : "", current, vibe ? `${vibe} vibe` : "", `${segment} set`].filter(Boolean).join(", "), 240);
 }
 
 function addLike(profile: ProfileState, track: Track): void {
@@ -1075,7 +1140,7 @@ function addHeard(profile: ProfileState): void {
   addLike(profile, profile.now);
 }
 
-async function advanceProfile(profile: ProfileState, env: Env, markSkip: boolean): Promise<void> {
+async function advanceProfile(profile: ProfileState, env: Env, markSkip: boolean, requester?: User): Promise<void> {
   const current = profile.now;
   if (current && markSkip) addSkip(profile, current);
   if (current && profile.repeat === "one") {
@@ -1091,11 +1156,16 @@ async function advanceProfile(profile: ProfileState, env: Env, markSkip: boolean
   if (current && profile.repeat === "all") profile.queue.push(current);
   let next = profile.queue.shift() || null;
   let generatedPlan: Plan | null = null;
-  if (!next && profile.autoplay && profile.request) {
-    const built = await buildMix(profile.request, profile, env, 16);
+  if (!next && profile.autoplay && (profile.request || current)) {
+    const fallbackRequest = profile.request || similarRequest({ ...profile, now: current });
+    const built = await buildMix(fallbackRequest, { ...profile, request: fallbackRequest }, env, 16);
     generatedPlan = built.plan;
-    next = built.tracks.shift() || null;
-    profile.queue.push(...built.tracks);
+    const blocked = new Set([current?.id || "", ...profile.history.slice(-8).map((track) => track.id)].filter(Boolean));
+    const generated = built.tracks
+      .filter((track) => !blocked.has(track.id))
+      .map((track) => requester ? requesterTrack(track, requester) : track);
+    next = generated.shift() || null;
+    profile.queue.push(...generated);
     profile.vibe = built.plan.vibe;
     profile.why = built.plan.why;
     profile.segment = built.plan.segment;
@@ -1130,58 +1200,98 @@ function variantFor(seed: string, count: number): number {
   return count ? value % count : 0;
 }
 
+function compactReason(state: ProfileState | RoomState, language: string): string {
+  const request = clean(state.request, 90);
+  const heardArtist = clean(recentArtist(state), 80);
+  const tasteArtist = clean(strongestArtist(state), 80);
+  const genre = clean(strongestGenre(state), 60);
+  const lower = language.toLocaleLowerCase();
+  if (lower === "indonesian") {
+    if (request && heardArtist) return `Untuk ${request}, dengan benang dari ${heardArtist}.`;
+    if (request) return `Untuk ${request}.`;
+    if (heardArtist) return `Meneruskan warna ${heardArtist}.`;
+    if (tasteArtist) return `Dekat dengan selera ${tasteArtist}.`;
+    if (genre) return `Dengan warna ${genre}.`;
+    return "Menjaga alur set ini.";
+  }
+  if (lower === "arabic") {
+    if (request && heardArtist) return `لأجل ${request}، مع لمسة من ${heardArtist}.`;
+    if (request) return `لأجل ${request}.`;
+    if (heardArtist) return `نواصل أجواء ${heardArtist}.`;
+    if (tasteArtist) return `قريب من ذوق ${tasteArtist}.`;
+    if (genre) return `بلون ${genre}.`;
+    return "نحافظ على مسار المجموعة.";
+  }
+  if (request && heardArtist) return `More like ${request}, with a thread from ${heardArtist}.`;
+  if (request) return `For ${request}.`;
+  if (heardArtist) return `Keeping a thread from ${heardArtist}.`;
+  if (tasteArtist) return `Staying close to ${tasteArtist}.`;
+  if (genre) return `Keeping a ${genre} color.`;
+  return "Keeping the set moving.";
+}
+
+function compactLead(segment: SetSegment, language: string): string {
+  const lower = language.toLocaleLowerCase();
+  if (lower === "indonesian") {
+    return ({
+      "warm-up": "Kita mulai rapi.",
+      "late-night": "Lampu diredupkan.",
+      focused: "Kita tetap fokus.",
+      energetic: "Set ini mulai bergerak.",
+      "wind-down": "Kita turunkan tempo.",
+    } as Record<SetSegment, string>)[segment];
+  }
+  if (lower === "arabic") {
+    return ({
+      "warm-up": "نبدأ بهدوء.",
+      "late-night": "الأضواء خافتة.",
+      focused: "نبقى في التركيز.",
+      energetic: "المجموعة تتحرك.",
+      "wind-down": "نهدئ الإيقاع.",
+    } as Record<SetSegment, string>)[segment];
+  }
+  return ({
+    "warm-up": "A clean start.",
+    "late-night": "Lights low.",
+    focused: "Locked in.",
+    energetic: "The set is moving.",
+    "wind-down": "Edges softening.",
+  } as Record<SetSegment, string>)[segment];
+}
+
 function djLine(state: ProfileState | RoomState, language = "English"): string {
   const now = state.now;
   if (!now) return "";
   const next = state.queue[0];
   const segment = segmentOf(state.segment, state.request, state.vibe);
   const segmentText = segmentLabel(segment, language);
-  const vibe = clean(state.vibe, 100);
-  const artist = clean(now.artist || now.channel || "the next sound", 120);
-  const title = clean(now.title, 180);
-  const nextArtist = next ? clean(next.artist || next.channel || "the next sound", 120) : "";
-  const nextTitle = next ? clean(next.title, 180) : "";
-  const seed = `${now.id}:${next?.id || "end"}:${segment}`;
-  const variant = variantFor(seed, 3);
+  const vibe = clean(state.vibe, 70);
+  const artist = clean(now.artist || now.channel || "the next sound", 100);
+  const title = clean(now.title, 150);
+  const nextArtist = next ? clean(next.artist || next.channel || "the next sound", 100) : "";
+  const nextTitle = next ? clean(next.title, 150) : "";
   const indonesian = language.toLocaleLowerCase() === "indonesian";
-  // Planner copy is intentionally only the scene-setter. Song names, reasons,
-  // and the handoff below are assembled here from verified state so a model can
-  // never turn a guess into a claim about the listener's history.
-  const lead = indonesian
-    ? creativeDjLead(state.request, vibe, language, segment)
-    : (clean(state.djLead, 280).replace(/\bnow playing\b/gi, "this one") || creativeDjLead(state.request, vibe, language, segment));
+  const reason = compactReason(state, language);
+  // Keep this deterministic and deliberately short. The planner supplies the
+  // set context, while verified track/profile state supplies every factual
+  // claim; the browser can therefore speak one quick handoff without stacking
+  // a long intro, a repeated reason, and a second Now-playing sentence.
   if (indonesian) {
-    const reason = groundedWhyId(state);
-    const frame = vibe ? `Kita ada di bagian ${segmentText}, dengan nuansa ${vibe} di ruangan.` : `Kita ada di bagian ${segmentText} dari set ini.`;
-    const current = [
-      `Ini ${title} dari ${artist}.`,
-      `Sekarang kita bawa ${title}, bersama ${artist}.`,
-      `Kita mendarat di ${title} dari ${artist}.`,
-    ][variant];
-    const handoff = next
-      ? [
-        `Setelah ini, ${nextTitle} dari ${nextArtist} siap meneruskan alurnya.`,
-        `Kalau lagu ini selesai, kita bergerak ke ${nextTitle} bersama ${nextArtist}.`,
-        `Dan untuk perpindahan berikutnya, ${nextTitle} dari ${nextArtist} sudah menunggu.`,
-      ][variant]
-      : "Kita biarkan lagu ini menutup bagian set ini dengan tenang.";
-    return `${lead} ${reason} ${frame} ${current} ${handoff}`.replace(/\.\./g, ".");
+    const mood = vibe ? `Bagian ${segmentText}, nuansa ${vibe}.` : `Bagian ${segmentText}.`;
+    const current = `Ini ${title} dari ${artist}.`;
+    const handoff = next ? `Berikutnya ${nextTitle} dari ${nextArtist}.` : "Biarkan lagu ini mengalir.";
+    return `${compactLead(segment, language)} ${reason} ${mood} ${current} ${handoff}`.replace(/\.\./g, ".");
   }
-  const reason = "artists" in state ? groundedWhy(state) : (clean(state.why, 300) || groundedWhy(state));
-  const frame = vibe ? `We are in the ${segmentText} stretch, with a ${vibe} mood in the room.` : `We are in the ${segmentText} stretch of the set.`;
-  const current = [
-    `Here is ${title} by ${artist}.`,
-    `I am bringing in ${title} from ${artist}.`,
-    `We are landing on ${title}, with ${artist}.`,
-  ][variant];
-  const handoff = next
-    ? [
-      `When it settles, ${nextTitle} by ${nextArtist} is waiting to carry the thread forward.`,
-      `After this, we will move into ${nextTitle} from ${nextArtist}.`,
-      `And the next handoff is ${nextTitle}, with ${nextArtist} taking it from here.`,
-    ][variant]
-    : "Let this one have the room for a while.";
-  return `${lead} ${reason} ${frame} ${current} ${handoff}`.replace(/\.\./g, ".");
+  if (language.toLocaleLowerCase() === "arabic") {
+    const mood = vibe ? `أجواء ${segmentText} بطابع ${vibe}.` : `أجواء ${segmentText}.`;
+    const current = `هذه ${title} لـ ${artist}.`;
+    const handoff = next ? `التالي ${nextTitle} لـ ${nextArtist}.` : "دعوا هذه الأغنية تتنفس.";
+    return `${compactLead(segment, language)} ${reason} ${mood} ${current} ${handoff}`;
+  }
+  const mood = vibe ? `${segmentText} set, ${vibe} mood.` : `${segmentText} set.`;
+  const current = `${title} by ${artist}.`;
+  const handoff = next ? `Next, ${nextTitle} by ${nextArtist}.` : "Let this one breathe.";
+  return `${compactLead(segment, language)} ${reason} ${mood} ${current} ${handoff}`.replace(/\.\./g, ".");
 }
 
 async function runPersonalAction(user: User, fields: Record<string, string>, env: Env): Promise<{ state: Record<string, unknown>; message: string }> {
@@ -1193,13 +1303,14 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
     const built = await buildMix(request, profile, env, 24);
     if (!built.tracks.length) throw new Error("YouTube Music returned no playable songs");
     profile.request = request;
-    const nextMixTrack = built.tracks.shift() || null;
+    const generated = built.tracks.map((track) => requesterTrack(track, user));
+    const nextMixTrack = generated.shift() || null;
     if (profile.now && nextMixTrack && profile.now.id !== nextMixTrack.id) {
       profile.history.push(clone(profile.now));
       profile.history = profile.history.slice(-40);
     }
     profile.now = nextMixTrack;
-    profile.queue = built.tracks.slice(0, MAX_QUEUE);
+    profile.queue = generated.slice(0, MAX_QUEUE);
     profile.position = 0;
     profile.duration = profile.now?.duration || 0;
     profile.paused = true;
@@ -1213,8 +1324,8 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
       : `Ready with ${profile.queue.length + (profile.now ? 1 : 0)} tracks. Press play.`;
     message = built.plan.error ? "mix ready with offline brain" : "mix ready";
   } else if (action === "play" || action === "resume" || action === "playpause") {
-    if (!profile.now) await advanceProfile(profile, env, false);
-    profile.paused = action === "playpause" ? !profile.paused : false;
+    if (!profile.now) await advanceProfile(profile, env, false, user);
+    profile.paused = profile.now ? (action === "playpause" ? !profile.paused : false) : true;
     message = profile.paused ? "paused" : "playing";
   } else if (action === "pause") {
     profile.paused = true;
@@ -1247,12 +1358,13 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
       if (Number.isFinite(endedDuration) && endedDuration > 0) profile.duration = Math.min(86400, endedDuration);
       addHeard(profile);
     }
-    await advanceProfile(profile, env, action !== "ended");
+    await advanceProfile(profile, env, action !== "ended", user);
     message = profile.now ? `playing ${profile.now.title}` : "the queue is empty";
   } else if (action === "play_row") {
     const supplied = fields.track ? normalizeTrack(JSON.parse(fields.track)) : null;
     const id = clean(fields.id, 32);
-    const selected = profile.queue.find((track) => track.id === id) || supplied;
+    const queued = profile.queue.find((track) => track.id === id);
+    const selected = queued || (supplied ? requesterTrack(supplied, user) : null);
     if (!selected || !playableOriginal(selected)) throw new Error("that track is not an original YouTube Music song");
     profile.queue = profile.queue.filter((track) => track.id !== selected.id);
     if (profile.now && profile.now.id !== selected.id) {
@@ -1267,7 +1379,8 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
     profile.message = `playing ${selected.title}`;
     message = profile.message;
   } else if (action === "enqueue" || action === "queue_next") {
-    const track = fields.track ? normalizeTrack(JSON.parse(fields.track)) : null;
+    const supplied = fields.track ? normalizeTrack(JSON.parse(fields.track)) : null;
+    const track = supplied ? requesterTrack(supplied, user) : null;
     if (!track || !playableOriginal(track)) throw new Error("only original YouTube Music songs can be queued");
     profile.queue = [track, ...profile.queue.filter((item) => item.id !== track.id)].slice(0, MAX_QUEUE);
     message = `queued ${track.title}`;
@@ -1357,6 +1470,7 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     queue: [],
     history: [],
     playing: false,
+    autoplay: true,
     position: 0,
     duration: 0,
     repeat: "off",
@@ -1372,12 +1486,15 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
   if (!value || typeof value !== "object") return base;
   const raw = value as Record<string, unknown>;
   const members: Record<string, RoomMember> = {};
-  if (raw.members && typeof raw.members === "object") {
-    for (const [memberId, item] of Object.entries(raw.members as Record<string, unknown>)) {
-      if (!item || typeof item !== "object") continue;
-      const row = item as Record<string, unknown>;
-      members[memberId] = { id: memberId, name: clean(row.name, 60), joinedAt: Number(row.joinedAt) || Date.now() };
-    }
+  const memberEntries = Array.isArray(raw.members)
+    ? raw.members.map((item) => [clean((item as Record<string, unknown> | null)?.id, 80), item] as [string, unknown])
+    : raw.members && typeof raw.members === "object"
+      ? Object.entries(raw.members as Record<string, unknown>)
+      : [];
+  for (const [memberId, item] of memberEntries) {
+    if (!memberId || !item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    members[memberId] = { id: memberId, name: clean(row.name, 60) || "Listener", joinedAt: Number(row.joinedAt) || Date.now() };
   }
   return {
     ...base,
@@ -1391,6 +1508,7 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     queue: (Array.isArray(raw.queue) ? raw.queue : []).map(originalTrack).filter(Boolean).slice(0, MAX_QUEUE) as Track[],
     history: (Array.isArray(raw.history) ? raw.history : []).map(originalTrack).filter(Boolean).slice(-40) as Track[],
     playing: Boolean(raw.playing),
+    autoplay: raw.autoplay !== false,
     position: Math.max(0, Math.min(86400, Number(raw.position) || 0)),
     duration: Math.max(0, Math.min(86400, Number(raw.duration) || 0)),
     repeat: raw.repeat === "all" || raw.repeat === "one" ? raw.repeat : "off",
@@ -1411,7 +1529,8 @@ function publicRoom(room: RoomState, language = "English"): Record<string, unkno
   output.members = Object.values(room.members) as unknown as Record<string, RoomMember>;
   output.playing = room.playing;
   output.segment = segmentOf(room.segment, room.request, room.vibe);
-  output.djLine = djLine({ ...room, segment: output.segment }, language);
+  output.djLang = LANGUAGES.find((item) => item.toLocaleLowerCase() === language.toLocaleLowerCase()) || "English";
+  output.djLine = djLine({ ...room, segment: output.segment }, String(output.djLang));
   return output;
 }
 
@@ -1480,29 +1599,103 @@ async function listRooms(env: Env, user: User): Promise<Record<string, unknown>[
   return result.results || [];
 }
 
+function localizedRoomState(value: unknown, language: string, roomId: string): Record<string, unknown> {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const room = normalizeRoom(raw, roomId);
+  return { ...raw, djLang: language, djLine: djLine(room, language) };
+}
+
 async function roomAction(request: Request, env: Env, user: User, roomId: string, fields: Record<string, string>): Promise<Response> {
   if (!(await isRoomMember(env, roomId, user.id))) return errorResponse("join the room first", 403);
   const action = clean(fields.action, 50).toLocaleLowerCase();
   const outgoing = { ...fields };
+  let currentRoom: RoomState | null = null;
+  const readRoom = async (): Promise<RoomState> => {
+    if (currentRoom) return currentRoom;
+    const stateResponse = await roomFetch(env, roomId, "/state", user);
+    currentRoom = stateResponse.ok ? normalizeRoom(await stateResponse.json(), roomId) : normalizeRoom(null, roomId);
+    return currentRoom;
+  };
+
   if (action === "request" || action === "mix" || action === "radio") {
+    const room = await readRoom();
     const memberIds = await roomMembers(env, roomId);
     const profiles = await Promise.all(memberIds.map((id) => loadProfile(env, id)));
     const blended = blendProfiles(profiles);
-    const requestText = clean(fields.q || (action === "radio" ? `more like ${fields.title || "this song"} ${fields.artist || ""}` : ""));
-    const built = await buildMix(requestText, blended, env, 24);
+    const requestText = clean(
+      fields.q ||
+        (action === "radio" ? `more like ${fields.title || room.now?.title || "this song"} ${fields.artist || room.now?.artist || ""}` : "") ||
+        room.request ||
+        "a blended set from the room's listening history",
+    );
+    // Include the room's live request, current song, queue, history, vibe, and
+    // segment in the planner profile. Previously only member taste weights were
+    // sent, so a room brain could silently plan against the wrong context.
+    const planningProfile = roomPlanningProfile(blended, room, requestText);
+    const built = await buildMix(requestText, planningProfile, env, 24);
     if (!built.tracks.length) return errorResponse("YouTube Music returned no playable songs", 502);
     outgoing.q = requestText;
-    outgoing.tracks = JSON.stringify(built.tracks);
+    outgoing.tracks = JSON.stringify(built.tracks.map((track) => requesterTrack(track, user)));
     outgoing.vibe = built.plan.vibe;
     outgoing.why = built.plan.why;
     outgoing.segment = built.plan.segment;
     outgoing.engine = built.plan.engine;
-    outgoing.djLead = built.plan.djLead || creativeDjLead(requestText, built.plan.vibe, "English", built.plan.segment);
+    const memberIndex = memberIds.indexOf(user.id);
+    const memberProfile = (memberIndex >= 0 ? profiles[memberIndex] : null) || await loadProfile(env, user.id);
+    outgoing.djLead = built.plan.djLead || creativeDjLead(requestText, built.plan.vibe, memberProfile.djLang, built.plan.segment);
     outgoing.brainError = built.plan.error || "";
   }
+
+  // Never trust requester text sent by a browser. Re-normalize the verified
+  // song row and attach the authenticated member's identity at the edge.
+  if (action === "enqueue" || action === "queue_next" || action === "play_row") {
+    let supplied: Track | null = null;
+    try { supplied = normalizeTrack(JSON.parse(fields.track || "null")); } catch { supplied = null; }
+    if (!supplied || !playableOriginal(supplied)) return errorResponse("only original YouTube Music songs can be queued");
+    outgoing.track = JSON.stringify(requesterTrack(supplied, user));
+    outgoing.id = supplied.id;
+  }
+
+  // A shared room has no local audio process to refill its queue. When playback
+  // is active and the last track is skipped/ended, ask the same blended planner
+  // for a guarded similar-song refill before the Durable Object advances to an
+  // empty state. This is a separate action so it cannot recurse through `next`.
+  if (action === "next" || action === "skip" || action === "ended") {
+    const room = await readRoom();
+    if (room.autoplay && room.playing && room.now && room.repeat !== "one" && room.repeat !== "all" && !room.queue.length) {
+      try {
+        const memberIds = await roomMembers(env, roomId);
+        const profiles = await Promise.all(memberIds.map((id) => loadProfile(env, id)));
+        const blended = blendProfiles(profiles);
+        const requestText = similarRequest(room);
+        const planningProfile = roomPlanningProfile(blended, room, requestText);
+        const built = await buildMix(requestText, planningProfile, env, 16);
+        const blocked = new Set([room.now.id, ...room.history.slice(-8).map((track) => track.id)]);
+        const generated = built.tracks.filter((track) => !blocked.has(track.id));
+        if (generated.length) {
+          outgoing.action = "autoplay_next";
+          outgoing.baseId = room.now.id;
+          outgoing.q = room.request || requestText;
+          outgoing.tracks = JSON.stringify(generated.map((track) => requesterTrack(track, user)));
+          outgoing.vibe = built.plan.vibe;
+          outgoing.why = built.plan.why;
+          outgoing.segment = built.plan.segment;
+          outgoing.engine = built.plan.engine;
+          const memberIndex = memberIds.indexOf(user.id);
+          const memberProfile = (memberIndex >= 0 ? profiles[memberIndex] : null) || await loadProfile(env, user.id);
+          outgoing.djLead = built.plan.djLead || creativeDjLead(outgoing.q, built.plan.vibe, memberProfile.djLang, built.plan.segment);
+          outgoing.brainError = built.plan.error || "";
+        } else {
+          outgoing.autoplayError = built.plan.error || "the similar-song search returned no new original songs";
+        }
+      } catch (error) {
+        outgoing.autoplayError = clean(error instanceof Error ? error.message : "the similar-song search failed", 180);
+      }
+    }
+  }
+
   if (action === "like" || action === "unlike" || action === "skip" || action === "dislike") {
-    const stateResponse = await roomFetch(env, roomId, "/state", user);
-    const room = (await stateResponse.json()) as RoomState;
+    const room = await readRoom();
     const profile = await loadProfile(env, user.id);
     const target = action === "dislike" && fields.id ? room.queue.find((track) => track.id === clean(fields.id, 32)) || room.now : room.now;
     if (action === "like" && target) addLike(profile, target);
@@ -1514,9 +1707,11 @@ async function roomAction(request: Request, env: Env, user: User, roomId: string
       const response = await roomFetch(env, roomId, "/action", user, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: roomActionName, id: fields.id, position: room.position, duration: room.duration }) });
       const updated = await roomFetch(env, roomId, "/state", user);
       await database(env).prepare("UPDATE rooms SET updated_at = ?1 WHERE id = ?2").bind(Date.now(), roomId).run();
-      return json({ ok: true, message: action === "like" ? "loved this song for your profile" : action === "unlike" ? "love removed" : "noted for your profile", state: await updated.json(), personal: publicProfile(profile, user) }, response.status);
+      const updatedState = await updated.json();
+      return json({ ok: true, message: action === "like" ? "loved this song for your profile" : action === "unlike" ? "love removed" : "noted for your profile", state: localizedRoomState(updatedState, profile.djLang, roomId), personal: publicProfile(profile, user) }, response.status);
     }
   }
+
   const response = await roomFetch(env, roomId, "/action", user, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(outgoing) });
   const payload = await response.json();
   if (!response.ok) return json(payload, response.status);
@@ -1525,21 +1720,23 @@ async function roomAction(request: Request, env: Env, user: User, roomId: string
   if (liveHostId) await database(env).prepare("UPDATE rooms SET host_user_id = ?1, updated_at = ?2 WHERE id = ?3").bind(liveHostId, Date.now(), roomId).run();
   else await database(env).prepare("UPDATE rooms SET updated_at = ?1 WHERE id = ?2").bind(Date.now(), roomId).run();
   const profile = await loadProfile(env, user.id);
-  return json({ ...(payload as Record<string, unknown>), personal: publicProfile(profile, user) }, response.status);
+  if (roomPayload.state && typeof roomPayload.state === "object") roomPayload.state = localizedRoomState(roomPayload.state, profile.djLang, roomId);
+  return json({ ...roomPayload, personal: publicProfile(profile, user) }, response.status);
 }
 
 async function roomState(request: Request, env: Env, user: User, roomId: string): Promise<Response> {
   if (!(await isRoomMember(env, roomId, user.id))) return errorResponse("join the room first", 403);
   const response = await roomFetch(env, roomId, "/state", user);
   if (!response.ok) return response;
-  const room = (await response.json()) as RoomState;
+  const room = await response.json();
   const profile = await loadProfile(env, user.id);
-  return json({ ...(room as unknown as Record<string, unknown>), personal: publicProfile(profile, user) });
+  return json({ ...localizedRoomState(room, profile.djLang, roomId), personal: publicProfile(profile, user) });
 }
 
 async function roomStream(request: Request, env: Env, user: User, roomId: string): Promise<Response> {
   if (!(await isRoomMember(env, roomId, user.id))) return errorResponse("join the room first", 403);
-  const headers = new Headers({ Upgrade: "websocket", "x-spotube-user-id": user.id, "x-spotube-user-name": user.displayName });
+  const profile = await loadProfile(env, user.id);
+  const headers = new Headers({ Upgrade: "websocket", "x-spotube-user-id": user.id, "x-spotube-user-name": user.displayName, "x-spotube-dj-language": profile.djLang });
   return roomBinding(env, roomId).fetch(new Request("https://room.internal/stream", { headers }));
 }
 
@@ -1942,10 +2139,14 @@ async function tts(request: Request, env: Env, user: User): Promise<Response> {
   const profile = await loadProfile(env, user.id);
   const text = clean(fields.text, 1500);
   if (!text) return errorResponse("text is required");
-  const provider = (["gemini", "openai", "browser", "off"].includes(fields.provider) ? fields.provider : profile.ttsProvider) as TtsProvider;
-  const selectedProfile = { ...profile, ttsVoice: clean(fields.voice, 80) || profile.ttsVoice };
+  // Normal announcements are deliberately profile-authoritative. Provider/voice
+  // fields from the browser are ignored so a stale tab, room state, or crafted
+  // request cannot silently change the user's saved voice. Settings preview uses
+  // the same saved profile after the user presses Save.
+  if (!profile.voiceEnabled) return json({ ok: true, provider: "off", browser: false, suppressed: true });
+  const provider = profile.ttsProvider;
   if (provider === "browser" || provider === "off") return json({ ok: true, provider, browser: provider === "browser" });
-  return provider === "gemini" ? geminiSpeech(text, selectedProfile, env) : compatibleSpeech(text, selectedProfile, env);
+  return provider === "gemini" ? geminiSpeech(text, profile, env) : compatibleSpeech(text, profile, env);
 }
 
 async function bodyFields(request: Request): Promise<Record<string, string>> {
@@ -1978,10 +2179,12 @@ async function fetchAsset(env: Env, request: Request): Promise<Response> {
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
+type RoomConnection = { member: RoomMember; language: string };
+
 export class ListenRoom {
   private readonly state: DurableObjectState;
   private room: RoomState | null = null;
-  private readonly sockets = new Map<WebSocket, RoomMember>();
+  private readonly sockets = new Map<WebSocket, RoomConnection>();
 
   constructor(state: DurableObjectState) {
     this.state = state;
@@ -2005,14 +2208,13 @@ export class ListenRoom {
     return id && room.members[id] ? room.members[id] : null;
   }
 
-  private snapshot(): Record<string, unknown> {
-    return this.room ? publicRoom(this.room) : {};
+  private snapshot(language = "English"): Record<string, unknown> {
+    return this.room ? publicRoom(this.room, language) : {};
   }
 
   private broadcast(): void {
-    const message = JSON.stringify({ type: "state", state: this.snapshot() });
-    for (const socket of this.sockets.keys()) {
-      try { socket.send(message); } catch { this.sockets.delete(socket); }
+    for (const [socket, connection] of this.sockets.entries()) {
+      try { socket.send(JSON.stringify({ type: "state", state: this.snapshot(connection.language) })); } catch { this.sockets.delete(socket); }
     }
   }
 
@@ -2020,33 +2222,62 @@ export class ListenRoom {
     const room = await this.load();
     if (!room.members[member.id]) return errorResponse("not a member", 403);
     const action = clean(fields.action, 50).toLocaleLowerCase();
-    if (action === "request" || action === "mix" || action === "radio") {
+    if (action === "autoplay_next" && clean(fields.baseId, 32) && room.now?.id !== clean(fields.baseId, 32)) {
+      return json({ ok: true, state: this.snapshot(request.headers.get("x-spotube-dj-language") || "English"), message: "another listener advanced the room" });
+    }
+    if (action === "request" || action === "mix" || action === "radio" || action === "autoplay_next") {
       let tracks: Track[] = [];
       try {
         tracks = (JSON.parse(fields.tracks || "[]") as unknown[])
           .map(normalizeTrack)
-          .filter((track): track is Track => track !== null && playableOriginal(track));
+          .filter((track): track is Track => track !== null && playableOriginal(track))
+          .map((track) => requesterTrack(track, member));
       } catch { tracks = []; }
       if (!tracks.length) return errorResponse("the room mix has no original songs", 502);
-      room.request = clean(fields.q, 240);
-      const nextMixTrack = tracks.shift() || null;
-      if (room.now && nextMixTrack && room.now.id !== nextMixTrack.id) {
-        room.history.push(clone(room.now));
-        room.history = room.history.slice(-40);
+      const replacingMix = action === "request" || action === "mix" || action === "radio";
+      if (replacingMix) {
+        room.request = clean(fields.q, 240);
+        const nextMixTrack = tracks.shift() || null;
+        if (room.now && nextMixTrack && room.now.id !== nextMixTrack.id) {
+          room.history.push(clone(room.now));
+          room.history = room.history.slice(-40);
+        }
+        room.now = nextMixTrack;
+        room.queue = tracks.slice(0, MAX_QUEUE);
+        room.position = 0;
+        room.duration = room.now?.duration || 0;
+        room.playing = false;
+        room.vibe = clean(fields.vibe, 120);
+        room.why = clean(fields.why, 300);
+        room.segment = segmentOf(fields.segment, room.request, room.vibe);
+        room.engine = clean(fields.engine, 80) || "offline parser";
+        room.djLead = clean(fields.djLead, 280) || creativeDjLead(room.request, room.vibe);
+        room.message = fields.brainError
+          ? `AI brain unavailable; used the offline parser. ${clean(fields.brainError, 180)}`
+          : `Ready with ${room.queue.length + (room.now ? 1 : 0)} tracks. Press play.`;
+      } else {
+        // The Worker has already chosen a new, filtered track from the blended
+        // room context. Advance exactly once; never call the normal `next` path
+        // from here, otherwise an empty queue can recurse forever.
+        room.request = clean(fields.q, 240) || room.request;
+        if (room.now) {
+          room.history.push(clone(room.now));
+          room.history = room.history.slice(-40);
+        }
+        room.now = tracks.shift() || null;
+        room.queue = tracks.slice(0, MAX_QUEUE);
+        room.position = 0;
+        room.duration = room.now?.duration || 0;
+        room.playing = Boolean(room.now);
+        room.vibe = clean(fields.vibe, 120) || room.vibe;
+        room.why = clean(fields.why, 300) || room.why;
+        room.segment = segmentOf(fields.segment, room.request, room.vibe);
+        room.engine = clean(fields.engine, 80) || room.engine;
+        room.djLead = clean(fields.djLead, 280) || creativeDjLead(room.request, room.vibe);
+        room.message = fields.brainError
+          ? `AI brain unavailable; used the offline parser. ${clean(fields.brainError, 180)}`
+          : room.now ? `Playing a similar song: ${room.now.title}` : "The similar-song queue was empty.";
       }
-      room.now = nextMixTrack;
-      room.queue = tracks.slice(0, MAX_QUEUE);
-      room.position = 0;
-      room.duration = room.now?.duration || 0;
-      room.playing = false;
-      room.vibe = clean(fields.vibe, 120);
-      room.why = clean(fields.why, 300);
-      room.segment = segmentOf(fields.segment, room.request, room.vibe);
-      room.engine = clean(fields.engine, 80) || "offline parser";
-      room.djLead = clean(fields.djLead, 280) || creativeDjLead(room.request, room.vibe);
-      room.message = fields.brainError
-        ? `AI brain unavailable; used the offline parser. ${clean(fields.brainError, 180)}`
-        : `Ready with ${room.queue.length + (room.now ? 1 : 0)} tracks. Press play.`;
     } else if (action === "play" || action === "resume" || action === "playpause") {
       room.playing = action === "playpause" ? !room.playing : true;
     } else if (action === "pause") {
@@ -2082,11 +2313,15 @@ export class ListenRoom {
         room.duration = next?.duration || 0;
         room.playing = Boolean(next);
         room.djLead = creativeDjLead(room.request, room.vibe);
-        room.message = next ? `playing ${next.title}` : "The room queue is empty. Make another blended mix.";
+        room.message = next ? `playing ${next.title}` : fields.autoplayError
+          ? `Autoplay fallback unavailable; ${clean(fields.autoplayError, 180)}`
+          : "The room queue is empty. Make another blended mix.";
       }
     } else if (action === "play_row") {
-      let selected = room.queue.find((track) => track.id === clean(fields.id, 32)) || null;
-      try { selected ||= normalizeTrack(JSON.parse(fields.track || "null")); } catch { /* invalid client row */ }
+      const queued = room.queue.find((track) => track.id === clean(fields.id, 32)) || null;
+      let supplied: Track | null = null;
+      try { supplied = normalizeTrack(JSON.parse(fields.track || "null")); } catch { /* invalid client row */ }
+      const selected = queued || (supplied ? requesterTrack(supplied, member) : null);
       if (!selected || !playableOriginal(selected)) return errorResponse("that track is not an original YouTube Music song");
       room.queue = room.queue.filter((track) => track.id !== selected?.id);
       if (room.now && room.now.id !== selected.id) {
@@ -2103,6 +2338,7 @@ export class ListenRoom {
       let track: Track | null = null;
       try { track = normalizeTrack(JSON.parse(fields.track || "null")); } catch { track = null; }
       if (!track || !playableOriginal(track)) return errorResponse("only original YouTube Music songs can be queued");
+      track = requesterTrack(track, member);
       room.queue = [track, ...room.queue.filter((item) => item.id !== track?.id)].slice(0, MAX_QUEUE);
     } else if (action === "remove") {
       room.queue = room.queue.filter((track) => track.id !== clean(fields.id, 32));
@@ -2118,10 +2354,12 @@ export class ListenRoom {
       if (room.shuffle) room.queue.sort(() => Math.random() - 0.5);
     } else if (action === "repeat") {
       room.repeat = fields.mode === "off" || fields.mode === "all" || fields.mode === "one" ? fields.mode : room.repeat === "off" ? "all" : room.repeat === "all" ? "one" : "off";
+    } else if (action === "autoplay") {
+      room.autoplay = fields.on !== "off" && fields.on !== "0" && fields.on !== "false";
     } else if (action === "leave") {
       delete room.members[member.id];
       for (const [socket, connected] of this.sockets.entries()) {
-        if (connected.id !== member.id) continue;
+        if (connected.member.id !== member.id) continue;
         this.sockets.delete(socket);
         try { socket.close(1000, "left room"); } catch { /* already closed */ }
       }
@@ -2139,7 +2377,7 @@ export class ListenRoom {
     room.updatedAt = Date.now();
     await this.persist();
     this.broadcast();
-    return json({ ok: true, state: this.snapshot(), message: room.message });
+    return json({ ok: true, state: this.snapshot(request.headers.get("x-spotube-dj-language") || "English"), message: room.message });
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -2156,7 +2394,7 @@ export class ListenRoom {
         room.members[room.hostId] = { id: room.hostId, name: room.hostName, joinedAt: Date.now() };
         await this.persist();
       }
-      return json({ ok: true, state: this.snapshot() });
+      return json({ ok: true, state: this.snapshot(request.headers.get("x-spotube-dj-language") || "English") });
     }
     if (url.pathname === "/join" && request.method === "POST") {
       const fields = await bodyFields(request);
@@ -2170,12 +2408,12 @@ export class ListenRoom {
       }
       await this.persist();
       this.broadcast();
-      return json({ ok: true, state: this.snapshot() });
+      return json({ ok: true, state: this.snapshot(request.headers.get("x-spotube-dj-language") || "English") });
     }
     if (url.pathname === "/members" && request.method === "GET") return json({ members: Object.keys(room.members) });
     if (url.pathname === "/state" && request.method === "GET") {
       if (!this.allowed(request, room)) return errorResponse("not a member", 403);
-      return json(this.snapshot());
+      return json(this.snapshot(request.headers.get("x-spotube-dj-language") || "English"));
     }
     if (url.pathname === "/action" && request.method === "POST") {
       const member = this.allowed(request, room);
@@ -2189,7 +2427,8 @@ export class ListenRoom {
       const client = pair[0];
       const server = pair[1];
       server.accept();
-      this.sockets.set(server, member);
+      const language = LANGUAGES.find((item) => item.toLocaleLowerCase() === (request.headers.get("x-spotube-dj-language") || "").toLocaleLowerCase()) || "English";
+      this.sockets.set(server, { member, language });
       server.addEventListener("close", () => this.sockets.delete(server));
       server.addEventListener("error", () => this.sockets.delete(server));
       server.addEventListener("message", (event) => {
@@ -2199,7 +2438,7 @@ export class ListenRoom {
             const value = JSON.parse(raw) as unknown;
             if (!value || typeof value !== "object") throw new Error("message must be an object");
             const fields = Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, typeof item === "string" ? item : JSON.stringify(item)]));
-            const response = await this.roomAction(new Request("https://room.internal/action", { method: "POST" }), fields, member);
+            const response = await this.roomAction(new Request("https://room.internal/action", { method: "POST", headers: { "x-spotube-dj-language": language } }), fields, member);
             const payload = await response.text();
             server.send(JSON.stringify({ type: "ack", ok: response.ok, ...(JSON.parse(payload) as Record<string, unknown>) }));
           } catch (error) {
@@ -2207,7 +2446,7 @@ export class ListenRoom {
           }
         })();
       });
-      server.send(JSON.stringify({ type: "state", state: this.snapshot() }));
+      server.send(JSON.stringify({ type: "state", state: this.snapshot(language) }));
       return new Response(null, { status: 101, webSocket: client });
     }
     return errorResponse("room route not found", 404);

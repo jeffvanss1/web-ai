@@ -15,9 +15,20 @@ and the browser's official YouTube embedded player.
 - Multiple accounts with private password sessions.
 - A personal queue, likes, skips, artist weights, repeat, shuffle, autoplay,
   previous/next, search, stations, taste reset/restore, and activity wording.
-- Gemini or OpenAI-compatible planning, with an offline query planner fallback.
+- Gemini or OpenAI-compatible planning, with an explicit offline query-parser
+  fallback and diagnostics when the AI brain is unavailable.
 - Gemini TTS, OpenAI-compatible TTS, and browser speech fallback for the DJ line
-  and the up-next announcement.
+  and the up-next announcement. New profiles default to Gemini with Indonesian;
+  saved provider, voice, language, and enabled/disabled choices remain authoritative.
+  Announcements are compact and stale browser/audio requests are cancelled when
+  playback changes.
+- Mobile queue controls include an add-to-queue entry point, count, clear/remove
+  actions, and requester labels. Room members and requested tracks carry sanitized
+  display metadata separately from the verified playback id.
+- Room planning blends member taste with the live room request, current track,
+  history, queue, vibe, and set segment. An enabled room uses a guarded similar-song
+  refill when its queue reaches the end; all refill results still pass the original
+  YouTube Music Song filter.
 - Private invite-code listen parties.
 - Shared party controls: every member may play, pause, seek, enqueue, remove,
   shuffle, repeat, skip, and change the queue.
