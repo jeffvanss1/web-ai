@@ -108,6 +108,11 @@ const YTM_CLIENT = {
 };
 const SESSION_COOKIE = "spotube_session";
 const MAX_QUEUE = 40;
+// Keep account creation inside the CPU budget of a free Worker while retaining a
+// real salted work factor. New hashes carry their version so existing hashes from
+// the earlier 100,000-iteration build can still be checked during migration.
+const PASSWORD_ITERATIONS = 20_000;
+const LEGACY_PASSWORD_ITERATIONS = 100_000;
 const MAX_LIKES = 300;
 const MAX_SKIPS = 300;
 const MAX_ROOMS = 20;
@@ -209,7 +214,7 @@ async function digest(value: string): Promise<string> {
   return bytesToHex(new Uint8Array(bytes));
 }
 
-async function passwordHash(password: string, salt: string): Promise<string> {
+async function passwordHash(password: string, salt: string, iterations = PASSWORD_ITERATIONS): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(password),
@@ -218,11 +223,20 @@ async function passwordHash(password: string, salt: string): Promise<string> {
     ["deriveBits"],
   );
   const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", salt: hexToBytes(salt).buffer as ArrayBuffer, iterations: 100000, hash: "SHA-256" },
+    { name: "PBKDF2", salt: hexToBytes(salt).buffer as ArrayBuffer, iterations, hash: "SHA-256" },
     key,
     256,
   );
   return bytesToHex(new Uint8Array(bits));
+}
+
+function storedPasswordHash(value: string): { digest: string; iterations: number } {
+  const versioned = /^pbkdf2-sha256\$(\d+)\$([0-9a-f]+)$/i.exec(value);
+  if (!versioned) return { digest: value, iterations: LEGACY_PASSWORD_ITERATIONS };
+  const iterations = Number(versioned[1]);
+  return Number.isSafeInteger(iterations) && iterations >= 1_000 && iterations <= LEGACY_PASSWORD_ITERATIONS
+    ? { digest: versioned[2], iterations }
+    : { digest: value, iterations: LEGACY_PASSWORD_ITERATIONS };
 }
 
 function safeEqual(left: string, right: string): boolean {
@@ -293,10 +307,11 @@ async function signup(request: Request, env: Env): Promise<Response> {
   const id = crypto.randomUUID();
   const salt = randomHex(16);
   try {
+    const hash = await passwordHash(password, salt);
     await database(env).batch([
       database(env)
         .prepare("INSERT INTO users(id, username, display_name, password_hash, password_salt, created_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6)")
-        .bind(id, username, displayName || username, await passwordHash(password, salt), salt, Date.now()),
+        .bind(id, username, displayName || username, `pbkdf2-sha256$${PASSWORD_ITERATIONS}$${hash}`, salt, Date.now()),
       database(env)
         .prepare("INSERT INTO profiles(user_id, state_json, backup_json, updated_at) VALUES(?1, ?2, ?3, ?4)")
         .bind(id, JSON.stringify(defaultProfile()), "", Date.now()),
@@ -324,8 +339,9 @@ async function login(request: Request, env: Env): Promise<Response> {
     .bind(username)
     .first<User & { passwordHash: string; passwordSalt: string }>();
   if (!row) return errorResponse("username or password is incorrect", 401);
-  const suppliedHash = await passwordHash(password, row.passwordSalt);
-  if (!safeEqual(suppliedHash, row.passwordHash)) return errorResponse("username or password is incorrect", 401);
+  const stored = storedPasswordHash(row.passwordHash);
+  const suppliedHash = await passwordHash(password, row.passwordSalt, stored.iterations);
+  if (!safeEqual(suppliedHash, stored.digest)) return errorResponse("username or password is incorrect", 401);
   return createSession(request, env, { id: row.id, username: row.username, displayName: row.displayName });
 }
 
