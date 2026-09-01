@@ -469,6 +469,38 @@ library - the tick arrives, the signature matches, `redraw()` returns false). Se
 "Lists that do not strobe" above; `RebuildGuardTests` runs those helpers under `node`
 against a fake element, so the rule is tested rather than hoped for.
 
+## Hosted edge version (Cloudflare Worker)
+
+The Python application above is a stateful local player: it uses `yt-dlp`,
+background threads, local files and optionally `mpv`. It cannot be uploaded to an
+edge Worker unchanged, and a Worker cannot provide a Linux audio device.
+
+For a managed, no-VPS deployment there is an edge-compatible port under
+[`worker/`](worker/) with browser playback through YouTube's official IFrame
+Player API. It stores user profiles in Cloudflare D1, synchronizes private
+invite-code listen parties with a Durable Object, uses the YouTube Music metadata
+endpoint for searches, and never downloads or proxies extracted audio. The edge
+port includes Gemini/OpenAI-compatible planning, browser/Gemini/TTS voice paths,
+per-user taste, and blended party mixes.
+
+Start with [`docs/cloudflare-workers.md`](docs/cloudflare-workers.md):
+
+```bash
+cd worker
+npm install
+npx wrangler login
+npx wrangler d1 create spotube-dj   # put the printed id in wrangler.jsonc
+npm run db:migrate:remote
+npx wrangler secret put GEMINI_API_KEY       # optional
+npm run deploy
+```
+
+The Worker port is deliberately a separate runtime, not a replacement for the
+full Python/mpv desktop process: it uses browser YouTube playback, D1 profiles,
+Durable Object listen rooms, and edge-compatible AI/TTS calls. If you need the
+Python feature set and server-side stream resolution, choose a managed container
+such as Cloud Run rather than an edge Worker.
+
 ## Use
 
 ```bash

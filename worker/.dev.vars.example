@@ -1,0 +1,20 @@
+# Copy this file to .dev.vars for `npm run dev`.
+# Keep it out of git. Deployed equivalents are Wrangler secrets.
+# Accounts are created in the browser; no shared app password is used.
+
+# Optional Gemini planner and TTS.
+# GEMINI_API_KEY=replace-me
+# GEMINI_MODEL=gemini-3.5-flash-lite
+# GEMINI_TTS_MODEL=gemini-3.1-flash-live-preview
+# GEMINI_TTS_VOICE=Despina
+
+# Optional OpenAI-compatible planner (key may be blank for local-compatible APIs).
+# LLM_BASE_URL=https://api.example.com
+# LLM_API_KEY=replace-me
+# LLM_MODEL=some-chat-model
+
+# Optional OpenAI-compatible TTS.
+# TTS_BASE_URL=https://api.example.com
+# TTS_API_KEY=replace-me
+# TTS_MODEL=gpt-4o-mini-tts
+# TTS_VOICE=coral
