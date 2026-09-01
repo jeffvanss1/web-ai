@@ -30,8 +30,8 @@
     }
   ],
   "vars": {
-    "GEMINI_MODEL": "gemini-2.5-flash",
+    "GEMINI_MODEL": "gemini-3.7-flash",
     "GEMINI_TTS_MODEL": "gemini-2.5-flash-preview-tts",
-    "TTS_MODEL": "tts-1"
+    "TTS_MODEL": "gpt-4o-mini-tts"
   }
 }

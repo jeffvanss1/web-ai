@@ -67,11 +67,12 @@ type ProfileState = {
   ttsProvider: TtsProvider;
   ttsVoice: string;
   djLang: string;
+  djLead: string;
   updatedAt: number;
 };
 
 type User = { id: string; username: string; displayName: string };
-type Plan = { queries: string[]; vibe: string; why: string; engine: string };
+type Plan = { queries: string[]; vibe: string; why: string; engine: string; djLead: string; error?: string };
 type SearchResult = Track & { reason?: string };
 
 type RoomMember = { id: string; name: string; joinedAt: number };
@@ -96,6 +97,7 @@ type RoomState = {
   why: string;
   engine: string;
   message: string;
+  djLead: string;
   updatedAt: number;
 };
 
@@ -124,6 +126,22 @@ const GEMINI_VOICES = [
   "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 ];
 const LANGUAGES = ["English", "Arabic", "Indonesian"];
+const GEMINI_PLAN_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"];
+const DJ_LEADS = [
+  "Let's turn the lights down and let this set find its own little orbit.",
+  "The next groove is sneaking in with velvet shoes and a pocket full of sparks.",
+  "Time to open a fresh window in the night and see what kind of rhythm walks through.",
+  "This one has a little moonlight on it, so give the details room to breathe.",
+  "The room is warming up nicely; here comes a left turn with a very good reason.",
+  "I found a softer edge for the set, with just enough mischief to keep it moving.",
+];
+const DJ_LEADS_ID = [
+  "Kita kecilkan lampu dan biarkan set ini mencari orbitnya sendiri.",
+  "Groove berikutnya datang pelan, membawa sedikit kilau dan banyak rasa.",
+  "Mari buka jendela baru di malam ini dan lihat ritme apa yang masuk.",
+  "Yang ini punya sedikit cahaya bulan, jadi biarkan detailnya bernapas.",
+  "Suasananya sudah mulai hangat; sekarang kita ambil belokan kecil yang seru.",
+];
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -394,9 +412,10 @@ function defaultProfile(): ProfileState {
     why: "",
     engine: "offline parser",
     voiceEnabled: true,
-    ttsProvider: "browser",
-    ttsVoice: "Despina",
+    ttsProvider: "gemini",
+    ttsVoice: "Kore",
     djLang: "English",
+    djLead: "",
     updatedAt: Date.now(),
   };
 }
@@ -470,6 +489,7 @@ function normalizeProfile(value: unknown): ProfileState {
     ttsProvider: provider,
     ttsVoice: clean(raw.ttsVoice, 80) || base.ttsVoice,
     djLang: lang,
+    djLead: clean(raw.djLead, 280),
     updatedAt: Number(raw.updatedAt) || Date.now(),
   };
 }
@@ -482,7 +502,16 @@ async function loadProfile(env: Env, userId: string): Promise<ProfileState> {
     return profile;
   }
   try {
-    return normalizeProfile(JSON.parse(row.state_json));
+    const profile = normalizeProfile(JSON.parse(row.state_json));
+    // Migrate the old Worker default (browser speech + the Gemini voice name
+    // Despina) to an AI voice when a provider is now configured. Users who chose
+    // another voice/provider are left alone.
+    if (profile.ttsProvider === "browser" && profile.ttsVoice === "Despina" && (env.GEMINI_API_KEY || env.TTS_BASE_URL)) {
+      profile.ttsProvider = env.GEMINI_API_KEY ? "gemini" : "openai";
+      profile.ttsVoice = env.GEMINI_API_KEY ? (env.GEMINI_TTS_VOICE || "Kore") : (env.TTS_VOICE || "coral");
+      await saveProfile(env, userId, profile);
+    }
+    return profile;
   } catch {
     return defaultProfile();
   }
@@ -637,6 +666,25 @@ async function ytmSearch(query: string, limit = 18): Promise<SearchResult[]> {
   return output;
 }
 
+function randomChoice(values: string[]): string {
+  if (!values.length) return "";
+  const bytes = new Uint32Array(1);
+  crypto.getRandomValues(bytes);
+  return values[bytes[0] % values.length];
+}
+
+function creativeDjLead(request = "", vibe = "", language = "English"): string {
+  if (language.toLocaleLowerCase() === "indonesian") return randomChoice(DJ_LEADS_ID);
+  const context = clean(vibe || request, 90);
+  if (!context) return randomChoice(DJ_LEADS);
+  return `${randomChoice(DJ_LEADS)} ${vibe ? `We are leaning into ${context}.` : `You asked for ${context}, so I took the scenic route.`}`;
+}
+
+function providerFailure(provider: string, status: number, body: string): Error {
+  const detail = clean(body.replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]"), 180);
+  return new Error(`${provider} planner returned HTTP ${status}${detail ? ` — ${detail}` : ""}`);
+}
+
 function fallbackPlan(request: string, profile: ProfileState): Plan {
   const artists = Object.entries(profile.artists).filter(([, weight]) => weight > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([artist]) => `${artist} music`);
   const query = clean(request);
@@ -648,6 +696,7 @@ function fallbackPlan(request: string, profile: ProfileState): Plan {
     vibe: `${mood} ${new Date().toLocaleDateString("en", { weekday: "long" }).toLocaleLowerCase()}`,
     why: query ? `you asked for ${query}` : "it leans into the room's loved music",
     engine: "offline parser",
+    djLead: creativeDjLead(query, `${mood} ${new Date().toLocaleDateString("en", { weekday: "long" }).toLocaleLowerCase()}`),
   };
 }
 
@@ -670,30 +719,52 @@ function planFromPayload(value: unknown, fallback: Plan, engine: string): Plan {
   if (!value || typeof value !== "object") return fallback;
   const object = value as Record<string, unknown>;
   const queries = (Array.isArray(object.queries) ? object.queries : []).filter((item): item is string => typeof item === "string").map((item) => clean(item, 180)).filter(Boolean).slice(0, 3);
-  return queries.length ? { queries, vibe: clean(object.vibe, 120) || fallback.vibe, why: clean(object.why, 300) || fallback.why, engine } : fallback;
+  const djLead = clean(object.djLead || object.dj_line || object.djLine, 280);
+  return queries.length ? { queries, vibe: clean(object.vibe, 120) || fallback.vibe, why: clean(object.why, 300) || fallback.why, engine, djLead: djLead || fallback.djLead } : fallback;
 }
 
 async function geminiPlan(request: string, profile: ProfileState, env: Env, fallback: Plan): Promise<Plan> {
   if (!env.GEMINI_API_KEY) return fallback;
-  const model = encodeURIComponent(env.GEMINI_MODEL || "gemini-2.5-flash");
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify({ contents: [{ parts: [{ text: [
-      "You are the planning brain for a music DJ.",
-      "Return only JSON: {queries: string[], vibe: string, why: string}.",
-      "Use at most three concise YouTube Music searches. Never ask for live recordings, covers, remixes, podcasts, tutorials, or long mixes.",
-      `Listener request: ${request || "make a mix from these preferences"}`,
-      `Loved artists: ${Object.keys(profile.artists).slice(0, 8).join(", ") || "none yet"}`,
-    ].join("\n") }] }], generationConfig: { temperature: 0.35 } }),
-  });
-  if (!response.ok) return fallback;
-  const payload = (await response.json()) as Record<string, unknown>;
-  const candidates = payload.candidates as Array<Record<string, unknown>> | undefined;
-  const content = candidates?.[0]?.content as Record<string, unknown> | undefined;
-  const parts = content?.parts as Array<Record<string, unknown>> | undefined;
-  const text = parts?.map((part) => String(part.text || "")).join("") || "";
-  return planFromPayload(extractJson(text), fallback, "Gemini");
+  const configured = clean(env.GEMINI_MODEL, 80);
+  const models = [...new Set([configured, ...GEMINI_PLAN_MODELS].filter(Boolean))];
+  let lastError: Error | null = null;
+  for (const modelName of models) {
+    const model = encodeURIComponent(modelName);
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ parts: [{ text: [
+        "You are the creative planning brain and warm radio DJ for a music app.",
+        "Return only one JSON object with exactly these useful fields: queries (string array), vibe (short string), why (short string), djLead (short original radio-DJ intro).",
+        "Use at most three concise YouTube Music searches. Never ask for live recordings, covers, remixes, podcasts, tutorials, or long mixes.",
+        "Make djLead vivid and lightly surprising, 12 to 28 words, with natural spoken rhythm. Do not use emojis, markdown, stage directions, fake facts, or specific song/artist names because the tracks are selected afterward.",
+        `Listener request: ${request || "make a mix from these preferences"}`,
+        `Loved artists: ${Object.keys(profile.artists).slice(0, 8).join(", ") || "none yet"}`,
+      ].join("\\n") }] }], generationConfig: { temperature: 0.85, responseMimeType: "application/json" } }),
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      lastError = providerFailure("Gemini", response.status, raw);
+      const modelExpired = response.status === 404 || /model[^.]{0,80}(?:not found|not available|does not exist)|not_found|invalid model/i.test(raw);
+      if (modelExpired) continue;
+      throw lastError;
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      throw new Error(`Gemini planner returned invalid JSON from ${modelName}`);
+    }
+    const candidates = payload.candidates as Array<Record<string, unknown>> | undefined;
+    const content = candidates?.[0]?.content as Record<string, unknown> | undefined;
+    const parts = content?.parts as Array<Record<string, unknown>> | undefined;
+    const text = parts?.map((part) => String(part.text || "")).join("") || "";
+    const parsed = extractJson(text);
+    const plan = planFromPayload(parsed, fallback, `Gemini · ${modelName}`);
+    if (plan === fallback) throw new Error(`Gemini planner returned no usable plan from ${modelName}`);
+    return plan;
+  }
+  throw lastError || new Error("Gemini planner has no available model");
 }
 
 function openAiEndpoint(base: string, path: string): string {
@@ -712,15 +783,28 @@ async function compatiblePlan(request: string, profile: ProfileState, env: Env, 
     headers,
     body: JSON.stringify({
       model: env.LLM_MODEL || "llama3.2",
-      temperature: 0.35,
-      messages: [{ role: "system", content: "Return only JSON with queries, vibe, and why for a music DJ. No live, cover, remix, podcast, tutorial, or long-form results." }, { role: "user", content: `Request: ${request || "a mix from my likes"}. Loved artists: ${Object.keys(profile.artists).slice(0, 8).join(", ")}` }],
+      temperature: 0.85,
+      messages: [{ role: "system", content: [
+        "You are the creative planning brain and warm radio DJ for a music app.",
+        "Return only JSON with queries, vibe, why, and djLead.",
+        "Use at most three concise YouTube Music searches. Never request live, cover, remix, podcast, tutorial, or long-form results.",
+        "djLead must be a vivid original 12 to 28 word radio-DJ intro, with no emojis, markdown, stage directions, fake facts, or song/artist names.",
+      ].join(" ") }, { role: "user", content: `Request: ${request || "a mix from my likes"}. Loved artists: ${Object.keys(profile.artists).slice(0, 8).join(", ") || "none yet"}` }],
     }),
   });
-  if (!response.ok) return fallback;
-  const payload = (await response.json()) as Record<string, unknown>;
+  const raw = await response.text();
+  if (!response.ok) throw providerFailure("OpenAI-compatible", response.status, raw);
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    throw new Error("OpenAI-compatible planner returned invalid JSON");
+  }
   const choices = payload.choices as Array<Record<string, unknown>> | undefined;
   const message = choices?.[0]?.message as Record<string, unknown> | undefined;
-  return planFromPayload(extractJson(String(message?.content || "")), fallback, "OpenAI-compatible");
+  const plan = planFromPayload(extractJson(String(message?.content || "")), fallback, "OpenAI-compatible");
+  if (plan === fallback) throw new Error("OpenAI-compatible planner returned no usable plan");
+  return plan;
 }
 
 async function makePlan(request: string, profile: ProfileState, env: Env): Promise<Plan> {
@@ -729,7 +813,10 @@ async function makePlan(request: string, profile: ProfileState, env: Env): Promi
     if (env.GEMINI_API_KEY) return await geminiPlan(request, profile, env, fallback);
     if (env.LLM_BASE_URL) return await compatiblePlan(request, profile, env, fallback);
   } catch (error) {
-    console.error("planner failed", error);
+    const provider = env.GEMINI_API_KEY ? "Gemini" : "OpenAI-compatible";
+    const detail = error instanceof Error ? error.message : "unknown planner error";
+    console.error("planner failed", detail);
+    return { ...fallback, engine: `${provider} unavailable → offline parser`, error: detail };
   }
   return fallback;
 }
@@ -820,8 +907,10 @@ async function advanceProfile(profile: ProfileState, env: Env, markSkip: boolean
   }
   if (current && profile.repeat === "all") profile.queue.push(current);
   let next = profile.queue.shift() || null;
+  let generatedPlan: Plan | null = null;
   if (!next && profile.autoplay && profile.request) {
     const built = await buildMix(profile.request, profile, env, 16);
+    generatedPlan = built.plan;
     next = built.tracks.shift() || null;
     profile.queue.push(...built.tracks);
     profile.vibe = built.plan.vibe;
@@ -832,20 +921,26 @@ async function advanceProfile(profile: ProfileState, env: Env, markSkip: boolean
   profile.position = 0;
   profile.duration = next?.duration || 0;
   profile.paused = !next;
-  profile.message = next ? `Up next: ${next.title}` : "The queue is empty. Make another mix to continue.";
+  profile.djLead = generatedPlan?.djLead || creativeDjLead(profile.request, profile.vibe, profile.djLang);
+  profile.message = generatedPlan?.error
+    ? `AI brain unavailable; used the offline parser. ${generatedPlan.error}`
+    : next ? `Up next: ${next.title}` : "The queue is empty. Make another mix to continue.";
 }
 
 function djLine(state: ProfileState | RoomState, language = "English"): string {
   const now = state.now;
   if (!now) return "";
   const next = state.queue[0];
-  const why = state.why || (state.request ? `you asked for ${state.request}` : "it fits the blended taste");
-  const vibe = state.vibe ? ` It is part of the ${state.vibe} set.` : "";
-  const upcoming = next ? ` Up next is ${next.artist || next.channel}, ${next.title}.` : "";
+  const lead = clean(state.djLead, 280) || creativeDjLead(state.request, state.vibe, language);
+  const artist = clean(now.artist || now.channel || "the next sound", 120);
+  const title = clean(now.title, 180);
+  const why = clean(state.why || (state.request ? `you asked for ${state.request}` : "it fits the blended taste"), 300).replace(/[.!?]+$/, "");
+  const vibe = state.vibe ? ` This is part of the ${clean(state.vibe, 120)} set.` : "";
+  const upcoming = next ? ` Up next: ${clean(next.artist || next.channel || "another good one", 120)}, ${clean(next.title, 180)}.` : "";
   if (language.toLocaleLowerCase() === "indonesian") {
-    return `Baiklah, ini ${now.artist || now.channel}, ${now.title}. ${why}.${vibe.replace("It is", "Ini")}${upcoming.replace("Up next is", "Selanjutnya")}`.replace(/\.\./g, ".");
+    return `${lead} Sekarang kita masuk ke ${artist}, ${title}. ${why}.${state.vibe ? ` Ini bagian dari set ${clean(state.vibe, 120)}.` : ""}${next ? ` Selanjutnya: ${clean(next.artist || next.channel || "lagu berikutnya", 120)}, ${clean(next.title, 180)}.` : ""}`.replace(/\.\./g, ".");
   }
-  return `Coming up, ${now.artist || now.channel}, ${now.title}. ${why}.${vibe}${upcoming}`.replace(/\.\./g, ".");
+  return `${lead} Now playing ${artist}, ${title}. ${why}.${vibe}${upcoming}`.replace(/\.\./g, ".");
 }
 
 async function runPersonalAction(user: User, fields: Record<string, string>, env: Env): Promise<{ state: Record<string, unknown>; message: string }> {
@@ -870,8 +965,11 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
     profile.vibe = built.plan.vibe;
     profile.why = built.plan.why;
     profile.engine = built.plan.engine;
-    profile.message = `Ready with ${profile.queue.length + (profile.now ? 1 : 0)} tracks. Press play.`;
-    message = "mix ready";
+    profile.djLead = built.plan.djLead || creativeDjLead(request, profile.vibe, profile.djLang);
+    profile.message = built.plan.error
+      ? `AI brain unavailable; used the offline parser. ${built.plan.error}`
+      : `Ready with ${profile.queue.length + (profile.now ? 1 : 0)} tracks. Press play.`;
+    message = built.plan.error ? "mix ready with offline brain" : "mix ready";
   } else if (action === "play" || action === "resume" || action === "playpause") {
     if (!profile.now) await advanceProfile(profile, env, false);
     profile.paused = action === "playpause" ? !profile.paused : false;
@@ -894,6 +992,7 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
         profile.position = 0;
         profile.duration = previous.duration;
         profile.paused = false;
+        profile.djLead = creativeDjLead(profile.request, profile.vibe, profile.djLang);
         profile.message = `playing ${previous.title}`;
         message = profile.message;
       }
@@ -916,6 +1015,7 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
     profile.position = 0;
     profile.duration = selected.duration;
     profile.paused = false;
+    profile.djLead = creativeDjLead(profile.request, profile.vibe, profile.djLang);
     profile.message = `playing ${selected.title}`;
     message = profile.message;
   } else if (action === "enqueue" || action === "queue_next") {
@@ -1017,6 +1117,7 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     why: "",
     engine: "offline parser",
     message: "Create a mix for the room.",
+    djLead: "",
     updatedAt: Date.now(),
   };
   if (!value || typeof value !== "object") return base;
@@ -1049,6 +1150,7 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     why: clean(raw.why, 300),
     engine: clean(raw.engine, 80) || base.engine,
     message: clean(raw.message, 300) || base.message,
+    djLead: clean(raw.djLead, 280),
     updatedAt: Number(raw.updatedAt) || Date.now(),
   };
 }
@@ -1143,6 +1245,8 @@ async function roomAction(request: Request, env: Env, user: User, roomId: string
     outgoing.vibe = built.plan.vibe;
     outgoing.why = built.plan.why;
     outgoing.engine = built.plan.engine;
+    outgoing.djLead = built.plan.djLead || creativeDjLead(requestText, built.plan.vibe);
+    outgoing.brainError = built.plan.error || "";
   }
   if (action === "like" || action === "unlike" || action === "skip" || action === "dislike") {
     const stateResponse = await roomFetch(env, roomId, "/state", user);
@@ -1188,7 +1292,7 @@ async function roomStream(request: Request, env: Env, user: User, roomId: string
 }
 
 function settingsView(profile: ProfileState, env: Env): Record<string, unknown> {
-  const engine = env.GEMINI_API_KEY ? "Gemini" : env.LLM_BASE_URL && env.LLM_API_KEY ? "OpenAI-compatible" : "offline parser";
+  const engine = env.GEMINI_API_KEY ? "Gemini" : env.LLM_BASE_URL ? "OpenAI-compatible" : "offline parser";
   return {
     voiceEnabled: profile.voiceEnabled,
     autoplay: profile.autoplay,
@@ -1199,12 +1303,22 @@ function settingsView(profile: ProfileState, env: Env): Record<string, unknown> 
     geminiVoices: GEMINI_VOICES,
     ttsProviders: ["gemini", "openai", "browser", "off"],
     planner: engine,
+    plannerModel: env.GEMINI_API_KEY ? env.GEMINI_MODEL || GEMINI_PLAN_MODELS[0] : env.LLM_MODEL || "llama3.2",
     geminiConfigured: Boolean(env.GEMINI_API_KEY),
     compatibleConfigured: Boolean(env.LLM_BASE_URL),
     compatibleTtsConfigured: Boolean(env.TTS_BASE_URL || env.LLM_BASE_URL),
     ttsConfigured: Boolean(env.GEMINI_API_KEY || env.TTS_BASE_URL || env.LLM_BASE_URL),
-    ttsModel: env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts",
+    ttsModel: env.GEMINI_TTS_MODEL || env.TTS_MODEL || "gemini-2.5-flash-preview-tts",
   };
+}
+
+async function testBrain(env: Env, user: User): Promise<Response> {
+  if (!env.GEMINI_API_KEY && !env.LLM_BASE_URL) {
+    return json({ ok: false, configured: false, engine: "offline parser", error: "No AI planner is configured. Add GEMINI_API_KEY or LLM_BASE_URL in Wrangler secrets." });
+  }
+  const profile = await loadProfile(env, user.id);
+  const plan = await makePlan("a creative warm-up set with a little surprise", profile, env);
+  return json({ ok: !plan.error, configured: true, engine: plan.engine, error: plan.error || "", plan: { queries: plan.queries, vibe: plan.vibe, why: plan.why, djLead: plan.djLead } });
 }
 
 async function saveSettings(request: Request, env: Env, user: User): Promise<Response> {
@@ -1242,8 +1356,8 @@ async function geminiSpeech(text: string, profile: ProfileState, env: Env): Prom
     method: "POST",
     headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
     body: JSON.stringify({
-      contents: [{ parts: [{ text }] }],
-      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Despina" } } } },
+      contents: [{ parts: [{ text: `Speak with a warm, playful, expressive late-night radio DJ delivery, using varied pitch, natural pauses, and a smile in the voice. Say only this: ${text}` }] }],
+      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Kore" } } } },
     }),
   });
   if (!response.ok) return errorResponse(`Gemini TTS returned HTTP ${response.status}`, 502);
@@ -1274,7 +1388,13 @@ async function compatibleSpeech(text: string, profile: ProfileState, env: Env): 
   const response = await fetch(openAiEndpoint(base, "/audio/speech"), {
     method: "POST",
     headers,
-    body: JSON.stringify({ model: env.TTS_MODEL || "tts-1", voice: profile.ttsVoice || env.TTS_VOICE || "alloy", input: text, response_format: "mp3" }),
+    body: JSON.stringify({
+      model: env.TTS_MODEL || "gpt-4o-mini-tts",
+      voice: profile.ttsVoice || env.TTS_VOICE || "coral",
+      input: text,
+      response_format: "mp3",
+      instructions: "Perform as a warm, playful, expressive late-night radio DJ. Use lively intonation, varied pacing, natural pauses, and a little delighted surprise. Do not sound like a flat newsreader.",
+    }),
   });
   if (!response.ok) return errorResponse(`TTS provider returned HTTP ${response.status}`, 502);
   return new Response(response.body, { status: 200, headers: { "content-type": response.headers.get("content-type") || "audio/mpeg", "cache-control": "no-store" } });
@@ -1286,8 +1406,9 @@ async function tts(request: Request, env: Env, user: User): Promise<Response> {
   const text = clean(fields.text, 1500);
   if (!text) return errorResponse("text is required");
   const provider = (["gemini", "openai", "browser", "off"].includes(fields.provider) ? fields.provider : profile.ttsProvider) as TtsProvider;
+  const selectedProfile = { ...profile, ttsVoice: clean(fields.voice, 80) || profile.ttsVoice };
   if (provider === "browser" || provider === "off") return json({ ok: true, provider, browser: provider === "browser" });
-  return provider === "gemini" ? geminiSpeech(text, profile, env) : compatibleSpeech(text, profile, env);
+  return provider === "gemini" ? geminiSpeech(text, selectedProfile, env) : compatibleSpeech(text, selectedProfile, env);
 }
 
 async function bodyFields(request: Request): Promise<Record<string, string>> {
@@ -1380,7 +1501,10 @@ export class ListenRoom {
       room.vibe = clean(fields.vibe, 120);
       room.why = clean(fields.why, 300);
       room.engine = clean(fields.engine, 80) || "offline parser";
-      room.message = `Ready with ${room.queue.length + (room.now ? 1 : 0)} tracks. Press play.`;
+      room.djLead = clean(fields.djLead, 280) || creativeDjLead(room.request, room.vibe);
+      room.message = fields.brainError
+        ? `AI brain unavailable; used the offline parser. ${clean(fields.brainError, 180)}`
+        : `Ready with ${room.queue.length + (room.now ? 1 : 0)} tracks. Press play.`;
     } else if (action === "play" || action === "resume" || action === "playpause") {
       room.playing = action === "playpause" ? !room.playing : true;
     } else if (action === "pause") {
@@ -1396,6 +1520,7 @@ export class ListenRoom {
           room.position = 0;
           room.duration = previous.duration;
           room.playing = true;
+          room.djLead = creativeDjLead(room.request, room.vibe);
           room.message = `playing ${previous.title}`;
         }
       }
@@ -1414,6 +1539,7 @@ export class ListenRoom {
         room.position = 0;
         room.duration = next?.duration || 0;
         room.playing = Boolean(next);
+        room.djLead = creativeDjLead(room.request, room.vibe);
         room.message = next ? `playing ${next.title}` : "The room queue is empty. Make another blended mix.";
       }
     } else if (action === "play_row") {
@@ -1429,6 +1555,7 @@ export class ListenRoom {
       room.position = 0;
       room.duration = selected.duration;
       room.playing = true;
+      room.djLead = creativeDjLead(room.request, room.vibe);
       room.message = `playing ${selected.title}`;
     } else if (action === "enqueue" || action === "queue_next") {
       let track: Track | null = null;
@@ -1575,6 +1702,7 @@ export default {
           const profile = await loadProfile(env, user.id);
           return json({ settings: settingsView(profile, env), state: publicProfile(profile, user) });
         }
+        if (path === "/api/brain-test" && request.method === "POST") return testBrain(env, user);
         if (path === "/api/settings" && request.method === "POST") return saveSettings(request, env, user);
         if (path === "/api/tts" && request.method === "POST") return tts(request, env, user);
         if (path === "/api/rooms" && request.method === "GET") return json({ rooms: await listRooms(env, user) });

@@ -65,16 +65,17 @@ none are required: the offline planner and browser speech fallback work without
 AI credentials.
 
 ```bash
-# Optional Gemini planner and TTS.
+# Optional Gemini planner and TTS. The default planner model is gemini-3.7-flash.
 npx wrangler secret put GEMINI_API_KEY
-# GEMINI_TTS_MODEL and GEMINI_TTS_VOICE can be added as Wrangler vars if desired.
+# GEMINI_MODEL, GEMINI_TTS_MODEL, and GEMINI_TTS_VOICE can be added as Wrangler vars if desired.
 
 # Optional OpenAI-compatible planner.
 npx wrangler secret put LLM_BASE_URL
 npx wrangler secret put LLM_API_KEY
 npx wrangler secret put LLM_MODEL
 
-# Optional OpenAI-compatible TTS.
+# Optional OpenAI-compatible TTS. The default model is gpt-4o-mini-tts,
+# which supports expressive delivery instructions; override for another server.
 npx wrangler secret put TTS_BASE_URL
 npx wrangler secret put TTS_API_KEY
 npx wrangler secret put TTS_MODEL
@@ -92,6 +93,12 @@ Wrangler prints the public `workers.dev` URL. Open it, create an account, make a
 mix, then use **Create** in the Listen along box. Other people create their own
 accounts and join with the code. Browser autoplay rules may require each person
 to press Play once.
+
+Open **Settings → Test AI brain** after deploying. It reports whether Gemini or
+the OpenAI-compatible planner answered, including the model error when the Worker
+falls back to its offline parser. For expressive speech, choose **Gemini TTS** or
+an OpenAI-compatible endpoint using `gpt-4o-mini-tts`; Browser voice remains an
+intentional fallback and can sound flatter.
 
 A custom domain can be attached later in Cloudflare without adding a reverse
 proxy or running a server yourself.
@@ -145,6 +152,7 @@ That is still not a VPS, but it is not a Cloudflare Worker.
 - `GET`/`POST /api/search?q=...`
 - `POST /api/action` for personal playback, taste, queue, and settings actions
 - `GET`/`POST /api/settings`
+- `POST /api/brain-test` to verify the configured planner and model
 - `POST /api/tts`
 - `GET`/`POST /api/rooms` to list/create rooms
 - `POST /api/rooms/join`

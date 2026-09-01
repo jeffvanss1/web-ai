@@ -4,9 +4,9 @@
 
 # Optional Gemini planner and TTS.
 # GEMINI_API_KEY=replace-me
-# GEMINI_MODEL=gemini-2.5-flash
+# GEMINI_MODEL=gemini-3.7-flash
 # GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
-# GEMINI_TTS_VOICE=Despina
+# GEMINI_TTS_VOICE=Kore
 
 # Optional OpenAI-compatible planner (key may be blank for local-compatible APIs).
 # LLM_BASE_URL=https://api.example.com
@@ -16,5 +16,5 @@
 # Optional OpenAI-compatible TTS.
 # TTS_BASE_URL=https://api.example.com
 # TTS_API_KEY=replace-me
-# TTS_MODEL=tts-1
-# TTS_VOICE=alloy
+# TTS_MODEL=gpt-4o-mini-tts
+# TTS_VOICE=coral
