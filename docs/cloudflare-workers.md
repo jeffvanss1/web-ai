@@ -65,8 +65,8 @@ none are required: the offline planner and browser speech fallback work without
 AI credentials.
 
 ```bash
-# Optional Gemini planner and TTS. Defaults: gemini-3.7-flash and
-# gemini-3.1-flash-tts-preview, with a 2.5 TTS fallback.
+# Optional Gemini planner and TTS. Defaults: gemini-3.5-flash-lite and
+# gemini-3.1-flash-live-preview, using the Live WebSocket API.
 npx wrangler secret put GEMINI_API_KEY
 # GEMINI_MODEL, GEMINI_TTS_MODEL, and GEMINI_TTS_VOICE can be added as Wrangler vars if desired.
 
@@ -123,12 +123,15 @@ npx wrangler deploy --dry-run
 
 ## Provider and playback notes
 
-The Worker uses Gemini's HTTP speech-generation path. It does not expose a
-Gemini API key to the browser and does not attempt to reproduce the Python
-process's native Live-API-to-mpv audio path. For OpenAI-compatible TTS, the
-configured endpoint must implement `POST /v1/audio/speech` and return an audio
-body. If either remote provider is unavailable, the browser uses its Web Speech
-API when available.
+The Worker uses the same Gemini Live WebSocket protocol as the Python DJ for
+`gemini-3.1-flash-live-preview`: it sends the DJ script in a Live session, collects
+the returned 24 kHz PCM chunks at the edge, wraps them as WAV, and gives that
+browser a playable audio response. The Gemini API key never reaches the browser
+and the Worker never runs mpv. A configured `*-tts-preview` model is still
+supported through Gemini's `generateContent` speech endpoint. For
+OpenAI-compatible TTS, the configured endpoint must implement `POST
+/v1/audio/speech` and return an audio body. If a remote provider is unavailable,
+the browser uses its Web Speech API when available.
 
 The embedded YouTube player is intentionally visible and controlled by YouTube.
 Ads, regional restrictions, unavailable videos, and YouTube's applicable terms

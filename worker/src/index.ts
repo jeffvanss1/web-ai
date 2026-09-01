@@ -126,7 +126,8 @@ const GEMINI_VOICES = [
   "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
 ];
 const LANGUAGES = ["English", "Arabic", "Indonesian"];
-const GEMINI_PLAN_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"];
+const GEMINI_PLAN_MODELS = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"];
+const GEMINI_LIVE_MODELS = ["gemini-3.1-flash-live-preview", "gemini-2.5-flash-live-preview"];
 const GEMINI_TTS_MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
 const DJ_LEADS = [
   "Let's turn the lights down and let this set find its own little orbit.",
@@ -421,8 +422,8 @@ function defaultProfile(): ProfileState {
     engine: "offline parser",
     voiceEnabled: true,
     ttsProvider: "gemini",
-    ttsVoice: "Kore",
-    djLang: "English",
+    ttsVoice: "Despina",
+    djLang: "Indonesian",
     djLead: "",
     updatedAt: Date.now(),
   };
@@ -1322,7 +1323,7 @@ function settingsView(profile: ProfileState, env: Env): Record<string, unknown> 
     compatibleConfigured: Boolean(env.LLM_BASE_URL),
     compatibleTtsConfigured: Boolean(env.TTS_BASE_URL || env.LLM_BASE_URL),
     ttsConfigured: Boolean(env.GEMINI_API_KEY || env.TTS_BASE_URL || env.LLM_BASE_URL),
-    ttsModel: env.GEMINI_TTS_MODEL || env.TTS_MODEL || "gemini-3.1-flash-tts-preview",
+    ttsModel: env.GEMINI_TTS_MODEL || env.TTS_MODEL || "gemini-3.1-flash-live-preview",
   };
 }
 
@@ -1363,8 +1364,267 @@ function pcmWave(data: Uint8Array, rate: number, channels = 1, bits = 16): Uint8
   const output = new Uint8Array(44 + data.length); output.set(new Uint8Array(header)); output.set(data, 44); return output;
 }
 
-async function geminiSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
-  if (!env.GEMINI_API_KEY) return errorResponse("Gemini TTS is not configured", 503);
+function isGeminiLiveModel(model: string): boolean {
+  return /(?:^|-)live(?:-|$)/i.test(model);
+}
+
+function geminiModelUnavailable(detail: string): boolean {
+  return /(?:model|models\/)[^.\n]{0,120}(?:not found|not available|does not exist|does not support|only supports|unsupported|invalid)|not_found|invalid model/i.test(detail);
+}
+
+async function liveSocketData(value: unknown): Promise<{ bytes: Uint8Array; text: string }> {
+  if (typeof value === "string") {
+    return { bytes: new TextEncoder().encode(value), text: value };
+  }
+  if (value instanceof Blob) {
+    const bytes = new Uint8Array(await value.arrayBuffer());
+    return { bytes, text: new TextDecoder().decode(bytes) };
+  }
+  if (value instanceof ArrayBuffer) {
+    const bytes = new Uint8Array(value);
+    return { bytes, text: new TextDecoder().decode(bytes) };
+  }
+  if (ArrayBuffer.isView(value)) {
+    const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    return { bytes, text: new TextDecoder().decode(bytes) };
+  }
+  return { bytes: new Uint8Array(), text: "" };
+}
+
+function liveEndpoint(apiKey: string): string {
+  const key = encodeURIComponent(apiKey);
+  return `https://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${key}`;
+}
+
+async function geminiLiveTurn(text: string, profile: ProfileState, env: Env, modelName: string): Promise<{ data: Uint8Array; mime: string; rate: number }> {
+  let response: Response;
+  try {
+    // Workers uses an HTTPS fetch with Upgrade for an outbound WebSocket. Do not
+    // use generateContent here: *-live-* models only accept BidiGenerateContent.
+    response = await fetch(liveEndpoint(env.GEMINI_API_KEY || ""), { headers: { Upgrade: "websocket" } });
+  } catch (error) {
+    const detail = clean(error instanceof Error ? error.message : error, 180);
+    throw Object.assign(new Error(`Gemini Live model ${modelName} WebSocket connection failed${detail ? ` — ${detail}` : ""}`), { modelUnavailable: false });
+  }
+  if (!response.webSocket) {
+    const raw = await response.text();
+    const detail = remoteDetail(raw);
+    throw Object.assign(new Error(`Gemini Live model ${modelName} WebSocket handshake returned HTTP ${response.status}${detail ? ` — ${detail}` : ""}`), { modelUnavailable: geminiModelUnavailable(raw) });
+  }
+  const socket = response.webSocket;
+  socket.binaryType = "arraybuffer";
+  try {
+    socket.accept();
+  } catch (error) {
+    const detail = clean(error instanceof Error ? error.message : error, 180);
+    throw Object.assign(new Error(`Gemini Live model ${modelName} WebSocket could not be accepted${detail ? ` — ${detail}` : ""}`), { modelUnavailable: false });
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let rate = 24000;
+    let mime = "audio/pcm;rate=24000";
+    let settled = false;
+    let setupSent = false;
+    let fallbackSent = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const close = () => {
+      try {
+        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close();
+      } catch {
+        // The upstream may already have closed while the response is completing.
+      }
+    };
+    const clearTimer = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+    };
+    const removeListeners = () => {
+      socket.removeEventListener("message", onMessage);
+      socket.removeEventListener("error", onError);
+      socket.removeEventListener("close", onClose);
+    };
+    const output = () => {
+      const data = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of chunks) {
+        data.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return { data, mime, rate };
+    };
+    const done = () => {
+      if (settled) return;
+      if (!size) {
+        fail(`Gemini Live model ${modelName} returned no audio`, false);
+        return;
+      }
+      settled = true;
+      clearTimer();
+      removeListeners();
+      close();
+      resolve(output());
+    };
+    const fail = (message: string, modelUnavailable = false) => {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      removeListeners();
+      close();
+      reject(Object.assign(new Error(message), { modelUnavailable }));
+    };
+    const addAudio = (data: Uint8Array, audioMime = "") => {
+      if (!data.length) return;
+      chunks.push(data);
+      size += data.length;
+      if (audioMime) {
+        mime = audioMime;
+        const foundRate = /rate[=:](\d{4,6})/i.exec(audioMime);
+        if (foundRate) rate = Number(foundRate[1]);
+      }
+    };
+    const armTurnTimer = () => {
+      clearTimer();
+      timer = setTimeout(() => {
+        // Match the Python client: try realtimeInput text first, then use the
+        // canonical clientContent turn if a backend does not complete that path.
+        if (size) {
+          done();
+        } else if (!fallbackSent) {
+          fallbackSent = true;
+          try {
+            socket.send(JSON.stringify({ clientContent: { turns: [{ role: "user", parts: [{ text }] }], turnComplete: true } }));
+            armTurnTimer();
+          } catch (error) {
+            const detail = clean(error instanceof Error ? error.message : error, 160);
+            fail(`Gemini Live model ${modelName} could not send the text turn${detail ? ` — ${detail}` : ""}`);
+          }
+        } else {
+          fail(`Gemini Live model ${modelName} timed out waiting for audio`, false);
+        }
+      }, 12000);
+    };
+    const sendText = () => {
+      if (setupSent || settled) return;
+      setupSent = true;
+      try {
+        socket.send(JSON.stringify({
+          setup: {
+            model: `models/${modelName}`,
+            systemInstruction: { parts: [{ text: "You are a warm, smooth, energetic radio DJ announcer on air. The text you are sent is the announcement to SAY OUT LOUD word for word: name the track, the reason it is playing and what is up next. Read it exactly as written. Do not ask the listener anything, do not add a question, and do not carry on a conversation - speak the script and stop." }] },
+            generationConfig: {
+              responseModalities: ["AUDIO"],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Despina" } } },
+            },
+          },
+        }));
+        timer = setTimeout(() => fail(`Gemini Live model ${modelName} timed out waiting for setupComplete`, false), 10000);
+      } catch (error) {
+        const detail = clean(error instanceof Error ? error.message : error, 160);
+        fail(`Gemini Live model ${modelName} could not send setup${detail ? ` — ${detail}` : ""}`);
+      }
+    };
+    const onError = (event: Event) => {
+      const detail = clean((event as ErrorEvent).message, 180);
+      fail(`Gemini Live model ${modelName} WebSocket error${detail ? ` — ${detail}` : ""}`, false);
+    };
+    const onClose = (event: Event) => {
+      const closed = event as CloseEvent;
+      if (size) done();
+      else {
+        const reason = clean(closed.reason, 180);
+        const detail = `closed with code ${closed.code}${reason ? ` — ${reason}` : ""}`;
+        fail(`Gemini Live model ${modelName} ${detail}`, geminiModelUnavailable(reason));
+      }
+    };
+    const onMessage = (event: MessageEvent) => {
+      void (async () => {
+        const incoming = await liveSocketData(event.data);
+        let message: Record<string, unknown>;
+        try {
+          message = JSON.parse(incoming.text) as Record<string, unknown>;
+        } catch {
+          // The official protocol carries JSON in binary WebSocket frames. Keep
+          // accepting a raw binary PCM frame as the original Python client does.
+          if (incoming.bytes.length && typeof event.data !== "string") addAudio(incoming.bytes);
+          return;
+        }
+        const remoteError = message.error;
+        if (remoteError) {
+          const detail = remoteDetail(JSON.stringify(remoteError), 260);
+          fail(`Gemini Live model ${modelName} returned an error${detail ? ` — ${detail}` : ""}`, geminiModelUnavailable(detail));
+          return;
+        }
+        if (message.setupComplete) {
+          clearTimer();
+          try {
+            // The original implementation sends realtimeInput text and retains
+            // clientContent as a compatibility backstop for Live API versions.
+            socket.send(JSON.stringify({ realtimeInput: { text } }));
+            armTurnTimer();
+          } catch (error) {
+            const detail = clean(error instanceof Error ? error.message : error, 160);
+            fail(`Gemini Live model ${modelName} could not send the text turn${detail ? ` — ${detail}` : ""}`);
+          }
+          return;
+        }
+        const serverContent = (message.serverContent || {}) as Record<string, unknown>;
+        const modelTurn = (serverContent.modelTurn || {}) as Record<string, unknown>;
+        const parts = Array.isArray(modelTurn.parts) ? modelTurn.parts : [];
+        for (const part of parts) {
+          if (!part || typeof part !== "object") continue;
+          const inline = (part as Record<string, unknown>).inlineData;
+          if (!inline || typeof inline !== "object") continue;
+          const audio = inline as Record<string, unknown>;
+          if (typeof audio.data !== "string") continue;
+          try {
+            addAudio(base64Bytes(audio.data), typeof audio.mimeType === "string" ? audio.mimeType : "");
+          } catch {
+            fail(`Gemini Live model ${modelName} returned invalid base64 audio`, false);
+            return;
+          }
+        }
+        if (serverContent.interrupted) {
+          if (size) done();
+          else fail(`Gemini Live model ${modelName} interrupted the audio turn`, false);
+          return;
+        }
+        if (serverContent.turnComplete) done();
+      })().catch((error) => {
+        const detail = clean(error instanceof Error ? error.message : error, 180);
+        fail(`Gemini Live model ${modelName} message handling failed${detail ? ` — ${detail}` : ""}`, false);
+      });
+    };
+
+    socket.addEventListener("message", onMessage);
+    socket.addEventListener("error", onError);
+    socket.addEventListener("close", onClose);
+    if (socket.readyState === WebSocket.OPEN) sendText();
+    else socket.addEventListener("open", sendText, { once: true });
+  });
+}
+
+async function geminiLiveSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
+  const configured = clean(env.GEMINI_TTS_MODEL, 100) || GEMINI_LIVE_MODELS[0];
+  const models = [...new Set([configured, ...GEMINI_LIVE_MODELS].filter(isGeminiLiveModel))];
+  let lastError = "Gemini Live TTS did not return audio";
+  for (const modelName of models) {
+    try {
+      const audio = await geminiLiveTurn(text, profile, env, modelName);
+      const isPcm = audio.mime.toLocaleLowerCase().includes("pcm") || audio.mime.toLocaleLowerCase().includes("l16");
+      const body = isPcm ? pcmWave(audio.data, audio.rate) : audio.data;
+      return new Response(body.buffer as ArrayBuffer, { headers: { "content-type": isPcm ? "audio/wav" : audio.mime, "cache-control": "no-store" } });
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : clean(error, 280);
+      if (!(error as Error & { modelUnavailable?: boolean }).modelUnavailable) return errorResponse(lastError, 502);
+    }
+  }
+  return errorResponse(lastError, 502);
+}
+
+async function geminiGenerateContentSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
   const configured = clean(env.GEMINI_TTS_MODEL, 100);
   const models = [...new Set([configured, ...GEMINI_TTS_MODELS].filter(Boolean))];
   const findAudio = (value: unknown): { data: string; mime: string } | null => {
@@ -1376,23 +1636,21 @@ async function geminiSpeech(text: string, profile: ProfileState, env: Env): Prom
     return null;
   };
   let lastError = "Gemini TTS did not return audio";
-  const delivery = randomChoice(DJ_DELIVERIES);
   for (const modelName of models) {
     const model = encodeURIComponent(modelName);
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY || "" },
       body: JSON.stringify({
         model: modelName,
-        contents: [{ parts: [{ text: `Speak as a warm, playful, expressive late-night radio DJ ${delivery}. Use lively intonation, varied pacing, and natural pauses. Say only this: ${text}` }] }],
-        generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Kore" } } } },
+        contents: [{ parts: [{ text }] }],
+        generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Despina" } } } },
       }),
     });
     const raw = await response.text();
     if (!response.ok) {
       lastError = `Gemini TTS model ${modelName} returned HTTP ${response.status}${remoteDetail(raw) ? ` — ${remoteDetail(raw)}` : ""}`;
-      const modelUnavailable = response.status === 404 || /model[^.]{0,100}(?:not found|not available|does not exist|does not support|unsupported)|not_found|invalid model/i.test(raw);
-      if (modelUnavailable) continue;
+      if (response.status === 404 || geminiModelUnavailable(raw)) continue;
       return errorResponse(lastError, 502);
     }
     let payload: Record<string, unknown>;
@@ -1413,6 +1671,12 @@ async function geminiSpeech(text: string, profile: ProfileState, env: Env): Prom
     return new Response(body.buffer as ArrayBuffer, { headers: { "content-type": isPcm ? "audio/wav" : audio.mime, "cache-control": "no-store" } });
   }
   return errorResponse(lastError, 502);
+}
+
+async function geminiSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
+  if (!env.GEMINI_API_KEY) return errorResponse("Gemini TTS is not configured", 503);
+  const model = clean(env.GEMINI_TTS_MODEL, 100) || "gemini-3.1-flash-live-preview";
+  return isGeminiLiveModel(model) ? geminiLiveSpeech(text, profile, env) : geminiGenerateContentSpeech(text, profile, env);
 }
 
 async function compatibleSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
