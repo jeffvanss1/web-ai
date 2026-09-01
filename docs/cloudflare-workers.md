@@ -65,7 +65,8 @@ none are required: the offline planner and browser speech fallback work without
 AI credentials.
 
 ```bash
-# Optional Gemini planner and TTS. The default planner model is gemini-3.7-flash.
+# Optional Gemini planner and TTS. Defaults: gemini-3.7-flash and
+# gemini-3.1-flash-tts-preview, with a 2.5 TTS fallback.
 npx wrangler secret put GEMINI_API_KEY
 # GEMINI_MODEL, GEMINI_TTS_MODEL, and GEMINI_TTS_VOICE can be added as Wrangler vars if desired.
 

@@ -5,7 +5,7 @@
 # Optional Gemini planner and TTS.
 # GEMINI_API_KEY=replace-me
 # GEMINI_MODEL=gemini-3.7-flash
-# GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
+# GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
 # GEMINI_TTS_VOICE=Kore
 
 # Optional OpenAI-compatible planner (key may be blank for local-compatible APIs).

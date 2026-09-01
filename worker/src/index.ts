@@ -127,6 +127,7 @@ const GEMINI_VOICES = [
 ];
 const LANGUAGES = ["English", "Arabic", "Indonesian"];
 const GEMINI_PLAN_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-2.5-flash"];
+const GEMINI_TTS_MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
 const DJ_LEADS = [
   "Let's turn the lights down and let this set find its own little orbit.",
   "The next groove is sneaking in with velvet shoes and a pocket full of sparks.",
@@ -141,6 +142,13 @@ const DJ_LEADS_ID = [
   "Mari buka jendela baru di malam ini dan lihat ritme apa yang masuk.",
   "Yang ini punya sedikit cahaya bulan, jadi biarkan detailnya bernapas.",
   "Suasananya sudah mulai hangat; sekarang kita ambil belokan kecil yang seru.",
+];
+const DJ_DELIVERIES = [
+  "with a velvet vocal smile and a conspiratorial sparkle",
+  "like a late-night host who just found a secret groove",
+  "with buoyant energy, gentle mischief, and a natural pause before the title",
+  "as if the studio lights just softened and the room leaned closer",
+  "with relaxed confidence, bright consonants, and a little delighted surprise",
 ];
 
 function clone<T>(value: T): T {
@@ -680,8 +688,14 @@ function creativeDjLead(request = "", vibe = "", language = "English"): string {
   return `${randomChoice(DJ_LEADS)} ${vibe ? `We are leaning into ${context}.` : `You asked for ${context}, so I took the scenic route.`}`;
 }
 
+function remoteDetail(body: string, max = 180): string {
+  return clean(body
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [redacted]"), max);
+}
+
 function providerFailure(provider: string, status: number, body: string): Error {
-  const detail = clean(body.replace(/AIza[0-9A-Za-z_-]{20,}/g, "[redacted]"), 180);
+  const detail = remoteDetail(body);
   return new Error(`${provider} planner returned HTTP ${status}${detail ? ` — ${detail}` : ""}`);
 }
 
@@ -745,7 +759,7 @@ async function geminiPlan(request: string, profile: ProfileState, env: Env, fall
     const raw = await response.text();
     if (!response.ok) {
       lastError = providerFailure("Gemini", response.status, raw);
-      const modelExpired = response.status === 404 || /model[^.]{0,80}(?:not found|not available|does not exist)|not_found|invalid model/i.test(raw);
+      const modelExpired = response.status === 404 || /model[^.]{0,100}(?:not found|not available|does not exist|does not support|unsupported)|not_found|invalid model/i.test(raw);
       if (modelExpired) continue;
       throw lastError;
     }
@@ -1308,7 +1322,7 @@ function settingsView(profile: ProfileState, env: Env): Record<string, unknown> 
     compatibleConfigured: Boolean(env.LLM_BASE_URL),
     compatibleTtsConfigured: Boolean(env.TTS_BASE_URL || env.LLM_BASE_URL),
     ttsConfigured: Boolean(env.GEMINI_API_KEY || env.TTS_BASE_URL || env.LLM_BASE_URL),
-    ttsModel: env.GEMINI_TTS_MODEL || env.TTS_MODEL || "gemini-2.5-flash-preview-tts",
+    ttsModel: env.GEMINI_TTS_MODEL || env.TTS_MODEL || "gemini-3.1-flash-tts-preview",
   };
 }
 
@@ -1351,17 +1365,8 @@ function pcmWave(data: Uint8Array, rate: number, channels = 1, bits = 16): Uint8
 
 async function geminiSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
   if (!env.GEMINI_API_KEY) return errorResponse("Gemini TTS is not configured", 503);
-  const model = encodeURIComponent(env.GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts");
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: `Speak with a warm, playful, expressive late-night radio DJ delivery, using varied pitch, natural pauses, and a smile in the voice. Say only this: ${text}` }] }],
-      generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Kore" } } } },
-    }),
-  });
-  if (!response.ok) return errorResponse(`Gemini TTS returned HTTP ${response.status}`, 502);
-  const payload = (await response.json()) as Record<string, unknown>;
+  const configured = clean(env.GEMINI_TTS_MODEL, 100);
+  const models = [...new Set([configured, ...GEMINI_TTS_MODELS].filter(Boolean))];
   const findAudio = (value: unknown): { data: string; mime: string } | null => {
     if (Array.isArray(value)) { for (const item of value) { const found = findAudio(item); if (found) return found; } return null; }
     if (!value || typeof value !== "object") return null;
@@ -1370,13 +1375,44 @@ async function geminiSpeech(text: string, profile: ProfileState, env: Env): Prom
     for (const child of Object.values(object)) { const found = findAudio(child); if (found) return found; }
     return null;
   };
-  const audio = findAudio(payload);
-  if (!audio) return errorResponse("Gemini returned no audio", 502);
-  const bytes = base64Bytes(audio.data);
-  const sample = /rate=(\d+)/i.exec(audio.mime)?.[1];
-  const isPcm = audio.mime.toLocaleLowerCase().includes("pcm");
-  const body = isPcm ? pcmWave(bytes, Number(sample || 24000)) : bytes;
-  return new Response(body.buffer as ArrayBuffer, { headers: { "content-type": isPcm ? "audio/wav" : audio.mime, "cache-control": "no-store" } });
+  let lastError = "Gemini TTS did not return audio";
+  const delivery = randomChoice(DJ_DELIVERIES);
+  for (const modelName of models) {
+    const model = encodeURIComponent(modelName);
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({
+        model: modelName,
+        contents: [{ parts: [{ text: `Speak as a warm, playful, expressive late-night radio DJ ${delivery}. Use lively intonation, varied pacing, and natural pauses. Say only this: ${text}` }] }],
+        generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: profile.ttsVoice || env.GEMINI_TTS_VOICE || "Kore" } } } },
+      }),
+    });
+    const raw = await response.text();
+    if (!response.ok) {
+      lastError = `Gemini TTS model ${modelName} returned HTTP ${response.status}${remoteDetail(raw) ? ` — ${remoteDetail(raw)}` : ""}`;
+      const modelUnavailable = response.status === 404 || /model[^.]{0,100}(?:not found|not available|does not exist|does not support|unsupported)|not_found|invalid model/i.test(raw);
+      if (modelUnavailable) continue;
+      return errorResponse(lastError, 502);
+    }
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return errorResponse(`Gemini TTS model ${modelName} returned invalid JSON`, 502);
+    }
+    const audio = findAudio(payload);
+    if (!audio) {
+      const finish = remoteDetail(JSON.stringify((payload.candidates as Array<Record<string, unknown>> | undefined)?.[0]?.finishReason || ""), 80);
+      return errorResponse(`Gemini TTS returned no audio${finish ? ` (${finish})` : ""}`, 502);
+    }
+    const bytes = base64Bytes(audio.data);
+    const sample = /(\d{4,6})/i.exec(audio.mime)?.[1];
+    const isPcm = audio.mime.toLocaleLowerCase().includes("pcm") || audio.mime.toLocaleLowerCase().includes("l16");
+    const body = isPcm ? pcmWave(bytes, Number(sample || 24000)) : bytes;
+    return new Response(body.buffer as ArrayBuffer, { headers: { "content-type": isPcm ? "audio/wav" : audio.mime, "cache-control": "no-store" } });
+  }
+  return errorResponse(lastError, 502);
 }
 
 async function compatibleSpeech(text: string, profile: ProfileState, env: Env): Promise<Response> {
