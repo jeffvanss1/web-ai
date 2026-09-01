@@ -274,7 +274,13 @@ async function signup(request: Request, env: Env): Promise<Response> {
     ]);
   } catch (error) {
     const text = String(error || "");
-    return errorResponse(text.toLocaleLowerCase().includes("unique") ? "that username is already taken" : "could not create account", 409);
+    const lower = text.toLocaleLowerCase();
+    console.error("signup failed", error);
+    if (lower.includes("unique")) return errorResponse("that username is already taken", 409);
+    if (lower.includes("no such table") || lower.includes("no such column") || lower.includes("d1 binding db is missing")) {
+      return errorResponse("account storage is not initialized; apply D1 migrations 0001 and 0002, then redeploy", 503);
+    }
+    return errorResponse("could not create account; check the Worker logs", 503);
   }
   return createSession(request, env, { id, username, displayName: displayName || username });
 }
