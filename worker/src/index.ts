@@ -161,6 +161,8 @@ let accountSchemaPromise: Promise<void> | null = null;
 async function ensureAccountSchema(env: Env): Promise<void> {
   if (accountSchemaPromise) return accountSchemaPromise;
   const db = database(env);
+  const existing = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'sessions', 'profiles', 'rooms', 'room_members')").all<{ name: string }>();
+  if ((existing.results || []).length === 5) return;
   accountSchemaPromise = db.batch([
     db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, created_at INTEGER NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)"),
