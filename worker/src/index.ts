@@ -27,6 +27,9 @@ interface Env {
 
 type RepeatMode = "off" | "all" | "one";
 type TtsProvider = "gemini" | "openai" | "browser" | "off";
+type SetSegment = "warm-up" | "late-night" | "focused" | "energetic" | "wind-down";
+
+const SET_SEGMENTS: SetSegment[] = ["warm-up", "late-night", "focused", "energetic", "wind-down"];
 
 type Track = {
   id: string;
@@ -62,6 +65,7 @@ type ProfileState = {
   message: string;
   vibe: string;
   why: string;
+  segment: SetSegment;
   engine: string;
   voiceEnabled: boolean;
   ttsProvider: TtsProvider;
@@ -72,7 +76,7 @@ type ProfileState = {
 };
 
 type User = { id: string; username: string; displayName: string };
-type Plan = { queries: string[]; vibe: string; why: string; engine: string; djLead: string; error?: string };
+type Plan = { queries: string[]; vibe: string; why: string; segment: SetSegment; engine: string; djLead: string; error?: string };
 type SearchResult = Track & { reason?: string };
 
 type RoomMember = { id: string; name: string; joinedAt: number };
@@ -95,6 +99,7 @@ type RoomState = {
   shuffle: boolean;
   vibe: string;
   why: string;
+  segment: SetSegment;
   engine: string;
   message: string;
   djLead: string;
@@ -129,29 +134,6 @@ const LANGUAGES = ["English", "Arabic", "Indonesian"];
 const GEMINI_PLAN_MODELS = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-2.5-flash"];
 const GEMINI_LIVE_MODELS = ["gemini-3.1-flash-live-preview", "gemini-2.5-flash-live-preview"];
 const GEMINI_TTS_MODELS = ["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"];
-const DJ_LEADS = [
-  "Let's turn the lights down and let this set find its own little orbit.",
-  "The next groove is sneaking in with velvet shoes and a pocket full of sparks.",
-  "Time to open a fresh window in the night and see what kind of rhythm walks through.",
-  "This one has a little moonlight on it, so give the details room to breathe.",
-  "The room is warming up nicely; here comes a left turn with a very good reason.",
-  "I found a softer edge for the set, with just enough mischief to keep it moving.",
-];
-const DJ_LEADS_ID = [
-  "Kita kecilkan lampu dan biarkan set ini mencari orbitnya sendiri.",
-  "Groove berikutnya datang pelan, membawa sedikit kilau dan banyak rasa.",
-  "Mari buka jendela baru di malam ini dan lihat ritme apa yang masuk.",
-  "Yang ini punya sedikit cahaya bulan, jadi biarkan detailnya bernapas.",
-  "Suasananya sudah mulai hangat; sekarang kita ambil belokan kecil yang seru.",
-];
-const DJ_DELIVERIES = [
-  "with a velvet vocal smile and a conspiratorial sparkle",
-  "like a late-night host who just found a secret groove",
-  "with buoyant energy, gentle mischief, and a natural pause before the title",
-  "as if the studio lights just softened and the room leaned closer",
-  "with relaxed confidence, bright consonants, and a little delighted surprise",
-];
-
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -166,6 +148,28 @@ function clean(value: unknown, max = 240): string {
 
 function norm(value: unknown): string {
   return clean(value).toLocaleLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function segmentOf(value: unknown, request = "", vibe = ""): SetSegment {
+  const exact = clean(value, 40).toLocaleLowerCase() as SetSegment;
+  if (SET_SEGMENTS.includes(exact)) return exact;
+  const text = norm(`${clean(value, 80)} ${request} ${vibe}`);
+  if (text.includes("late night") || text.includes("midnight") || text.includes("after dark")) return "late-night";
+  if (text.includes("focus") || text.includes("study") || text.includes("deep work") || text.includes("concentrat")) return "focused";
+  if (text.includes("energ") || text.includes("workout") || text.includes("gym") || text.includes("party") || text.includes("hype")) return "energetic";
+  if (text.includes("wind down") || text.includes("wind-down") || text.includes("sleep") || text.includes("calm") || text.includes("relax") || text.includes("unwind")) return "wind-down";
+  const hour = new Date().getHours();
+  if (hour >= 22 || hour < 4) return "late-night";
+  if (hour >= 18) return "wind-down";
+  if (hour >= 11 && hour < 17) return "focused";
+  return "warm-up";
+}
+
+function segmentLabel(segment: SetSegment, language = "English"): string {
+  if (language.toLocaleLowerCase() === "indonesian") {
+    return ({ "warm-up": "pemanasan", "late-night": "larut malam", focused: "fokus", energetic: "berenergi", "wind-down": "menurunkan tempo" } as Record<SetSegment, string>)[segment];
+  }
+  return segment;
 }
 
 function json(data: unknown, status = 200, extra: HeadersInit = {}): Response {
@@ -419,6 +423,7 @@ function defaultProfile(): ProfileState {
     message: "Tell the DJ what you want to hear.",
     vibe: "",
     why: "",
+    segment: "warm-up",
     engine: "offline parser",
     voiceEnabled: true,
     ttsProvider: "gemini",
@@ -446,7 +451,7 @@ function normalizeTrack(value: unknown): Track | null {
     url: `https://music.youtube.com/watch?v=${encodeURIComponent(id)}`,
     album: clean(row.album, 160) || undefined,
     query: clean(row.query, 180) || undefined,
-    official: Boolean(row.official),
+    official: row.official === true,
     score: Number.isFinite(Number(row.score)) ? Number(row.score) : undefined,
   };
 }
@@ -455,9 +460,9 @@ function normalizeProfile(value: unknown): ProfileState {
   const base = defaultProfile();
   if (!value || typeof value !== "object") return base;
   const raw = value as Record<string, unknown>;
-  const queue = (Array.isArray(raw.queue) ? raw.queue : []).map(normalizeTrack).filter(Boolean) as Track[];
-  const history = (Array.isArray(raw.history) ? raw.history : []).map(normalizeTrack).filter(Boolean) as Track[];
-  const liked = (Array.isArray(raw.liked) ? raw.liked : []).map(normalizeTrack).filter(Boolean) as Track[];
+  const queue = (Array.isArray(raw.queue) ? raw.queue : []).map(originalTrack).filter(Boolean) as Track[];
+  const history = (Array.isArray(raw.history) ? raw.history : []).map(originalTrack).filter(Boolean) as Track[];
+  const liked = (Array.isArray(raw.liked) ? raw.liked : []).map(originalTrack).filter(Boolean) as Track[];
   const skipped = (Array.isArray(raw.skipped) ? raw.skipped : [])
     .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
     .map((item) => ({ id: clean(item.id, 32), artist: clean(item.artist, 120), title: clean(item.title, 180), at: Number(item.at) || Date.now() }))
@@ -477,7 +482,7 @@ function normalizeProfile(value: unknown): ProfileState {
   const lang = LANGUAGES.find((item) => item.toLocaleLowerCase() === String(raw.djLang || "").toLocaleLowerCase()) || base.djLang;
   return {
     request: clean(raw.request, 240),
-    now: normalizeTrack(raw.now),
+    now: originalTrack(raw.now),
     queue: queue.slice(0, MAX_QUEUE),
     history: history.slice(-40),
     liked: liked.slice(-MAX_LIKES),
@@ -493,6 +498,7 @@ function normalizeProfile(value: unknown): ProfileState {
     message: clean(raw.message, 300) || base.message,
     vibe: clean(raw.vibe, 120),
     why: clean(raw.why, 300),
+    segment: segmentOf(raw.segment, clean(raw.request, 240), clean(raw.vibe, 120)),
     engine: clean(raw.engine, 80) || base.engine,
     voiceEnabled: raw.voiceEnabled !== false,
     ttsProvider: provider,
@@ -541,7 +547,9 @@ function publicProfile(profile: ProfileState, user: User): Record<string, unknow
   out.skipped = out.skipped.slice(-MAX_SKIPS);
   out.user = user;
   out.likedIds = out.liked.map((track) => track.id);
-  out.djLine = djLine(profile, profile.djLang);
+  out.why = profile.now ? groundedWhy(profile) : clean(profile.why, 300);
+  out.segment = segmentOf(profile.segment, profile.request, profile.vibe);
+  out.djLine = djLine({ ...profile, why: out.why, segment: out.segment }, profile.djLang);
   return out;
 }
 
@@ -590,7 +598,7 @@ function durationOf(value: string): number {
   return 0;
 }
 
-function thumbnailOf(row: Record<string, unknown>, id: string): string {
+function thumbnailOf(row: Record<string, unknown>, id: string, official = false): string {
   const found: Array<{ url: string; area: number }> = [];
   const visit = (value: unknown): void => {
     if (Array.isArray(value)) {
@@ -605,7 +613,14 @@ function thumbnailOf(row: Record<string, unknown>, id: string): string {
     Object.values(object).forEach(visit);
   };
   visit(row.thumbnail);
-  return found.sort((a, b) => b.area - a.area)[0]?.url || `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`;
+  const largest = found.sort((a, b) => b.area - a.area)[0];
+  // Song rows often carry only a 60/120px artist avatar. Prefer a real
+  // YouTube Music/video thumbnail for the large artwork card instead of
+  // stretching that avatar across the now-playing panel.
+  if (official && (!largest || largest.area < 160 * 160)) {
+    return `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`;
+  }
+  return largest?.url || `https://i.ytimg.com/vi/${encodeURIComponent(id)}/hqdefault.jpg`;
 }
 
 function artistFrom(row: Record<string, unknown>, title: string, parts: string[], official: boolean): string {
@@ -628,12 +643,28 @@ function artistFrom(row: Record<string, unknown>, title: string, parts: string[]
   return "";
 }
 
+const NON_ORIGINAL_TITLE = /\b(?:cover(?:s|ed)?|karaoke|tribute|remix(?:ed|es|ing)?|remake(?:s)?|reimagined|reimagining|rework(?:s|ed)?|reinterpret(?:ation|ed)?|re-record(?:ed|ing)?|rewrite|alternative\s+(?:version|take)|alt\s+version|originally\s+performed|slowed|(?:sped|speed)\s*[- ]?up|nightcore|8d|unplugged|rehearsal|demo)\b/i;
+const LIVE_RECORDING_TITLE = /\b(?:live\s+(?:at|from|in|on|for|performance|performing|concert|version|take|recording|set|show|studio\s+session)|recorded\s+live|captured\s+live|filmed\s+live|performed\s+live|mtv\s+unplugged|in\s+concert|full\s+(?:concert|show|set)|live\s+\d{4})\b|[\(\[\{][^\)\]\}]{0,80}\b(?:live|unplugged|concert|performance|festival)\b[^\)\]\}]{0,80}[\)\]\}]/i;
+const NON_MUSIC_TITLE = /\b(?:reaction|tutorial|review|lyrics?|podcast|episode|trailer|movie|film|fight(?:ing)?\s+scene|full\s+match|gameplay|how\s+to|unboxing|ambience|ambient\s+sounds?|white\s+noise|sleep\s+sounds?|study\s+with|focus\s+with|meditation|rain\s+sounds?|lofi\s+radio|radio\s+stream|live\s+stream|24\s*\/\s*7)\b/i;
+
 function rejected(title: string, duration: number, official: boolean): string | null {
-  if (/\((?:[^)]*\b(?:live|unplugged|concert|performance|festival)\b[^)]*)\)|\[(?:[^\]]*\b(?:live|unplugged|concert|performance|festival)\b[^\]]*)\]/i.test(title) || /\b(?:live\s+(?:at|from|in|version|take|performance|concert)|recorded\s+live|mtv\s+unplugged|full\s+(?:concert|show|set))\b/i.test(title)) return "live performance";
-  if (duration > 15 * 60 || /\b(?:dj\s+set|full\s+album|best\s+of|compilation|\d+\s*[- ]?hours?)\b/i.test(title)) return "long-form upload";
-  if (!official && /\b(?:cover|karaoke|tribute|reaction|tutorial|review|lyrics?|remix|reverb|slowed|sped\s*up|nightcore)\b/i.test(title)) return "not an original music recording";
-  if (/\b(?:unboxing|podcast|trailer|movie|film|fight scene|full match|gameplay|how to)\b/i.test(title)) return "not a song";
+  // A YouTube Music Song catalog row is the provenance boundary. Ordinary
+  // `Video`, `Episode`, and `Playlist` rows are deliberately not allowed to
+  // become playable tracks, even when their title happens to look musical.
+  if (!official) return "not an original YouTube Music Song";
+  if (NON_ORIGINAL_TITLE.test(title) || LIVE_RECORDING_TITLE.test(title)) return "cover, remix, demo, or live recording";
+  if (duration > 15 * 60 || /\b(?:dj\s+set|full\s+album|best\s+of|compilation|\d+\s*[- ]?hours?|long\s+mix)\b/i.test(title)) return "long-form upload";
+  if (NON_MUSIC_TITLE.test(title)) return "not a song";
   return null;
+}
+
+function playableOriginal(track: Track): boolean {
+  return track.official === true && !rejected(track.title, track.duration, true);
+}
+
+function originalTrack(value: unknown): Track | null {
+  const track = normalizeTrack(value);
+  return track && playableOriginal(track) ? track : null;
 }
 
 async function ytmSearch(query: string, limit = 18): Promise<SearchResult[]> {
@@ -653,22 +684,26 @@ async function ytmSearch(query: string, limit = 18): Promise<SearchResult[]> {
     const id = clean(data?.videoId, 32);
     const fields = columns(row);
     if (!id || !fields.length || seen.has(id)) continue;
-    seen.add(id);
     const title = fields[0];
     const parts = (fields[1] || "").split(/[•·|]/).map((part) => clean(part, 120)).filter(Boolean);
     const official = Boolean(parts[0] && /^song\b/i.test(parts[0]));
     const duration = parts.reduce((longest, part) => Math.max(longest, durationOf(part)), 0);
     const artist = artistFrom(row, title, parts, official);
+    const reason = rejected(title, duration, official);
+    // Do not merely attach a rejection reason to arbitrary YouTube rows: a
+    // `Video` row must never reach search, a generated mix, autoplay, or a
+    // room queue. Only the catalog's Song rows cross this gate.
+    if (reason) continue;
+    seen.add(id);
     output.push({
       id,
       title,
       artist,
-      channel: official ? artist : parts[0] || "",
+      channel: artist,
       duration,
-      thumbnail: thumbnailOf(row, id),
+      thumbnail: thumbnailOf(row, id, official),
       url: `https://music.youtube.com/watch?v=${encodeURIComponent(id)}`,
-      official,
-      reason: rejected(title, duration, official) || undefined,
+      official: true,
     });
     if (output.length >= limit * 3) break;
   }
@@ -682,11 +717,56 @@ function randomChoice(values: string[]): string {
   return values[bytes[0] % values.length];
 }
 
-function creativeDjLead(request = "", vibe = "", language = "English"): string {
-  if (language.toLocaleLowerCase() === "indonesian") return randomChoice(DJ_LEADS_ID);
-  const context = clean(vibe || request, 90);
-  if (!context) return randomChoice(DJ_LEADS);
-  return `${randomChoice(DJ_LEADS)} ${vibe ? `We are leaning into ${context}.` : `You asked for ${context}, so I took the scenic route.`}`;
+const DJ_LEADS_BY_SEGMENT: Record<SetSegment, string[]> = {
+  "warm-up": [
+    "Let the room settle for a second; I have a good first turn for this set.",
+    "We are easing into the set with something that knows how to open a door.",
+  ],
+  "late-night": [
+    "The lights are low now, so let us leave a little space around this one.",
+    "This is the after-hours part of the set, where the small details get louder.",
+  ],
+  focused: [
+    "For the focused stretch, I am keeping the edges clean and the pulse steady.",
+    "A clear pocket is opening up here; this next choice can hold the line.",
+  ],
+  energetic: [
+    "The set has found its stride, so I am giving the room another jolt of motion.",
+    "We are turning the dial up without losing the thread; this is the next spark.",
+  ],
+  "wind-down": [
+    "The edges are softening now, and I have a gentler handoff ready.",
+    "We are winding down without switching off the glow; stay with me here.",
+  ],
+};
+const DJ_LEADS_BY_SEGMENT_ID: Record<SetSegment, string[]> = {
+  "warm-up": [
+    "Kita beri ruang sebentar; aku punya pembuka yang pas untuk set ini.",
+    "Kita mulai perlahan dengan lagu yang tahu cara membuka suasana.",
+  ],
+  "late-night": [
+    "Lampunya sudah redup, jadi biarkan detail kecil lagu ini terdengar lebih dekat.",
+    "Ini bagian larut malam, saat detail kecil terasa lebih jelas.",
+  ],
+  focused: [
+    "Untuk bagian fokus, aku jaga tepinya tetap rapi dan nadinya tetap stabil.",
+    "Ruang fokus sedang terbuka; pilihan berikutnya akan menjaga alurnya.",
+  ],
+  energetic: [
+    "Set ini sudah menemukan langkahnya, jadi kita tambah sedikit tenaga.",
+    "Kita naikkan energinya tanpa kehilangan benang merahnya; ini percikan berikutnya.",
+  ],
+  "wind-down": [
+    "Tepinya mulai lembut, dan aku sudah siapkan perpindahan yang lebih tenang.",
+    "Kita turunkan tempo tanpa mematikan cahayanya; tetap di sini.",
+  ],
+};
+
+function creativeDjLead(request = "", vibe = "", language = "English", requestedSegment?: SetSegment): string {
+  const segment = requestedSegment || segmentOf("", request, vibe);
+  return randomChoice(language.toLocaleLowerCase() === "indonesian"
+    ? DJ_LEADS_BY_SEGMENT_ID[segment]
+    : DJ_LEADS_BY_SEGMENT[segment]);
 }
 
 function remoteDetail(body: string, max = 180): string {
@@ -700,18 +780,95 @@ function providerFailure(provider: string, status: number, body: string): Error 
   return new Error(`${provider} planner returned HTTP ${status}${detail ? ` — ${detail}` : ""}`);
 }
 
+function artistLabel(state: ProfileState | RoomState, key: string): string {
+  const wanted = norm(key);
+  const tracks = [
+    ...state.history,
+    ...(("liked" in state) ? state.liked : []),
+    ...(state.now ? [state.now] : []),
+  ];
+  const match = tracks.find((track) => norm(track.artist || track.channel) === wanted);
+  if (match?.artist || match?.channel) return clean(match.artist || match.channel, 120);
+  return clean(key, 120).replace(/\b\w/g, (letter) => letter.toLocaleUpperCase());
+}
+
+function recentArtist(state: ProfileState | RoomState): string {
+  for (const track of [...state.history].reverse()) {
+    const artist = clean(track.artist || track.channel, 120);
+    if (artist) return artist;
+  }
+  return "";
+}
+
+function strongestArtist(state: ProfileState | RoomState): string {
+  if (!("artists" in state)) return "";
+  const entry = Object.entries(state.artists)
+    .filter(([, weight]) => Number(weight) > 0)
+    .sort((a, b) => b[1] - a[1])[0];
+  return entry ? artistLabel(state, entry[0]) : "";
+}
+
+function strongestGenre(state: ProfileState | RoomState): string {
+  if (!("genres" in state)) return "";
+  const entry = Object.entries(state.genres)
+    .filter(([, weight]) => Number(weight) > 0)
+    .sort((a, b) => b[1] - a[1])[0];
+  return entry ? clean(entry[0], 80) : "";
+}
+
+function groundedWhy(state: ProfileState | RoomState): string {
+  const request = clean(state.request, 180);
+  const heardArtist = recentArtist(state);
+  const tasteArtist = strongestArtist(state);
+  const genre = strongestGenre(state);
+  if (request && heardArtist) return `You asked for ${request}, and you have been listening to ${heardArtist}, so I am keeping that thread in the set.`;
+  if (request) return `You asked for ${request}, so I am shaping this set around that direction.`;
+  if (heardArtist) return `I am bringing this in because you have been listening to ${heardArtist}, so I am keeping that thread moving.`;
+  if (tasteArtist) return `I am staying close to ${tasteArtist}, one of the strongest signals in your taste profile.`;
+  if (genre) return `Your taste leans toward ${genre}, so I am keeping that color in the room.`;
+  return "I am following the shape of the set and keeping the choices close to the music.";
+}
+
+function planningSnapshot(profile: ProfileState): string {
+  const artists = Object.entries(profile.artists)
+    .filter(([, weight]) => Number(weight) > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([artist]) => `${artistLabel(profile, artist)} (${Number(profile.artists[artist]).toFixed(1)})`);
+  const genres = Object.entries(profile.genres)
+    .filter(([, weight]) => Number(weight) > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([genre]) => genre);
+  const recent = profile.history.slice(-8).map((track) => `${track.title} by ${track.artist || track.channel}`).filter(Boolean);
+  return [
+    `Taste-weighted artists: ${artists.join(", ") || "none"}`,
+    `Taste-weighted genres: ${genres.join(", ") || "none"}`,
+    `Recent listening history, newest last: ${recent.join(" | ") || "none"}`,
+    `Loved songs: ${profile.liked.slice(-8).map((track) => `${track.title} by ${track.artist || track.channel}`).join(" | ") || "none"}`,
+  ].join("\n");
+}
+
 function fallbackPlan(request: string, profile: ProfileState): Plan {
-  const artists = Object.entries(profile.artists).filter(([, weight]) => weight > 0).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([artist]) => `${artist} music`);
   const query = clean(request);
-  const queries = query ? [query] : artists.length ? artists : ["indie pop music"];
-  const words = norm(query || artists[0] || "music").split(" ").filter(Boolean);
-  const mood = words.slice(0, 3).join(" ") || "eclectic favourites";
+  const artists = Object.entries(profile.artists)
+    .filter(([, weight]) => weight > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([artist]) => `${artistLabel(profile, artist)} music`);
+  const genre = strongestGenre(profile);
+  const queries = query ? [query] : artists.length ? artists : [genre ? `${genre} music` : "indie pop music"];
+  const segment = segmentOf("", query, profile.vibe);
+  const words = norm(query || genre || strongestArtist(profile) || "music").split(" ").filter(Boolean);
+  const vibe = clean(words.slice(0, 4).join(" ") || `${segmentLabel(segment)} selections`, 120);
+  const context = { ...profile, request: query };
   return {
     queries,
-    vibe: `${mood} ${new Date().toLocaleDateString("en", { weekday: "long" }).toLocaleLowerCase()}`,
-    why: query ? `you asked for ${query}` : "it leans into the room's loved music",
+    vibe,
+    why: groundedWhy(context),
+    segment,
     engine: "offline parser",
-    djLead: creativeDjLead(query, `${mood} ${new Date().toLocaleDateString("en", { weekday: "long" }).toLocaleLowerCase()}`),
+    djLead: creativeDjLead(query, vibe, profile.djLang, segment),
   };
 }
 
@@ -734,8 +891,15 @@ function planFromPayload(value: unknown, fallback: Plan, engine: string): Plan {
   if (!value || typeof value !== "object") return fallback;
   const object = value as Record<string, unknown>;
   const queries = (Array.isArray(object.queries) ? object.queries : []).filter((item): item is string => typeof item === "string").map((item) => clean(item, 180)).filter(Boolean).slice(0, 3);
+  const vibe = clean(object.vibe, 120) || fallback.vibe;
+  const segment = segmentOf(object.segment, fallback.queries.join(" "), vibe) || fallback.segment;
   const djLead = clean(object.djLead || object.dj_line || object.djLine, 280);
-  return queries.length ? { queries, vibe: clean(object.vibe, 120) || fallback.vibe, why: clean(object.why, 300) || fallback.why, engine, djLead: djLead || fallback.djLead } : fallback;
+  // Keep the spoken reason deterministic. The model can suggest searches and
+  // atmosphere, but it must not be able to claim a listening habit that is not
+  // present in the profile snapshot supplied to it.
+  return queries.length
+    ? { queries, vibe, why: fallback.why, segment, engine, djLead: djLead || creativeDjLead(fallback.queries.join(" "), vibe, "English", segment) }
+    : fallback;
 }
 
 async function geminiPlan(request: string, profile: ProfileState, env: Env, fallback: Plan): Promise<Plan> {
@@ -749,13 +913,14 @@ async function geminiPlan(request: string, profile: ProfileState, env: Env, fall
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
       body: JSON.stringify({ contents: [{ parts: [{ text: [
-        "You are the creative planning brain and warm radio DJ for a music app.",
-        "Return only one JSON object with exactly these useful fields: queries (string array), vibe (short string), why (short string), djLead (short original radio-DJ intro).",
-        "Use at most three concise YouTube Music searches. Never ask for live recordings, covers, remixes, podcasts, tutorials, or long mixes.",
-        "Make djLead vivid and lightly surprising, 12 to 28 words, with natural spoken rhythm. Do not use emojis, markdown, stage directions, fake facts, or specific song/artist names because the tracks are selected afterward.",
+        "You are the creative planning brain for a contextual music radio host, not a metadata announcer.",
+        "Return only one JSON object with exactly these fields: queries (string array), vibe (short phrase), segment (one of warm-up, late-night, focused, energetic, wind-down), why (short reason), djLead (short scene-setting radio intro).",
+        "Use at most three concise YouTube Music searches. Search for original studio songs only: never ask for live recordings, covers, karaoke, tributes, remixes, reworks, slowed or sped-up versions, podcasts, tutorials, ambience, compilations, or long mixes.",
+        "Ground every claim in the request or the supplied taste weights, loved songs, and recent listening history. Never invent an artist the listener heard. The deterministic host will write the final song handoff from the returned plan.",
+        "Make vibe two to five words. Make why explain the real reason for this set. Make djLead vivid, warm, and lightly surprising in 12 to 28 words, with no emojis, markdown, stage directions, fake facts, song titles, artist names, or repeated Now playing phrasing.",
         `Listener request: ${request || "make a mix from these preferences"}`,
-        `Loved artists: ${Object.keys(profile.artists).slice(0, 8).join(", ") || "none yet"}`,
-      ].join("\\n") }] }], generationConfig: { temperature: 0.85, responseMimeType: "application/json" } }),
+        planningSnapshot(profile),
+      ].join("\n") }] }], generationConfig: { temperature: 0.85, responseMimeType: "application/json" } }),
     });
     const raw = await response.text();
     if (!response.ok) {
@@ -800,11 +965,11 @@ async function compatiblePlan(request: string, profile: ProfileState, env: Env, 
       model: env.LLM_MODEL || "llama3.2",
       temperature: 0.85,
       messages: [{ role: "system", content: [
-        "You are the creative planning brain and warm radio DJ for a music app.",
-        "Return only JSON with queries, vibe, why, and djLead.",
-        "Use at most three concise YouTube Music searches. Never request live, cover, remix, podcast, tutorial, or long-form results.",
-        "djLead must be a vivid original 12 to 28 word radio-DJ intro, with no emojis, markdown, stage directions, fake facts, or song/artist names.",
-      ].join(" ") }, { role: "user", content: `Request: ${request || "a mix from my likes"}. Loved artists: ${Object.keys(profile.artists).slice(0, 8).join(", ") || "none yet"}` }],
+        "You are the creative planning brain for a contextual music radio host, not a metadata announcer.",
+        "Return only JSON with queries, vibe, segment, why, and djLead. Segment must be warm-up, late-night, focused, energetic, or wind-down.",
+        "Use at most three concise YouTube Music searches for original studio songs only. Never request live, cover, karaoke, tribute, remix, rework, slowed, sped-up, podcast, tutorial, ambience, compilation, or long-form results.",
+        "Ground claims in the listener request and the supplied profile snapshot. Never invent listening history. djLead is only a vivid 12 to 28 word scene-setter: no emojis, markdown, stage directions, fake facts, song or artist names, or Now playing phrasing.",
+      ].join(" ") }, { role: "user", content: `Request: ${request || "a mix from my likes"}.\n${planningSnapshot(profile)}` }],
     }),
   });
   const raw = await response.text();
@@ -853,9 +1018,9 @@ async function buildMix(request: string, profile: ProfileState, env: Env, limit 
   const unique = new Map<string, Track>();
   for (let index = 0; index < pages.length; index += 1) {
     for (const result of pages[index]) {
-      if (result.reason) continue;
+      if (result.reason || !playableOriginal(result)) continue;
       const track = normalizeTrack({ ...result, query: plan.queries[index] });
-      if (!track) continue;
+      if (!track || !playableOriginal(track)) continue;
       track.score = scoreTrack(track, clean(request) || plan.queries[index], profile);
       const old = unique.get(track.id);
       if (!old || (track.score || 0) > (old.score || 0)) unique.set(track.id, track);
@@ -872,12 +1037,15 @@ function blendProfiles(profiles: ProfileState[]): ProfileState {
   const genreTotals: Record<string, number> = {};
   const liked = new Map<string, Track>();
   const skipped = new Map<string, SkippedTrack>();
+  const history = new Map<string, Track>();
   for (const profile of profiles) {
     Object.entries(profile.artists).forEach(([name, weight]) => { artistTotals[name] = (artistTotals[name] || 0) + weight; });
     Object.entries(profile.genres).forEach(([name, weight]) => { genreTotals[name] = (genreTotals[name] || 0) + weight; });
     profile.liked.forEach((track) => liked.set(track.id, track));
+    profile.history.forEach((track) => history.set(`${track.id}:${track.title}`, track));
     profile.skipped.forEach((track) => skipped.set(track.id, track));
   }
+  blended.history = [...history.values()].slice(-40);
   blended.artists = Object.fromEntries(Object.entries(artistTotals).map(([key, value]) => [key, value / Math.max(1, profiles.length)]));
   blended.genres = Object.fromEntries(Object.entries(genreTotals).map(([key, value]) => [key, value / Math.max(1, profiles.length)]));
   blended.liked = [...liked.values()].slice(-MAX_LIKES);
@@ -930,32 +1098,90 @@ async function advanceProfile(profile: ProfileState, env: Env, markSkip: boolean
     profile.queue.push(...built.tracks);
     profile.vibe = built.plan.vibe;
     profile.why = built.plan.why;
+    profile.segment = built.plan.segment;
     profile.engine = built.plan.engine;
   }
   profile.now = next;
   profile.position = 0;
   profile.duration = next?.duration || 0;
   profile.paused = !next;
-  profile.djLead = generatedPlan?.djLead || creativeDjLead(profile.request, profile.vibe, profile.djLang);
+  profile.djLead = generatedPlan?.djLead || creativeDjLead(profile.request, profile.vibe, profile.djLang, profile.segment);
   profile.message = generatedPlan?.error
     ? `AI brain unavailable; used the offline parser. ${generatedPlan.error}`
     : next ? `Up next: ${next.title}` : "The queue is empty. Make another mix to continue.";
+}
+
+function groundedWhyId(state: ProfileState | RoomState): string {
+  const request = clean(state.request, 180);
+  const heardArtist = recentArtist(state);
+  const tasteArtist = strongestArtist(state);
+  const genre = strongestGenre(state);
+  if (request && heardArtist) return `Kamu minta ${request}, dan belakangan ini kamu sering mendengarkan ${heardArtist}, jadi benang itu tetap kita bawa.`;
+  if (request) return `Kamu minta ${request}, jadi set ini kita arahkan ke sana.`;
+  if (heardArtist) return `Belakangan ini kamu mendengarkan ${heardArtist}, jadi nuansanya kita teruskan.`;
+  if (tasteArtist) return `Kita tetap dekat dengan ${tasteArtist}, salah satu sinyal terkuat dari selera musikmu.`;
+  if (genre) return `Selera musikmu condong ke ${genre}, jadi warna itu tetap ada di ruangan.`;
+  return "Aku mengikuti bentuk set ini dan membiarkan musiknya menjaga alurnya.";
+}
+
+function variantFor(seed: string, count: number): number {
+  let value = 0;
+  for (const character of seed) value = (value * 31 + character.charCodeAt(0)) >>> 0;
+  return count ? value % count : 0;
 }
 
 function djLine(state: ProfileState | RoomState, language = "English"): string {
   const now = state.now;
   if (!now) return "";
   const next = state.queue[0];
-  const lead = clean(state.djLead, 280) || creativeDjLead(state.request, state.vibe, language);
+  const segment = segmentOf(state.segment, state.request, state.vibe);
+  const segmentText = segmentLabel(segment, language);
+  const vibe = clean(state.vibe, 100);
   const artist = clean(now.artist || now.channel || "the next sound", 120);
   const title = clean(now.title, 180);
-  const why = clean(state.why || (state.request ? `you asked for ${state.request}` : "it fits the blended taste"), 300).replace(/[.!?]+$/, "");
-  const vibe = state.vibe ? ` This is part of the ${clean(state.vibe, 120)} set.` : "";
-  const upcoming = next ? ` Up next: ${clean(next.artist || next.channel || "another good one", 120)}, ${clean(next.title, 180)}.` : "";
-  if (language.toLocaleLowerCase() === "indonesian") {
-    return `${lead} Sekarang kita masuk ke ${artist}, ${title}. ${why}.${state.vibe ? ` Ini bagian dari set ${clean(state.vibe, 120)}.` : ""}${next ? ` Selanjutnya: ${clean(next.artist || next.channel || "lagu berikutnya", 120)}, ${clean(next.title, 180)}.` : ""}`.replace(/\.\./g, ".");
+  const nextArtist = next ? clean(next.artist || next.channel || "the next sound", 120) : "";
+  const nextTitle = next ? clean(next.title, 180) : "";
+  const seed = `${now.id}:${next?.id || "end"}:${segment}`;
+  const variant = variantFor(seed, 3);
+  const indonesian = language.toLocaleLowerCase() === "indonesian";
+  // Planner copy is intentionally only the scene-setter. Song names, reasons,
+  // and the handoff below are assembled here from verified state so a model can
+  // never turn a guess into a claim about the listener's history.
+  const lead = indonesian
+    ? creativeDjLead(state.request, vibe, language, segment)
+    : (clean(state.djLead, 280).replace(/\bnow playing\b/gi, "this one") || creativeDjLead(state.request, vibe, language, segment));
+  if (indonesian) {
+    const reason = groundedWhyId(state);
+    const frame = vibe ? `Kita ada di bagian ${segmentText}, dengan nuansa ${vibe} di ruangan.` : `Kita ada di bagian ${segmentText} dari set ini.`;
+    const current = [
+      `Ini ${title} dari ${artist}.`,
+      `Sekarang kita bawa ${title}, bersama ${artist}.`,
+      `Kita mendarat di ${title} dari ${artist}.`,
+    ][variant];
+    const handoff = next
+      ? [
+        `Setelah ini, ${nextTitle} dari ${nextArtist} siap meneruskan alurnya.`,
+        `Kalau lagu ini selesai, kita bergerak ke ${nextTitle} bersama ${nextArtist}.`,
+        `Dan untuk perpindahan berikutnya, ${nextTitle} dari ${nextArtist} sudah menunggu.`,
+      ][variant]
+      : "Kita biarkan lagu ini menutup bagian set ini dengan tenang.";
+    return `${lead} ${reason} ${frame} ${current} ${handoff}`.replace(/\.\./g, ".");
   }
-  return `${lead} Now playing ${artist}, ${title}. ${why}.${vibe}${upcoming}`.replace(/\.\./g, ".");
+  const reason = "artists" in state ? groundedWhy(state) : (clean(state.why, 300) || groundedWhy(state));
+  const frame = vibe ? `We are in the ${segmentText} stretch, with a ${vibe} mood in the room.` : `We are in the ${segmentText} stretch of the set.`;
+  const current = [
+    `Here is ${title} by ${artist}.`,
+    `I am bringing in ${title} from ${artist}.`,
+    `We are landing on ${title}, with ${artist}.`,
+  ][variant];
+  const handoff = next
+    ? [
+      `When it settles, ${nextTitle} by ${nextArtist} is waiting to carry the thread forward.`,
+      `After this, we will move into ${nextTitle} from ${nextArtist}.`,
+      `And the next handoff is ${nextTitle}, with ${nextArtist} taking it from here.`,
+    ][variant]
+    : "Let this one have the room for a while.";
+  return `${lead} ${reason} ${frame} ${current} ${handoff}`.replace(/\.\./g, ".");
 }
 
 async function runPersonalAction(user: User, fields: Record<string, string>, env: Env): Promise<{ state: Record<string, unknown>; message: string }> {
@@ -979,8 +1205,9 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
     profile.paused = true;
     profile.vibe = built.plan.vibe;
     profile.why = built.plan.why;
+    profile.segment = built.plan.segment;
     profile.engine = built.plan.engine;
-    profile.djLead = built.plan.djLead || creativeDjLead(request, profile.vibe, profile.djLang);
+    profile.djLead = built.plan.djLead || creativeDjLead(request, profile.vibe, profile.djLang, profile.segment);
     profile.message = built.plan.error
       ? `AI brain unavailable; used the offline parser. ${built.plan.error}`
       : `Ready with ${profile.queue.length + (profile.now ? 1 : 0)} tracks. Press play.`;
@@ -1013,14 +1240,20 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
       }
     }
   } else if (action === "next" || action === "skip" || action === "ended") {
-    if (action === "ended") addHeard(profile);
+    if (action === "ended") {
+      const endedPosition = Number(fields.position);
+      const endedDuration = Number(fields.duration);
+      if (Number.isFinite(endedPosition)) profile.position = Math.max(0, Math.min(86400, endedPosition));
+      if (Number.isFinite(endedDuration) && endedDuration > 0) profile.duration = Math.min(86400, endedDuration);
+      addHeard(profile);
+    }
     await advanceProfile(profile, env, action !== "ended");
     message = profile.now ? `playing ${profile.now.title}` : "the queue is empty";
   } else if (action === "play_row") {
     const supplied = fields.track ? normalizeTrack(JSON.parse(fields.track)) : null;
     const id = clean(fields.id, 32);
     const selected = profile.queue.find((track) => track.id === id) || supplied;
-    if (!selected) throw new Error("that track is no longer available");
+    if (!selected || !playableOriginal(selected)) throw new Error("that track is not an original YouTube Music song");
     profile.queue = profile.queue.filter((track) => track.id !== selected.id);
     if (profile.now && profile.now.id !== selected.id) {
       profile.history.push(clone(profile.now));
@@ -1035,7 +1268,7 @@ async function runPersonalAction(user: User, fields: Record<string, string>, env
     message = profile.message;
   } else if (action === "enqueue" || action === "queue_next") {
     const track = fields.track ? normalizeTrack(JSON.parse(fields.track)) : null;
-    if (!track) throw new Error("a valid track is required");
+    if (!track || !playableOriginal(track)) throw new Error("only original YouTube Music songs can be queued");
     profile.queue = [track, ...profile.queue.filter((item) => item.id !== track.id)].slice(0, MAX_QUEUE);
     message = `queued ${track.title}`;
   } else if (action === "like") {
@@ -1130,6 +1363,7 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     shuffle: false,
     vibe: "",
     why: "",
+    segment: "warm-up",
     engine: "offline parser",
     message: "Create a mix for the room.",
     djLead: "",
@@ -1153,9 +1387,9 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     hostName: clean(raw.hostName, 60),
     members,
     request: clean(raw.request, 240),
-    now: normalizeTrack(raw.now),
-    queue: (Array.isArray(raw.queue) ? raw.queue : []).map(normalizeTrack).filter(Boolean).slice(0, MAX_QUEUE) as Track[],
-    history: (Array.isArray(raw.history) ? raw.history : []).map(normalizeTrack).filter(Boolean).slice(-40) as Track[],
+    now: originalTrack(raw.now),
+    queue: (Array.isArray(raw.queue) ? raw.queue : []).map(originalTrack).filter(Boolean).slice(0, MAX_QUEUE) as Track[],
+    history: (Array.isArray(raw.history) ? raw.history : []).map(originalTrack).filter(Boolean).slice(-40) as Track[],
     playing: Boolean(raw.playing),
     position: Math.max(0, Math.min(86400, Number(raw.position) || 0)),
     duration: Math.max(0, Math.min(86400, Number(raw.duration) || 0)),
@@ -1163,6 +1397,7 @@ function normalizeRoom(value: unknown, id = "room"): RoomState {
     shuffle: Boolean(raw.shuffle),
     vibe: clean(raw.vibe, 120),
     why: clean(raw.why, 300),
+    segment: segmentOf(raw.segment, clean(raw.request, 240), clean(raw.vibe, 120)),
     engine: clean(raw.engine, 80) || base.engine,
     message: clean(raw.message, 300) || base.message,
     djLead: clean(raw.djLead, 280),
@@ -1175,7 +1410,8 @@ function publicRoom(room: RoomState, language = "English"): Record<string, unkno
   output.queue = output.queue.slice(0, MAX_QUEUE);
   output.members = Object.values(room.members) as unknown as Record<string, RoomMember>;
   output.playing = room.playing;
-  output.djLine = djLine(room, language);
+  output.segment = segmentOf(room.segment, room.request, room.vibe);
+  output.djLine = djLine({ ...room, segment: output.segment }, language);
   return output;
 }
 
@@ -1259,8 +1495,9 @@ async function roomAction(request: Request, env: Env, user: User, roomId: string
     outgoing.tracks = JSON.stringify(built.tracks);
     outgoing.vibe = built.plan.vibe;
     outgoing.why = built.plan.why;
+    outgoing.segment = built.plan.segment;
     outgoing.engine = built.plan.engine;
-    outgoing.djLead = built.plan.djLead || creativeDjLead(requestText, built.plan.vibe);
+    outgoing.djLead = built.plan.djLead || creativeDjLead(requestText, built.plan.vibe, "English", built.plan.segment);
     outgoing.brainError = built.plan.error || "";
   }
   if (action === "like" || action === "unlike" || action === "skip" || action === "dislike") {
@@ -1333,7 +1570,7 @@ async function testBrain(env: Env, user: User): Promise<Response> {
   }
   const profile = await loadProfile(env, user.id);
   const plan = await makePlan("a creative warm-up set with a little surprise", profile, env);
-  return json({ ok: !plan.error, configured: true, engine: plan.engine, error: plan.error || "", plan: { queries: plan.queries, vibe: plan.vibe, why: plan.why, djLead: plan.djLead } });
+  return json({ ok: !plan.error, configured: true, engine: plan.engine, error: plan.error || "", plan: { queries: plan.queries, vibe: plan.vibe, segment: plan.segment, why: plan.why, djLead: plan.djLead } });
 }
 
 async function saveSettings(request: Request, env: Env, user: User): Promise<Response> {
@@ -1785,8 +2022,12 @@ export class ListenRoom {
     const action = clean(fields.action, 50).toLocaleLowerCase();
     if (action === "request" || action === "mix" || action === "radio") {
       let tracks: Track[] = [];
-      try { tracks = (JSON.parse(fields.tracks || "[]") as unknown[]).map(normalizeTrack).filter(Boolean) as Track[]; } catch { tracks = []; }
-      if (!tracks.length) return errorResponse("the room mix has no playable songs", 502);
+      try {
+        tracks = (JSON.parse(fields.tracks || "[]") as unknown[])
+          .map(normalizeTrack)
+          .filter((track): track is Track => track !== null && playableOriginal(track));
+      } catch { tracks = []; }
+      if (!tracks.length) return errorResponse("the room mix has no original songs", 502);
       room.request = clean(fields.q, 240);
       const nextMixTrack = tracks.shift() || null;
       if (room.now && nextMixTrack && room.now.id !== nextMixTrack.id) {
@@ -1800,6 +2041,7 @@ export class ListenRoom {
       room.playing = false;
       room.vibe = clean(fields.vibe, 120);
       room.why = clean(fields.why, 300);
+      room.segment = segmentOf(fields.segment, room.request, room.vibe);
       room.engine = clean(fields.engine, 80) || "offline parser";
       room.djLead = clean(fields.djLead, 280) || creativeDjLead(room.request, room.vibe);
       room.message = fields.brainError
@@ -1845,7 +2087,7 @@ export class ListenRoom {
     } else if (action === "play_row") {
       let selected = room.queue.find((track) => track.id === clean(fields.id, 32)) || null;
       try { selected ||= normalizeTrack(JSON.parse(fields.track || "null")); } catch { /* invalid client row */ }
-      if (!selected) return errorResponse("that track is no longer available");
+      if (!selected || !playableOriginal(selected)) return errorResponse("that track is not an original YouTube Music song");
       room.queue = room.queue.filter((track) => track.id !== selected?.id);
       if (room.now && room.now.id !== selected.id) {
         room.history.push(clone(room.now));
@@ -1860,7 +2102,7 @@ export class ListenRoom {
     } else if (action === "enqueue" || action === "queue_next") {
       let track: Track | null = null;
       try { track = normalizeTrack(JSON.parse(fields.track || "null")); } catch { track = null; }
-      if (!track) return errorResponse("a valid track is required");
+      if (!track || !playableOriginal(track)) return errorResponse("only original YouTube Music songs can be queued");
       room.queue = [track, ...room.queue.filter((item) => item.id !== track?.id)].slice(0, MAX_QUEUE);
     } else if (action === "remove") {
       room.queue = room.queue.filter((track) => track.id !== clean(fields.id, 32));
