@@ -166,18 +166,37 @@ let accountSchemaPromise: Promise<void> | null = null;
 async function ensureAccountSchema(env: Env): Promise<void> {
   if (accountSchemaPromise) return accountSchemaPromise;
   const db = database(env);
-  const existing = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'sessions', 'profiles', 'rooms', 'room_members')").all<{ name: string }>();
-  if ((existing.results || []).length === 5) return;
-  accountSchemaPromise = db.batch([
-    db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, created_at INTEGER NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)"),
-    db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id)"),
-    db.prepare("CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS profiles (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, state_json TEXT NOT NULL, backup_json TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, title TEXT NOT NULL, host_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"),
-    db.prepare("CREATE TABLE IF NOT EXISTS room_members (room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, joined_at INTEGER NOT NULL, PRIMARY KEY(room_id, user_id))"),
-    db.prepare("CREATE INDEX IF NOT EXISTS room_members_user_id ON room_members(user_id)"),
-  ]).then(() => undefined).catch((error) => {
+  accountSchemaPromise = (async () => {
+    const existing = await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'sessions', 'profiles', 'rooms', 'room_members')").all<{ name: string }>();
+    if ((existing.results || []).length !== 5) {
+      await db.batch([
+        db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, created_at INTEGER NOT NULL)"),
+        db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)"),
+        db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id)"),
+        db.prepare("CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at)"),
+        db.prepare("CREATE TABLE IF NOT EXISTS profiles (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, state_json TEXT NOT NULL, backup_json TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)"),
+        db.prepare("CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, title TEXT NOT NULL, host_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"),
+        db.prepare("CREATE TABLE IF NOT EXISTS room_members (room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, joined_at INTEGER NOT NULL, PRIMARY KEY(room_id, user_id))"),
+        db.prepare("CREATE INDEX IF NOT EXISTS room_members_user_id ON room_members(user_id)"),
+      ]);
+    }
+    const profileColumns = await db.prepare("PRAGMA table_info(profiles)").all<{ name: string }>();
+    if ((profileColumns.results || []).some((column) => column.name === "user_id")) return;
+    // Some earlier deployments created a single-profile table named `profiles`.
+    // Keep that data under a legacy name, then install the user-keyed schema.
+    const legacyName = `profiles_legacy_${Date.now().toString(36)}`;
+    try {
+      await db.batch([
+        db.prepare(`ALTER TABLE profiles RENAME TO ${legacyName}`),
+        db.prepare("CREATE TABLE profiles (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, state_json TEXT NOT NULL, backup_json TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)"),
+      ]);
+    } catch (error) {
+      // Another cold isolate may have repaired the table concurrently. Recheck
+      // before surfacing a real D1 error to the signup request.
+      const latest = await db.prepare("PRAGMA table_info(profiles)").all<{ name: string }>();
+      if (!(latest.results || []).some((column) => column.name === "user_id")) throw error;
+    }
+  })().catch((error) => {
     accountSchemaPromise = null;
     throw error;
   });
