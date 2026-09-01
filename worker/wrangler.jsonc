@@ -7,6 +7,20 @@
     "directory": "./public",
     "binding": "ASSETS"
   },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "ListenRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ListenRoom"]
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
@@ -16,6 +30,8 @@
     }
   ],
   "vars": {
-    "GEMINI_MODEL": "gemini-2.5-flash"
+    "GEMINI_MODEL": "gemini-2.5-flash",
+    "GEMINI_TTS_MODEL": "gemini-2.5-flash-preview-tts",
+    "TTS_MODEL": "tts-1"
   }
 }
