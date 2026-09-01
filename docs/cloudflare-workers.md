@@ -36,8 +36,10 @@ and the browser's official YouTube embedded player.
   the next room mix. A like/skip still belongs to the person who made it.
 - Durable Object WebSocket updates so participants converge on the room's current
   track, play state, queue, and server position.
-- A Spotify-like three-column browser UI with library, home/search views, now
-  playing, queue, settings, voice controls, and party controls.
+- An Apple Music-inspired, artwork-first three-column browser UI with library,
+  Listen Now/Browse views, now playing, queue, settings, voice controls, and party
+  controls. The same controls remain reachable on mobile through the responsive
+  content layout and bottom navigation; no feature is desktop-only.
 
 Every participant plays the same YouTube video independently in their browser.
 The room broadcasts the video ID, play/pause state, and server position; clients
@@ -144,9 +146,13 @@ OpenAI-compatible TTS, the configured endpoint must implement `POST
 /v1/audio/speech` and return an audio body. If a remote provider is unavailable,
 the browser uses its Web Speech API when available.
 
-The embedded YouTube player is intentionally visible and controlled by YouTube.
-Ads, regional restrictions, unavailable videos, and YouTube's applicable terms
-still apply. This is not a direct audio stream or a server-side audio relay.
+The official YouTube IFrame player remains mounted and controlled by YouTube for
+browser playback, but its iframe is visually hidden behind the artwork-first Now
+Playing panel. Cover art uses the verified YouTube Music thumbnail, fills a fixed
+square with `object-fit: cover`, and falls back to a local generated art tile if
+an image is missing or fails. Ads, regional restrictions, unavailable videos, and
+YouTube's applicable terms still apply. This is not a direct audio stream or a
+server-side audio relay.
 
 The current room implementation is private and invite-based. D1 stores users,
 profiles, room membership, and room metadata; the Durable Object stores the
