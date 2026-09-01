@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Spotube DJ · Worker</title>
+  <style>
+    :root{color-scheme:dark;--bg:#101012;--panel:#19191d;--panel2:#222229;--line:#35353e;--text:#f7f7fa;--muted:#a7a7b3;--accent:#1ed760;--danger:#ff7373;--shadow:0 18px 55px #0008}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 12% 0,#283b2e 0,transparent 32rem),var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+    button,input{font:inherit}button{border:0;cursor:pointer;color:inherit}.wrap{max-width:1280px;margin:auto;padding:24px}.top{display:flex;gap:16px;align-items:center;margin-bottom:22px}.brand{font-size:23px;font-weight:800;letter-spacing:-.5px;white-space:nowrap}.brand small{display:block;color:var(--muted);font-size:11px;font-weight:500;letter-spacing:.2px}.search{display:flex;gap:8px;flex:1}.search input{width:100%;background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:12px 17px;outline:none}.search input:focus{border-color:var(--accent)}.btn{background:var(--accent);color:#061008;border-radius:999px;padding:11px 17px;font-weight:750}.btn.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--text)}.btn:disabled{opacity:.45;cursor:wait}.layout{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(300px,.7fr);gap:18px}.panel{background:#19191de8;border:1px solid #ffffff13;border-radius:16px;box-shadow:var(--shadow);overflow:hidden}.panel h2{font-size:16px;margin:0;padding:17px 18px;border-bottom:1px solid var(--line)}.now{padding:18px}.player{background:#000;border-radius:11px;overflow:hidden;aspect-ratio:16/9;display:grid;place-items:center}.player>div{width:100%;height:100%}.player-note{color:var(--muted);padding:10px 2px 0;font-size:12px}.np{display:flex;align-items:center;gap:14px;padding:17px 2px 8px}.cover{width:66px;height:66px;object-fit:cover;border-radius:8px;background:var(--panel2)}.np-text{min-width:0;flex:1}.np-title{font-size:19px;font-weight:780;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.np-artist{color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.controls{display:flex;align-items:center;gap:9px;padding-top:9px}.controls button{background:var(--panel2);border:1px solid var(--line);border-radius:999px;padding:9px 13px}.controls button.primary{background:var(--accent);color:#061008;border-color:var(--accent);font-weight:800}.progress{display:flex;align-items:center;gap:9px;color:var(--muted);font-size:12px;margin-top:10px}.progress input{width:100%;accent-color:var(--accent)}.message{color:var(--muted);font-size:13px;margin:12px 0 0}.cols{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}.list{padding:8px;min-height:110px}.row{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:9px}.row:hover{background:#ffffff0d}.row img{width:44px;height:44px;object-fit:cover;border-radius:6px;background:var(--panel2);flex:none}.row-main{min-width:0;flex:1}.row-title{font-weight:680;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row-sub{color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row-actions{display:flex;gap:5px;opacity:.75}.row-actions button{background:transparent;color:var(--muted);padding:6px;border-radius:6px}.row-actions button:hover{background:#ffffff12;color:var(--text)}.empty{padding:20px 12px;color:var(--muted);font-size:13px}.results{margin-top:18px}.results .list{max-height:420px;overflow:auto}.status{color:var(--muted);font-size:12px;margin-left:auto}.status.online{color:var(--accent)}.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#292931;color:var(--text);border:1px solid var(--line);border-radius:999px;padding:10px 15px;box-shadow:var(--shadow);opacity:0;pointer-events:none;transition:opacity .2s}.toast.show{opacity:1}.login{position:fixed;inset:0;background:#000b;display:grid;place-items:center;z-index:5}.login[hidden]{display:none}.login-card{width:min(390px,calc(100% - 36px));background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:24px;box-shadow:var(--shadow)}.login-card h1{margin:0 0 7px;font-size:22px}.login-card p{color:var(--muted);font-size:13px}.login-card form{display:flex;gap:8px}.login-card input{min-width:0;flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px}.login-error{color:var(--danger);min-height:20px;font-size:12px;margin-top:8px}@media(max-width:850px){.wrap{padding:15px}.top{align-items:stretch;flex-wrap:wrap}.brand{width:100%}.layout{grid-template-columns:1fr}.cols{grid-template-columns:1fr}.status{margin-left:0}}
+  </style>
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <div class="login-card">
+      <h1>Private DJ</h1>
+      <p>This Worker is protected by <code>APP_PASSWORD</code>. Enter it to continue.</p>
+      <form id="login-form"><input id="password" type="password" autocomplete="current-password" placeholder="Password" required><button class="btn">Enter</button></form>
+      <div id="login-error" class="login-error"></div>
+    </div>
+  </div>
+  <div class="wrap">
+    <header class="top">
+      <div class="brand">Spotube DJ<small>Cloudflare Worker · browser playback</small></div>
+      <form id="search-form" class="search"><input id="query" placeholder="What do you want to hear?" autocomplete="off"><button id="search-button" class="btn secondary" type="submit">Search</button><button id="mix-button" class="btn" type="button">Make a mix</button></form>
+      <div id="status" class="status">connecting…</div>
+    </header>
+    <main class="layout">
+      <section>
+        <div class="panel now">
+          <div id="player" class="player"><div></div></div>
+          <div class="player-note">Playback uses YouTube's official embedded player. The Worker does not download or proxy audio.</div>
+          <div class="np"><img id="now-cover" class="cover" alt=""><div class="np-text"><div id="now-title" class="np-title">Nothing queued</div><div id="now-artist" class="np-artist">Search for a song or make a mix.</div></div></div>
+          <div class="controls"><button id="play" class="primary" type="button">Play</button><button id="next" type="button">Next</button><button id="like" type="button">Love</button><button id="shuffle" type="button">Shuffle</button><button id="repeat" type="button">Repeat: off</button></div>
+          <div class="progress"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" max="1" step="1" value="0"><span id="total">0:00</span></div>
+          <div id="message" class="message">Tell the DJ what you want to hear.</div>
+        </div>
+        <div class="panel results"><h2>Search results</h2><div id="results" class="list"><div class="empty">Search YouTube Music to choose a specific song.</div></div></div>
+      </section>
+      <aside class="cols">
+        <div class="panel"><h2>Up next</h2><div id="queue" class="list"><div class="empty">The queue is empty.</div></div></div>
+        <div class="panel"><h2>Love profile</h2><div id="liked" class="list"><div class="empty">Loved songs teach the next mix.</div></div></div>
+      </aside>
+    </main>
+  </div>
+  <div id="toast" class="toast"></div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let state = null;
+    let player = null;
+    let playerReady = false;
+    let pendingState = null;
+    let loadedId = "";
+    let lastProgress = 0;
+    let booted = false;
+
+    const esc = (value) => String(value || "");
+    const mmss = (value) => { const s = Math.max(0, Math.floor(Number(value) || 0)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); };
+    const showToast = (text) => { $("toast").textContent = text; $("toast").classList.add("show"); clearTimeout(showToast.timer); showToast.timer = setTimeout(() => $("toast").classList.remove("show"), 2600); };
+    const setStatus = (text, online = false) => { $("status").textContent = text; $("status").classList.toggle("online", online); };
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, { headers: { "Accept": "application/json", ...(options.headers || {}) }, ...options });
+      if (response.status === 401) { $("login").hidden = false; throw new Error("authentication required"); }
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "request failed");
+      return payload;
+    }
+    const post = (path, fields) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fields || {}) });
+
+    function image(url, alt) { const img = document.createElement("img"); if (url) img.src = url; img.alt = alt || ""; img.loading = "lazy"; img.onerror = () => { img.removeAttribute("src"); }; return img; }
+    function rowElement(track, kind) {
+      const row = document.createElement("div"); row.className = "row";
+      const art = image(track.thumbnail, ""); row.appendChild(art);
+      const main = document.createElement("div"); main.className = "row-main";
+      const title = document.createElement("div"); title.className = "row-title"; title.textContent = track.title || "?"; main.appendChild(title);
+      const sub = document.createElement("div"); sub.className = "row-sub"; sub.textContent = (track.artist || track.channel || "YouTube Music") + (track.duration ? " · " + mmss(track.duration) : ""); main.appendChild(sub); row.appendChild(main);
+      const actions = document.createElement("div"); actions.className = "row-actions";
+      const playButton = document.createElement("button"); playButton.type = "button"; playButton.textContent = "▶"; playButton.title = "Play"; playButton.onclick = () => act("play_row", { id: track.id, track: JSON.stringify(track) }, "play"); actions.appendChild(playButton);
+      if (kind === "queue") { const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "×"; remove.title = "Remove"; remove.onclick = () => act("remove", { id: track.id }); actions.appendChild(remove); }
+      else { const queue = document.createElement("button"); queue.type = "button"; queue.textContent = "+"; queue.title = "Queue next"; queue.onclick = () => act("enqueue", { track: JSON.stringify(track) }); actions.appendChild(queue); }
+      row.appendChild(actions); return row;
+    }
+
+    function render(s) {
+      state = s;
+      const now = s.now || {};
+      $("now-title").textContent = now.title || "Nothing queued";
+      $("now-artist").textContent = now.artist || now.channel || (now.id ? "YouTube Music" : "Search for a song or make a mix.");
+      const cover = $("now-cover"); if (now.thumbnail) cover.src = now.thumbnail; else cover.removeAttribute("src"); cover.alt = now.title || "";
+      cover.onerror = () => cover.removeAttribute("src");
+      $("play").textContent = s.paused ? "Play" : "Pause";
+      $("like").textContent = now.id && s.liked.some((item) => item.id === now.id) ? "Loved" : "Love";
+      $("shuffle").textContent = s.shuffle ? "Shuffle: on" : "Shuffle";
+      $("repeat").textContent = "Repeat: " + s.repeat;
+      $("message").textContent = s.message || "";
+      const total = Number(s.duration || now.duration || 0); $("seek").max = String(Math.max(1, Math.floor(total))); $("seek").value = String(Math.min(total || 0, Math.floor(s.position || 0))); $("elapsed").textContent = mmss(s.position); $("total").textContent = mmss(total);
+      const queue = $("queue"); queue.textContent = ""; if (!s.queue.length) queue.innerHTML = '<div class="empty">Nothing up next. Make another mix when this set ends.</div>'; else s.queue.forEach((track) => queue.appendChild(rowElement(track, "queue")));
+      const liked = $("liked"); liked.textContent = ""; if (!s.liked.length) liked.innerHTML = '<div class="empty">Loved songs teach the next mix.</div>'; else s.liked.slice().reverse().forEach((track) => liked.appendChild(rowElement(track, "liked")));
+      if (playerReady) syncPlayer(s, false); else pendingState = s;
+    }
+
+    function renderResults(rows) {
+      const box = $("results"); box.textContent = "";
+      if (!rows || !rows.length) { box.innerHTML = '<div class="empty">No playable songs survived the music filter.</div>'; return; }
+      rows.forEach((track) => box.appendChild(rowElement(track, "result")));
+    }
+
+    async function act(action, fields = {}, intent = "") {
+      try {
+        const response = await post("/api/action", { action, ...fields });
+        render(response.state); if (response.message) showToast(response.message);
+        if (intent === "play" && player) player.playVideo();
+        if (intent === "pause" && player) player.pauseVideo();
+      } catch (error) { showToast(error.message); }
+    }
+
+    async function search(query) {
+      if (!query) return;
+      $("search-button").disabled = true; $("results").innerHTML = '<div class="empty">Searching YouTube Music…</div>';
+      try { const response = await api("/api/search?q=" + encodeURIComponent(query)); renderResults(response.rows); }
+      catch (error) { $("results").innerHTML = '<div class="empty">' + error.message + '</div>'; }
+      finally { $("search-button").disabled = false; }
+    }
+
+    async function makeMix() {
+      const query = $("query").value.trim(); $("mix-button").disabled = true;
+      try { const response = await actResult("request", { q: query }); render(response.state); }
+      catch (error) { showToast(error.message); }
+      finally { $("mix-button").disabled = false; }
+    }
+    async function actResult(action, fields) { const response = await post("/api/action", { action, ...(fields || {}) }); if (response.message) showToast(response.message); return response; }
+
+    function syncPlayer(s, userIntent) {
+      if (!player || !s.now) return;
+      if (loadedId !== s.now.id) { loadedId = s.now.id; player.loadVideoById({ videoId: s.now.id, startSeconds: Number(s.position || 0) }); if (s.paused) player.pauseVideo(); }
+      else if (userIntent === "play" || (!s.paused && player.getPlayerState && player.getPlayerState() === 2)) player.playVideo();
+      else if (userIntent === "pause" || s.paused) player.pauseVideo();
+    }
+
+    window.onYouTubeIframeAPIReady = () => {
+      player = new YT.Player("player", { width: "100%", height: "100%", videoId: "", playerVars: { playsinline: 1, controls: 1, rel: 0, origin: location.origin }, events: {
+        onReady: () => { playerReady = true; if (pendingState) { const next = pendingState; pendingState = null; syncPlayer(next, ""); } },
+        onStateChange: async (event) => { if (event.data === YT.PlayerState.ENDED) await act("ended", {}, "play"); }
+      }});
+    };
+
+    setInterval(async () => {
+      if (!player || !player.getCurrentTime || !state || !state.now) return;
+      const position = Number(player.getCurrentTime() || 0); const duration = Number(player.getDuration() || state.duration || 0); $("seek").value = String(Math.floor(position)); $("elapsed").textContent = mmss(position); $("total").textContent = mmss(duration);
+      if (Math.abs(position - lastProgress) > 2) { lastProgress = position; post("/api/action", { action: "progress", position: String(position), duration: String(duration) }).catch(() => {}); }
+    }, 1000);
+
+    $("search-form").onsubmit = (event) => { event.preventDefault(); search($("query").value.trim()); };
+    $("mix-button").onclick = makeMix;
+    $("play").onclick = () => act(state && state.paused ? "play" : "pause", {}, state && state.paused ? "play" : "pause");
+    $("next").onclick = () => act("next", {}, "play");
+    $("like").onclick = () => act("like");
+    $("shuffle").onclick = () => act("shuffle");
+    $("repeat").onclick = () => act("repeat");
+    $("seek").onchange = () => { const position = Number($("seek").value); if (player && player.seekTo) player.seekTo(position, true); act("progress", { position: String(position), duration: String(state.duration || 0) }); };
+    $("login-form").onsubmit = async (event) => { event.preventDefault(); $("login-error").textContent = ""; try { await post("/api/login", { password: $("password").value }); $("login").hidden = true; await boot(); } catch (error) { $("login-error").textContent = error.message; } };
+
+    async function boot() {
+      if (booted) return; booted = true; setStatus("loading…");
+      try { const response = await api("/api/state"); render(response); setStatus("online", true); }
+      catch (error) { booted = false; setStatus("offline"); }
+    }
+    async function start() {
+      try { const auth = await api("/api/auth"); if (auth.required && !auth.authenticated) { $("login").hidden = false; setStatus("locked"); return; } await boot(); }
+      catch (error) { setStatus("offline"); showToast(error.message); }
+    }
+    setInterval(async () => { if (!booted || document.hidden) return; try { const response = await api("/api/state"); render(response); setStatus("online", true); } catch (error) { setStatus("offline"); } }, 2500);
+    start();
+  </script>
+  <script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>

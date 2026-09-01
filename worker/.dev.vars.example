@@ -1,0 +1,5 @@
+# Copy this file to .dev.vars for `npm run dev`.
+# Keep it out of git. The deployed equivalents are Wrangler secrets.
+APP_PASSWORD=choose-a-long-private-password
+SESSION_SECRET=replace-with-another-random-secret
+# GEMINI_API_KEY=optional

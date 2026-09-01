@@ -1,2 +1,7 @@
 __pycache__/
 *.py[cod]
+
+# Cloudflare Worker local state and dependencies
+worker/node_modules/
+worker/.wrangler/
+worker/.dev.vars
