@@ -152,6 +152,31 @@ function database(env: Env): D1Database {
   return env.DB;
 }
 
+// The migration remains the source of truth for deploys. This idempotent fallback
+// also makes a newly bound D1 usable when somebody deploys the Worker before
+// running `wrangler d1 migrations apply`; the migration can still be applied later
+// because every statement is guarded with IF NOT EXISTS.
+let accountSchemaPromise: Promise<void> | null = null;
+
+async function ensureAccountSchema(env: Env): Promise<void> {
+  if (accountSchemaPromise) return accountSchemaPromise;
+  const db = database(env);
+  accountSchemaPromise = db.batch([
+    db.prepare("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, created_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS sessions_user_id ON sessions(user_id)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS sessions_expires_at ON sessions(expires_at)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS profiles (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, state_json TEXT NOT NULL, backup_json TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, title TEXT NOT NULL, host_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS room_members (room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, joined_at INTEGER NOT NULL, PRIMARY KEY(room_id, user_id))"),
+    db.prepare("CREATE INDEX IF NOT EXISTS room_members_user_id ON room_members(user_id)"),
+  ]).then(() => undefined).catch((error) => {
+    accountSchemaPromise = null;
+    throw error;
+  });
+  return accountSchemaPromise;
+}
+
 function randomHex(length = 16): string {
   const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
@@ -230,6 +255,7 @@ function clearSessionCookie(request: Request): string {
 }
 
 async function currentUser(request: Request, env: Env): Promise<User | null> {
+  await ensureAccountSchema(env);
   const token = parseCookies(request)[SESSION_COOKIE] || "";
   if (!token) return null;
   const row = await database(env)
@@ -253,6 +279,7 @@ async function createSession(request: Request, env: Env, user: User): Promise<Re
 }
 
 async function signup(request: Request, env: Env): Promise<Response> {
+  await ensureAccountSchema(env);
   const fields = await bodyFields(request);
   const username = clean(fields.username, 32).toLocaleLowerCase();
   const displayName = clean(fields.displayName || username, 60);
@@ -286,6 +313,7 @@ async function signup(request: Request, env: Env): Promise<Response> {
 }
 
 async function login(request: Request, env: Env): Promise<Response> {
+  await ensureAccountSchema(env);
   const fields = await bodyFields(request);
   const username = clean(fields.username, 32).toLocaleLowerCase();
   const password = String(fields.password || "");

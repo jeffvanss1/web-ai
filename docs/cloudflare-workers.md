@@ -56,6 +56,10 @@ Apply both D1 migrations:
 npm run db:migrate:remote
 ```
 
+The Worker also has an idempotent first-request schema bootstrap as a safety net
+for a newly bound D1, but migrations are still the normal deployment path and
+should be applied before relying on production traffic.
+
 Configure the planning/TTS providers as encrypted Wrangler secrets. At minimum,
 none are required: the offline planner and browser speech fallback work without
 AI credentials.
